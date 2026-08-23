@@ -31,6 +31,8 @@ const NeteasePlaylistInfoSchema = z.object({
 
 export type NeteasePlaylistInfo = z.infer<typeof NeteasePlaylistInfoSchema>['playlist'];
 
+const NETEASE_REQUEST_TIMEOUT_MS = 8_000;
+
 export const currentNeteaseSampleTracks = ref<NeteasePlaylistTrack[]>([]);
 
 let cachedPlaylist: {
@@ -52,15 +54,56 @@ function assertPlaylistId(playlistId: string) {
   return normalized;
 }
 
-export async function fetchNeteasePlaylist(playlistId: string): Promise<NeteasePlaylistTrack[]> {
+function createAbortError() {
+  const error = new Error('网易云歌单请求已取消');
+  error.name = 'AbortError';
+  return error;
+}
+
+function assertNotAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw createAbortError();
+}
+
+async function fetchNeteaseJson(endpoint: string, errorLabel: string, signal?: AbortSignal): Promise<unknown> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromParent = () => controller.abort();
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, NETEASE_REQUEST_TIMEOUT_MS);
+
+  if (signal?.aborted) {
+    window.clearTimeout(timer);
+    throw createAbortError();
+  }
+  signal?.addEventListener('abort', abortFromParent, { once: true });
+  try {
+    const response = await fetch(endpoint, { cache: 'no-store', signal: controller.signal });
+    if (!response.ok) throw new Error(`${errorLabel}请求失败 (${response.status})`);
+    return await response.json();
+  } catch (error) {
+    if (signal?.aborted) throw createAbortError();
+    if (timedOut) throw new Error(`${errorLabel}请求超时（8 秒）`, { cause: error });
+    if (error instanceof SyntaxError) throw new Error(`${errorLabel}返回数据无效`, { cause: error });
+    if (error instanceof Error && error.message.startsWith(`${errorLabel}请求失败 (`)) throw error;
+    throw new Error(`${errorLabel}请求失败，请检查网络`, { cause: error });
+  } finally {
+    window.clearTimeout(timer);
+    signal?.removeEventListener('abort', abortFromParent);
+  }
+}
+
+export async function fetchNeteasePlaylist(
+  playlistId: string,
+  signal?: AbortSignal,
+): Promise<NeteasePlaylistTrack[]> {
   const normalizedPlaylistId = assertPlaylistId(playlistId);
   const endpoint =
     'https://music-api.gdstudio.xyz/api.php?types=search_playlist&count=20&source=netease&name=' +
     encodeURIComponent(normalizedPlaylistId);
-  const response = await fetch(endpoint, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`网易云歌单请求失败 (${response.status})`);
-
-  const rawData: unknown = await response.json();
+  const rawData = await fetchNeteaseJson(endpoint, '网易云歌单', signal);
+  assertNotAborted(signal);
   if (!Array.isArray(rawData)) throw new Error('网易云歌单接口返回格式异常');
 
   const tracks = rawData
@@ -76,15 +119,13 @@ export async function fetchNeteasePlaylist(playlistId: string): Promise<NeteaseP
   return tracks;
 }
 
-export async function fetchNeteasePlaylistInfo(playlistId: string): Promise<NeteasePlaylistInfo> {
+export async function fetchNeteasePlaylistInfo(playlistId: string, signal?: AbortSignal): Promise<NeteasePlaylistInfo> {
   const normalizedPlaylistId = assertPlaylistId(playlistId);
   const endpoint =
     'https://music-api.gdstudio.xyz/api.php?types=playlist&source=netease&id=' +
     encodeURIComponent(normalizedPlaylistId);
-  const response = await fetch(endpoint, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`网易云歌单详情请求失败 (${response.status})`);
-
-  const rawData: unknown = await response.json();
+  const rawData = await fetchNeteaseJson(endpoint, '网易云歌单详情', signal);
+  assertNotAborted(signal);
   const parsed = NeteasePlaylistInfoSchema.safeParse(rawData);
   if (!parsed.success) throw new Error('网易云歌单详情中没有可用名称');
   return parsed.data.playlist;
@@ -92,11 +133,12 @@ export async function fetchNeteasePlaylistInfo(playlistId: string): Promise<Nete
 
 export async function refreshNeteasePlaylist(
   playlistId: string,
-  options: { manual?: boolean; sampleCount?: number } = {},
+  options: { manual?: boolean; sampleCount?: number; signal?: AbortSignal } = {},
 ) {
   const normalizedPlaylistId = assertPlaylistId(playlistId);
   const sampleCount = normalizeSampleCount(options.sampleCount ?? 5);
-  const tracks = await fetchNeteasePlaylist(normalizedPlaylistId);
+  const tracks = await fetchNeteasePlaylist(normalizedPlaylistId, options.signal);
+  assertNotAborted(options.signal);
   cachedPlaylist = {
     playlistId: normalizedPlaylistId,
     tracks,

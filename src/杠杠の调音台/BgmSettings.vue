@@ -279,7 +279,9 @@
               placeholder="每行一个 BV 号，也可以粘贴带描述的文本"
               @change="normalizeFallbackBvIds"
             ></textarea>
-            <span class="ganggang-console-settings__hint">保存时只保留 BV 号；B站搜索重试 4 次仍失败后按随机顺序使用。</span>
+            <span class="ganggang-console-settings__hint">
+              保存时只保留 BV 号；B站关键词只搜索 1 次，最多尝试 2 个搜索结果和 1 个备用 BV，仍失败则本轮不播放。
+            </span>
           </div>
 
           <p class="ganggang-console-settings__hint">两个数量的可设置范围都是 1–20。</p>
@@ -292,7 +294,7 @@
 
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { extractBilibiliVideoIds } from './ambient-audio';
 import {
   DEFAULT_NETEASE_PLAYLISTS,
@@ -326,6 +328,22 @@ const playlistNames = ref<Record<string, string>>(
   Object.fromEntries(DEFAULT_NETEASE_PLAYLISTS.map(playlist => [playlist.id, playlist.name])),
 );
 const fallbackBvInput = ref(settings.value.ambient_fallback_bv_ids.join('\n'));
+type PlaylistRequest = { controller: AbortController };
+let activePlaylistRequest: PlaylistRequest | null = null;
+
+function abortActivePlaylistRequest() {
+  activePlaylistRequest?.controller.abort();
+  activePlaylistRequest = null;
+  loading.value = false;
+}
+
+function isActivePlaylistRequest(request: PlaylistRequest) {
+  return activePlaylistRequest === request && !request.controller.signal.aborted;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === 'AbortError';
+}
 
 type CountSetting = 'playlist_limit' | 'playlist_sample_count';
 
@@ -385,6 +403,8 @@ watch(
   sourceMode => {
     if (sourceMode === 'netease_playlist' && settings.value.playlist_id) {
       void loadPlaylist(settings.value.playlist_id, false);
+    } else {
+      abortActivePlaylistRequest();
     }
   },
 );
@@ -405,15 +425,20 @@ function normalizeFallbackBvIds() {
 }
 
 async function loadPlaylist(playlistId = playlistInput.value, manual = true) {
+  abortActivePlaylistRequest();
   const normalizedPlaylistId = playlistId.trim();
   if (!/^\d+$/.test(normalizedPlaylistId)) {
     errorMessage.value = '歌单 ID 必须是数字';
     loadedPlaylistId.value = '';
     loadedTrackCount.value = 0;
     loadedSampleTracks.value = [];
+    loading.value = false;
+    nameLoadError.value = '';
     return;
   }
 
+  const request: PlaylistRequest = { controller: new AbortController() };
+  activePlaylistRequest = request;
   settings.value.playlist_id = normalizedPlaylistId;
   playlistInput.value = normalizedPlaylistId;
   renameInput.value = getPlaylistDisplayName(normalizedPlaylistId);
@@ -425,24 +450,32 @@ async function loadPlaylist(playlistId = playlistInput.value, manual = true) {
     const tracks = await refreshNeteasePlaylist(normalizedPlaylistId, {
       manual,
       sampleCount: settings.value.playlist_sample_count,
+      signal: request.controller.signal,
     });
+    if (!isActivePlaylistRequest(request)) return;
     loadedPlaylistId.value = normalizedPlaylistId;
     loadedTrackCount.value = tracks.length;
     loadedSampleTracks.value = getCachedNeteasePlaylist(normalizedPlaylistId)?.sampledTracks ?? [];
     try {
-      const info = await fetchNeteasePlaylistInfo(normalizedPlaylistId);
+      const info = await fetchNeteasePlaylistInfo(normalizedPlaylistId, request.controller.signal);
+      if (!isActivePlaylistRequest(request)) return;
       playlistNames.value[normalizedPlaylistId] = info.name;
       renameInput.value = getPlaylistDisplayName(normalizedPlaylistId);
     } catch (error) {
+      if (!isActivePlaylistRequest(request) || isAbortError(error)) return;
       nameLoadError.value = error instanceof Error ? error.message : String(error);
     }
   } catch (error) {
+    if (!isActivePlaylistRequest(request) || isAbortError(error)) return;
     loadedPlaylistId.value = '';
     loadedTrackCount.value = 0;
     loadedSampleTracks.value = [];
     errorMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
-    loading.value = false;
+    if (isActivePlaylistRequest(request)) {
+      loading.value = false;
+      activePlaylistRequest = null;
+    }
   }
 }
 
@@ -455,6 +488,7 @@ function clearLoadedPlaylistState() {
 }
 
 function prepareNewPlaylist() {
+  abortActivePlaylistRequest();
   settings.value.playlist_id = '';
   playlistInput.value = '';
   renameInput.value = '';
@@ -517,6 +551,10 @@ onMounted(() => {
   if (settings.value.source_mode === 'netease_playlist' && settings.value.playlist_id) {
     void loadPlaylist(settings.value.playlist_id, false);
   }
+});
+
+onBeforeUnmount(() => {
+  abortActivePlaylistRequest();
 });
 </script>
 

@@ -318,6 +318,7 @@ let activeGenerationSourceContext: BgmSourceContext | null = null;
 let ambientGenerationId = 0;
 let activeAmbientScanner: AmbientMarkerScanner | null = null;
 let activeAmbientGenerationId = 0;
+let activeAmbientRequestController: AbortController | null = null;
 
 type RuntimeAudit = {
   run_id: number;
@@ -578,6 +579,9 @@ function isCurrentMusicGeneration(runId: number) {
 
 const BGM_FADE_DURATION_MS = 1_000;
 const BGM_FADE_STEP_MS = 100;
+const AUDIO_PLAYBACK_CHECK_INTERVAL_MS = 100;
+const AUDIO_PLAYBACK_CHECK_TIMEOUT_MS = 2_000;
+const JOOX_REQUEST_TIMEOUT_MS = 8_000;
 let bgmTransitionId = 0;
 let bgmTransitionTargetVolume: number | null = null;
 
@@ -604,9 +608,15 @@ function resetBgmGeneration() {
   cancelBgmTransition();
 }
 
+function abortActiveAmbientRequest() {
+  activeAmbientRequestController?.abort();
+  activeAmbientRequestController = null;
+}
+
 function resetAmbientGeneration() {
   activeAmbientGenerationId = 0;
   activeAmbientScanner = null;
+  abortActiveAmbientRequest();
 }
 
 function resetAudioGenerationState() {
@@ -616,6 +626,51 @@ function resetAudioGenerationState() {
 
 function waitForBgmFadeStep() {
   return new Promise<void>(resolve => window.setTimeout(resolve, BGM_FADE_STEP_MS));
+}
+
+function waitForAudioPlaybackCheckStep() {
+  return new Promise<void>(resolve => window.setTimeout(resolve, AUDIO_PLAYBACK_CHECK_INTERVAL_MS));
+}
+
+function assertBgmPlayback(audio: Audio) {
+  const current = getCurrentAudio('bgm');
+  const isTargetAudio = current.src === audio.url || current.title === audio.title;
+  if (current.playing && isTargetAudio) return current;
+
+  throw new Error('BGM 未确认开始播放');
+}
+
+async function waitForBgmPlaybackCheck(runId: number, audio: Audio) {
+  const deadline = Date.now() + AUDIO_PLAYBACK_CHECK_TIMEOUT_MS;
+  while (isCurrentMusicGeneration(runId) && Date.now() < deadline) {
+    try {
+      return assertBgmPlayback(audio);
+    } catch {
+      await waitForAudioPlaybackCheckStep();
+    }
+  }
+  if (!isCurrentMusicGeneration(runId)) return null;
+  return assertBgmPlayback(audio);
+}
+
+async function fetchJooxJson(endpoint: string, errorLabel: string): Promise<unknown> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, JOOX_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    if (!response.ok) throw new Error(`${errorLabel}请求失败 (${response.status})`);
+    return await response.json();
+  } catch (error) {
+    if (timedOut) throw new Error(`${errorLabel}请求超时（8 秒）`, { cause: error });
+    throw new Error(errorText(error), { cause: error });
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function fadeBgmVolume(runId: number, transitionId: number, from: number, to: number) {
@@ -639,6 +694,8 @@ async function playBgmAudioWithFade(runId: number, audio: Audio) {
   if (!currentAudio.playing) {
     const playlist = maintainBgmPlaylist(audio);
     playAudio('bgm', audio);
+    const playback = await waitForBgmPlaybackCheck(runId, audio);
+    if (!playback || !isCurrentMusicGeneration(runId)) return null;
     return playlist;
   }
 
@@ -651,6 +708,8 @@ async function playBgmAudioWithFade(runId: number, audio: Audio) {
     const playlist = maintainBgmPlaylist(audio);
     setAudioSettings('bgm', { volume: targetVolume });
     playAudio('bgm', audio);
+    const playback = await waitForBgmPlaybackCheck(runId, audio);
+    if (!playback || !isCurrentMusicGeneration(runId)) return null;
     return playlist;
   } finally {
     if (transitionId === bgmTransitionId) {
@@ -658,6 +717,20 @@ async function playBgmAudioWithFade(runId: number, audio: Audio) {
       setAudioSettings('bgm', { volume: targetVolume });
     }
   }
+}
+
+function pauseAudioSafely(type: 'bgm' | 'ambient') {
+  try {
+    pauseAudio(type);
+  } catch (error) {
+    const moduleName = type === 'bgm' ? 'BGM' : '环境音';
+    debugWarn(`<杠杠-${moduleName}> 暂停失败音频时出错`, { message: errorText(error) });
+  }
+}
+
+function pauseFailedBgmPlayback() {
+  pauseAudioSafely('bgm');
+  cancelBgmTransition();
 }
 
 async function searchAndPlayBgm(runId: number, song: string, singer: string, sourceContext: BgmSourceContext) {
@@ -673,12 +746,11 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
   let playlistState = { before_count: 0, removed_count: 0, after_count: 0 };
 
   try {
-    const searchRes = await fetch(
+    const searchData = await fetchJooxJson(
       'https://music-api.gdstudio.xyz/api.php?types=search&source=joox&name=' + encodeURIComponent(query) + '&count=5',
+      'JOOX 搜歌',
     );
-    if (!searchRes.ok) throw new Error(`JOOX 搜歌请求失败 (${searchRes.status})`);
 
-    const searchData: unknown = await searchRes.json();
     const firstTrack = Array.isArray(searchData) ? searchData[0] : undefined;
     const rawTrackId = firstTrack && typeof firstTrack === 'object' ? (firstTrack as { id?: unknown }).id : undefined;
     if (typeof rawTrackId !== 'string' && typeof rawTrackId !== 'number') {
@@ -689,12 +761,10 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     if (!isCurrentMusicGeneration(runId)) return;
     if (!trackId) throw new Error('没有可用的 JOOX 歌曲 id');
 
-    const urlRes = await fetch(
+    const urlData = await fetchJooxJson(
       `https://music-api.gdstudio.xyz/api.php?types=url&source=${musicSource}&id=${encodeURIComponent(trackId)}&br=320`,
+      'JOOX 歌曲 URL',
     );
-    if (!urlRes.ok) throw new Error(`JOOX 歌曲 URL 请求失败 (${urlRes.status})`);
-
-    const urlData: unknown = await urlRes.json();
     const audioUrl =
       urlData && typeof urlData === 'object' && typeof (urlData as { url?: unknown }).url === 'string'
         ? (urlData as { url: string }).url
@@ -703,6 +773,7 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     urlResolved = true;
 
     if (!isCurrentMusicGeneration(runId)) return;
+    runtimeAudit.music_lookup = { status: 'success', source: musicSource, query, track_id: trackId, error: null };
 
     const title = `${song} - ${singer}`;
     const playlist = await playBgmAudioWithFade(runId, { title, url: audioUrl });
@@ -727,6 +798,7 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     if (!isCurrentMusicGeneration(runId)) return;
 
     const message = errorText(error);
+    pauseFailedBgmPlayback();
     if (!urlResolved) {
       runtimeAudit.music_lookup = { status: 'fail', source: musicSource, query, track_id: trackId, error: message };
     }
@@ -771,10 +843,6 @@ function markAmbientReused(runId: number, action: AmbientAction, current: Return
   });
 }
 
-function waitForAmbientPlaybackCheck() {
-  return new Promise<void>(resolve => window.setTimeout(resolve, 100));
-}
-
 function assertAmbientPlayback(audio: Audio) {
   const current = getCurrentAmbientState();
   const isTargetAudio = current.src === audio.url || current.title === audio.title;
@@ -786,6 +854,19 @@ function assertAmbientPlayback(audio: Audio) {
   );
 }
 
+async function waitForAmbientPlaybackCheck(runId: number, audio: Audio) {
+  const deadline = Date.now() + AUDIO_PLAYBACK_CHECK_TIMEOUT_MS;
+  while (isCurrentAmbientGeneration(runId) && Date.now() < deadline) {
+    try {
+      return assertAmbientPlayback(audio);
+    } catch {
+      await waitForAudioPlaybackCheckStep();
+    }
+  }
+  if (!isCurrentAmbientGeneration(runId)) return null;
+  return assertAmbientPlayback(audio);
+}
+
 async function resumeCurrentAmbient(
   runId: number,
   action: AmbientAction,
@@ -795,13 +876,16 @@ async function resumeCurrentAmbient(
 
   try {
     playAudio('ambient', { title: current.title || action.title, url: current.src });
-    await waitForAmbientPlaybackCheck();
-    if (!isCurrentAmbientGeneration(runId)) return true;
-    const resumed = assertAmbientPlayback({ title: current.title || action.title, url: current.src });
+    const resumed = await waitForAmbientPlaybackCheck(runId, {
+      title: current.title || action.title,
+      url: current.src,
+    });
+    if (!resumed || !isCurrentAmbientGeneration(runId)) return true;
     markAmbientReused(runId, action, resumed);
     return true;
   } catch (error) {
     if (isCurrentAmbientGeneration(runId)) {
+      pauseAudioSafely('ambient');
       debugWarn('<杠杠-环境音> 当前音频恢复播放失败，将重新搜索', {
         generationId: runId,
         location: action.location,
@@ -816,16 +900,26 @@ async function searchAndPlayAmbient(runId: number, action: AmbientAction) {
   if (!isCurrentAmbientGeneration(runId)) return;
 
   const fallbackBvids = bgmSettingsStore.settings.ambient_fallback_bv_ids;
+  abortActiveAmbientRequest();
+  const requestController = new AbortController();
+  activeAmbientRequestController = requestController;
+  const isActiveRequest = () =>
+    isCurrentAmbientGeneration(runId) &&
+    activeAmbientRequestController === requestController &&
+    !requestController.signal.aborted;
+
   try {
-    const result = await resolveBilibiliAmbientAudio(action.location, fallbackBvids, {
-      shouldContinue: () => isCurrentAmbientGeneration(runId),
-      onSearchAttempt: (attempt, query) => {
-        if (!isCurrentAmbientGeneration(runId)) return;
+    const resolveOptions = {
+      signal: requestController.signal,
+      shouldContinue: isActiveRequest,
+      onSearchAttempt: (attempt: number, query: string) => {
+        if (!isActiveRequest()) return;
         runtimeAudit.ambient.search_attempts = attempt;
         debugInfo('<杠杠-环境音> 搜索 B站环境音', { generationId: runId, attempt, query });
       },
-    });
-    if (!isCurrentAmbientGeneration(runId)) return;
+    };
+    const result = await resolveBilibiliAmbientAudio(action.location, fallbackBvids, resolveOptions);
+    if (!isActiveRequest()) return;
 
     const latestCurrent = getCurrentAmbientState();
     if (
@@ -842,9 +936,8 @@ async function searchAndPlayAmbient(runId: number, action: AmbientAction) {
     };
     replaceAudioList('ambient', [audio]);
     playAudio('ambient', audio);
-    await waitForAmbientPlaybackCheck();
-    if (!isCurrentAmbientGeneration(runId)) return;
-    const playbackState = assertAmbientPlayback(audio);
+    const playbackState = await waitForAmbientPlaybackCheck(runId, audio);
+    if (!playbackState || !isActiveRequest()) return;
     runtimeAudit.ambient = {
       ...runtimeAudit.ambient,
       status: 'success',
@@ -862,8 +955,9 @@ async function searchAndPlayAmbient(runId: number, action: AmbientAction) {
       bvid: result.bvid,
     });
   } catch (error) {
-    if (!isCurrentAmbientGeneration(runId)) return;
+    if (!isActiveRequest()) return;
     const message = errorText(error);
+    pauseAudioSafely('ambient');
     runtimeAudit.ambient = {
       ...runtimeAudit.ambient,
       status: 'fail',
@@ -871,6 +965,8 @@ async function searchAndPlayAmbient(runId: number, action: AmbientAction) {
     };
     runtimeAudit.last_error = message;
     debugWarn('<杠杠-环境音> 搜索或播放失败', { generationId: runId, location: action.location, message });
+  } finally {
+    if (activeAmbientRequestController === requestController) activeAmbientRequestController = null;
   }
 }
 
@@ -914,7 +1010,7 @@ function startGeneration() {
   if (!isBgmEnabled()) return;
   generationId += 1;
   const currentGenerationId = generationId;
-  const currentSourceContext = getConfiguredBgmSourceContext();
+  const currentSourceContext = activeGenerationSourceContext ?? getConfiguredBgmSourceContext();
   activeGenerationSourceContext = currentSourceContext;
   activeMusicGenerationId = currentGenerationId;
   runtimeAudit.run_id = currentGenerationId;
@@ -959,6 +1055,7 @@ function startGeneration() {
 
 function startAmbientGeneration() {
   if (!isAmbientEnabled()) return;
+  abortActiveAmbientRequest();
   ambientGenerationId += 1;
   const currentAmbientGenerationId = ambientGenerationId;
   activeAmbientGenerationId = currentAmbientGenerationId;
