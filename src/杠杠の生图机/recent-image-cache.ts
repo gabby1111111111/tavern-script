@@ -1,66 +1,104 @@
-import { ref, type Ref } from 'vue';
+import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import type { ImageResource } from './image-api';
+import { createImageArtifact, type ImageArtifact, type ImageArtifactInput } from './image-system';
 
-export const MAX_RECENT_GENERATED_IMAGES = 10;
+export const MAX_RECENT_GENERATED_IMAGES = 5;
 
-export type RecentGeneratedImage = {
-  id: string;
-  url: string;
+export type RecentGeneratedImage = ImageArtifact & {
   source: '随文插图' | '礼物 CG';
-  chatId: string;
   messageId: number | null;
   swipeId: number | null;
   imageIndex: number | null;
   giftTaskId?: string;
-  createdAt: number;
 };
 
-type RecentImageTarget = Pick<RecentGeneratedImage, 'chatId' | 'messageId' | 'swipeId' | 'imageIndex'> & {
-  source?: RecentGeneratedImage['source'];
-  giftTaskId?: string;
+export type RecentImageCacheOptions = {
+  onRemove?: (artifact: ImageArtifact) => void;
 };
 
-function releaseResource(release: (() => void) | undefined): void {
-  release?.();
+function cloneResource(resource: ImageResource): ImageResource | null {
+  return resource.clone?.() ?? (resource.kind === 'remote-url' ? { url: resource.url, kind: 'remote-url' } : null);
 }
 
 export class RecentImageCache {
-  readonly images: Ref<RecentGeneratedImage[]> = ref([]);
-  private readonly releases = new Map<string, () => void>();
-  private sequence = 0;
+  readonly artifacts: Ref<ImageArtifact[]> = ref([]);
+  readonly images: ComputedRef<RecentGeneratedImage[]> = computed(() =>
+    this.artifacts.value.map(artifact => ({
+      ...artifact,
+      source: artifact.purpose === 'gift' ? '礼物 CG' : '随文插图',
+      messageId: artifact.target.messageId,
+      swipeId: artifact.target.swipeId,
+      imageIndex: artifact.target.imageIndex,
+      giftTaskId: artifact.target.giftTaskId,
+    })),
+  );
+  private readonly resources = new Map<string, ImageResource>();
+  private pinnedId: string | null = null;
 
-  add(target: RecentImageTarget, resource: ImageResource): RecentGeneratedImage | null {
-    const ownedResource = resource.clone?.() ?? (resource.kind === 'remote-url' ? resource : null);
+  constructor(private readonly options: RecentImageCacheOptions = {}) {}
+
+  get pinnedArtifactId(): string | null {
+    return this.pinnedId;
+  }
+
+  add(input: ImageArtifactInput, resource: ImageResource): ImageArtifact | null {
+    const ownedResource = cloneResource(resource);
     if (!ownedResource) return null;
 
-    const entry: RecentGeneratedImage = {
-      id: `recent-${Date.now()}-${this.sequence++}`,
-      url: ownedResource.url,
-      source: target.source ?? '随文插图',
-      chatId: target.chatId,
-      messageId: target.messageId,
-      swipeId: target.swipeId,
-      imageIndex: target.imageIndex,
-      giftTaskId: target.giftTaskId,
-      createdAt: Date.now(),
-    };
-    this.releases.set(entry.id, () => ownedResource.revoke?.());
+    const artifact = createImageArtifact(input, ownedResource.url);
+    this.resources.set(artifact.id, ownedResource);
 
-    const next = [entry, ...this.images.value];
-    const overflow = next.splice(MAX_RECENT_GENERATED_IMAGES);
-    overflow.forEach(item => this.release(item.id));
-    this.images.value = next;
-    return entry;
+    const next = [artifact, ...this.artifacts.value];
+    const overflow: ImageArtifact[] = [];
+    while (next.length > MAX_RECENT_GENERATED_IMAGES) {
+      let evictionIndex = next.length - 1;
+      while (evictionIndex >= 0 && next[evictionIndex].id === this.pinnedId) evictionIndex -= 1;
+      if (evictionIndex < 0) break;
+      overflow.push(...next.splice(evictionIndex, 1));
+    }
+    this.artifacts.value = next;
+    overflow.forEach(item => this.release(item));
+    return this.artifacts.value.find(item => item.id === artifact.id)!;
+  }
+
+  pinArtifact(artifactId: string): boolean {
+    if (!this.artifacts.value.some(artifact => artifact.id === artifactId)) return false;
+    this.pinnedId = artifactId;
+    return true;
+  }
+
+  clearPinnedArtifact(): void {
+    this.pinnedId = null;
+  }
+
+  cloneResource(artifactId: string): ImageResource | null {
+    const resource = this.resources.get(artifactId);
+    return resource ? cloneResource(resource) : null;
+  }
+
+  getArtifact(artifactId: string): ImageArtifact | undefined {
+    return this.artifacts.value.find(artifact => artifact.id === artifactId);
   }
 
   clear(): void {
-    this.images.value.forEach(item => this.release(item.id));
-    this.images.value = [];
+    const removed = this.artifacts.value;
+    this.artifacts.value = [];
+    this.clearPinnedArtifact();
+    removed.forEach(item => this.release(item));
   }
 
-  private release(id: string): void {
-    const release = this.releases.get(id);
-    releaseResource(release);
-    this.releases.delete(id);
+  remove(id: string): boolean {
+    const artifact = this.artifacts.value.find(item => item.id === id);
+    if (!artifact) return false;
+    this.artifacts.value = this.artifacts.value.filter(item => item.id !== id);
+    if (this.pinnedId === id) this.clearPinnedArtifact();
+    this.release(artifact);
+    return true;
+  }
+
+  private release(artifact: ImageArtifact): void {
+    this.resources.get(artifact.id)?.revoke?.();
+    this.resources.delete(artifact.id);
+    this.options.onRemove?.(artifact);
   }
 }

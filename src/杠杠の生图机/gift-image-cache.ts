@@ -1,7 +1,8 @@
 import { ref, type Ref } from 'vue';
 import type { ImageResource, GiftImageRequestMode } from './image-api';
+import type { ImageIntent } from './image-system';
 
-export const MAX_GIFT_IMAGE_TASKS = 10;
+export const MAX_GIFT_IMAGE_TASKS = 5;
 
 export type GiftImageTaskStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
 
@@ -18,20 +19,25 @@ export type GiftImageTask = {
   templateImageName: string;
   requestMode: GiftImageRequestMode;
   referenceCount: number;
+  intent: ImageIntent;
+  artifactId: string | null;
   abortController: AbortController;
 };
 
 export type GiftImageTarget = Pick<
   GiftImageTask,
-  'chatId' | 'messageId' | 'swipeId' | 'characterReferenceName' | 'templateImageName' | 'requestMode' | 'referenceCount'
+  | 'chatId'
+  | 'messageId'
+  | 'swipeId'
+  | 'characterReferenceName'
+  | 'templateImageName'
+  | 'requestMode'
+  | 'referenceCount'
+  | 'intent'
 >;
 
 export function giftImageTaskKey(task: Pick<GiftImageTask, 'chatId' | 'messageId' | 'swipeId' | 'id'>): string {
   return `${task.chatId}::${task.messageId ?? 'none'}::${task.swipeId ?? 'none'}::${task.id}`;
-}
-
-function releaseImage(image: ImageResource | null): void {
-  image?.revoke?.();
 }
 
 export class GiftImageCache {
@@ -45,6 +51,7 @@ export class GiftImageCache {
       image: null,
       error: null,
       createdAt: Date.now(),
+      artifactId: null,
       abortController: new AbortController(),
       ...target,
     };
@@ -52,7 +59,7 @@ export class GiftImageCache {
     const overflow = next.splice(MAX_GIFT_IMAGE_TASKS);
     overflow.forEach(item => this.release(item));
     this.tasks.value = next;
-    return task;
+    return this.tasks.value.find(item => item.id === task.id)!;
   }
 
   clear(): void {
@@ -65,10 +72,14 @@ export class GiftImageCache {
     return this.tasks.value.some(item => giftImageTaskKey(item) === key);
   }
 
+  hasActive(): boolean {
+    return this.tasks.value.some(task => task.status === 'pending' || task.status === 'running');
+  }
+
   private release(task: GiftImageTask): void {
     task.abortController.abort();
     task.status = task.status === 'pending' || task.status === 'running' ? 'cancelled' : task.status;
-    releaseImage(task.image);
+    task.image?.revoke?.();
     task.image = null;
   }
 }

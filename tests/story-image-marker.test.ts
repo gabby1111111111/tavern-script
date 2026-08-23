@@ -4,6 +4,17 @@ import {
   extractInlineImagePrompts,
   scanInlineImagePrompts,
 } from '../src/杠杠の生图机/marker';
+import {
+  createImageTask,
+  deriveGenerationStatus,
+  imageTaskKey,
+  ImageTaskCache,
+  MAX_IMAGE_TASKS,
+  type ImageTask,
+} from '../src/杠杠の生图机/task-cache';
+import { GiftImageCache, MAX_GIFT_IMAGE_TASKS } from '../src/杠杠の生图机/gift-image-cache';
+import { createImageIntent } from '../src/杠杠の生图机/image-system';
+import { MAX_RECENT_GENERATED_IMAGES, RecentImageCache } from '../src/杠杠の生图机/recent-image-cache';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -14,6 +25,153 @@ function equal(actual: unknown, expected: unknown, message: string): void {
     throw new Error(`${message}: actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`);
   }
 }
+
+const taskIdentity = { chatId: 'chat-a', messageId: 7, swipeId: 0, imageIndex: 1 };
+equal(imageTaskKey(taskIdentity), 'chat-a::7::0::1', '图片任务身份必须包含四元组');
+assert(
+  imageTaskKey(taskIdentity) !== imageTaskKey({ ...taskIdentity, swipeId: 1 }),
+  '不同 swipe 不得复用同一图片任务身份',
+);
+
+function makeTask(overrides: Partial<ImageTask> = {}): ImageTask {
+  const intent = createImageIntent({
+    purpose: 'current',
+    chatId: 'chat-a',
+    prompt: 'test',
+    requestedTarget: {
+      kind: 'inline-anchor',
+      messageId: 7,
+      swipeId: 0,
+      imageIndex: 0,
+      paragraphIndex: 0,
+      anchorTextBefore: '',
+      anchorTextAfter: '',
+    },
+  });
+  return {
+    chatId: 'chat-a',
+    messageId: 7,
+    swipeId: 0,
+    imageIndex: 0,
+    generationId: 'generation-1',
+    intent,
+    artifactId: null,
+    status: 'pending',
+    image: null,
+    error: null,
+    abortController: new AbortController(),
+    createdAt: Date.now(),
+    paragraphIndex: 0,
+    anchorTextBefore: '',
+    anchorTextAfter: '',
+    ...overrides,
+  };
+}
+
+function makeGiftIntent() {
+  return createImageIntent({
+    purpose: 'gift',
+    chatId: 'chat-a',
+    prompt: 'gift test',
+    requestedTarget: null,
+  });
+}
+
+equal(deriveGenerationStatus([{ status: 'success' }, { status: 'running' }]), 'running', '仍有任务运行时不能提前成功');
+equal(deriveGenerationStatus([{ status: 'success' }, { status: 'failed' }]), 'fail', '任一失败应聚合为失败');
+equal(
+  deriveGenerationStatus([{ status: 'success' }, { status: 'cancelled' }]),
+  'success',
+  '全部终态且无失败应聚合为成功',
+);
+
+const generationEvictions: ImageTask[] = [];
+const generationCache = new ImageTaskCache({ onRemove: task => generationEvictions.push(task) });
+let revoked = 0;
+const firstGenerationTask = makeTask({
+  generationId: 'generation-1',
+  image: { url: 'blob:first', kind: 'object-url', revoke: () => revoked++ },
+});
+generationCache.set(firstGenerationTask);
+const secondGenerationTask = makeTask({ generationId: 'generation-2' });
+generationCache.set(secondGenerationTask);
+assert(generationCache.get(imageTaskKey(firstGenerationTask)) === secondGenerationTask, '新 generation 应替换旧 task');
+assert(firstGenerationTask.abortController.signal.aborted, '替换旧 generation 必须 abort 旧 task');
+assert(firstGenerationTask.image === null, '替换旧 task 必须释放自己的资源');
+equal(revoked, 1, '旧 task 的 object URL 只应释放一次');
+assert(generationEvictions.includes(firstGenerationTask), '替换旧 task 应触发移除回调');
+
+const boundedCache = new ImageTaskCache({ onRemove: task => generationEvictions.push(task) });
+const boundedTasks = Array.from({ length: MAX_IMAGE_TASKS + 1 }, (_unused, index) => {
+  const task = makeTask({ messageId: index + 1, createdAt: index });
+  boundedCache.set(task);
+  return task;
+});
+equal(boundedCache.values().length, MAX_IMAGE_TASKS, 'inline cache 必须限制为十个 task');
+assert(boundedTasks[0].abortController.signal.aborted, 'inline cache 淘汰必须 abort 最旧 task');
+assert(generationEvictions.includes(boundedTasks[0]), 'inline cache 淘汰必须触发移除回调');
+
+const giftCache = new GiftImageCache();
+const reactiveGiftTask = giftCache.createPending({
+  chatId: 'chat-a',
+  messageId: 100,
+  swipeId: 0,
+  characterReferenceName: '角色 1、角色 2',
+  templateImageName: '模板图',
+  requestMode: 'json-reference',
+  referenceCount: 3,
+  intent: makeGiftIntent(),
+});
+assert(reactiveGiftTask === giftCache.tasks.value[0], 'createPending 必须返回 ref 数组中实际保存的 reactive task');
+assert(reactiveGiftTask.intent.purpose === 'gift', 'gift task 必须携带 gift intent');
+assert(reactiveGiftTask.artifactId === null, 'gift task 成功前不得伪造 artifactId');
+reactiveGiftTask.status = 'success';
+reactiveGiftTask.image = {
+  url: 'blob:gift-reactive',
+  kind: 'object-url',
+  revoke: () => undefined,
+};
+equal(giftCache.tasks.value[0].status, 'success', 'gift task 状态修改必须立即对缓存消费者可见');
+equal(giftCache.tasks.value[0].image?.url, 'blob:gift-reactive', 'gift task 图片修改必须立即对缓存消费者可见');
+giftCache.clear();
+
+const giftTasks = Array.from({ length: MAX_GIFT_IMAGE_TASKS + 1 }, (_unused, index) =>
+  giftCache.createPending({
+    chatId: 'chat-a',
+    messageId: index,
+    swipeId: 0,
+    characterReferenceName: '角色 1、角色 2',
+    templateImageName: '模板图',
+    requestMode: 'json-reference',
+    referenceCount: 3,
+    intent: makeGiftIntent(),
+  }),
+);
+equal(giftCache.tasks.value.length, MAX_GIFT_IMAGE_TASKS, 'gift cache 必须限制为五个 task');
+assert(giftTasks[0].status === 'cancelled', 'gift cache 淘汰必须取消最旧 task');
+assert(giftTasks[0].abortController.signal.aborted, 'gift cache 淘汰必须 abort 最旧 task');
+
+const recentCache = new RecentImageCache();
+for (let index = 0; index < MAX_RECENT_GENERATED_IMAGES + 1; index += 1) {
+  recentCache.add(
+    {
+      sourceIntentId: `intent-${index}`,
+      purpose: 'current',
+      origin: 'generated',
+      chatId: 'chat-a',
+      target: { messageId: index, swipeId: 0, imageIndex: 0 },
+    },
+    {
+      url: `blob:recent-${index}`,
+      kind: 'object-url',
+      clone: () => ({ url: `blob:recent-${index}-clone`, kind: 'object-url', revoke: () => undefined }),
+    },
+  );
+}
+equal(recentCache.images.value.length, MAX_RECENT_GENERATED_IMAGES, 'recent cache 必须限制为五个图片');
+const recentId = recentCache.images.value[0].id;
+assert(recentCache.remove(recentId), 'recent cache 应支持移除加载失败的图片');
+assert(!recentCache.images.value.some(image => image.id === recentId), '移除后 recent cache 不应保留破图');
 
 const two = extractInlineImagePrompts('第一段\n\n<pic prompt="one &amp; moon">\n\n第二段 <pic prompt="two">结束');
 equal(
@@ -27,6 +185,15 @@ equal(
   '标记 index 稳定',
 );
 assert(two[1].paragraphIndex === 2, '第二个标记应落在第二个正文段落之后');
+const createdTask = createImageTask(two[0], {
+  chatId: 'chat-a',
+  messageId: 7,
+  swipeId: 0,
+  generationId: 'generation-created',
+});
+assert(createdTask.intent.purpose === 'current', 'inline task 必须携带 current intent');
+equal(createdTask.intent.prompt, 'one & moon', 'inline 请求必须从 task intent 读取原提示词');
+assert(createdTask.artifactId === null, 'inline task 成功前不得伪造 artifactId');
 
 const truncated = scanInlineImagePrompts('<pic prompt="one"><pic prompt="two"><pic prompt="three"><pic prompt="four">');
 equal(truncated.markers.length, 2, '最多处理两个标记');

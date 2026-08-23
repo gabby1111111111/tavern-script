@@ -125,10 +125,12 @@
               <span class="story-image-settings__label">触发方式</span>
               <select id="story-image-gift-trigger" v-model="settings.gift.triggerInterval" class="text_pole">
                 <option value="manual">手动生成</option>
-                <option value="3">每 3 条 AI 回复（预留）</option>
-                <option value="5">每 5 条 AI 回复（预留）</option>
+                <option value="3">每 3 条 AI 回复</option>
+                <option value="5">每 5 条 AI 回复</option>
               </select>
-              <small class="story-image-settings__description">当前只执行手动按钮，自动楼层触发暂不发起请求。</small>
+              <small class="story-image-settings__description">
+                只按首次出现的新 AI 楼层计数；到点时若参考图不齐或已有任务，直接跳过且不补跑。
+              </small>
             </label>
             <label class="story-image-settings__field" for="story-image-gift-request-mode">
               <span class="story-image-settings__label">图生图请求模式</span>
@@ -140,7 +142,23 @@
               </select>
             </label>
             <label
-              v-if="settings.gift.requestMode === 'json-reference' || settings.gift.requestMode === 'auto'"
+              v-if="settings.gift.requestMode === 'multipart-edit' || settings.gift.requestMode === 'auto'"
+              class="story-image-settings__field"
+              for="story-image-gift-multipart-field"
+            >
+              <span class="story-image-settings__label">multipart 图片字段</span>
+              <select
+                id="story-image-gift-multipart-field"
+                v-model="settings.gift.multipartImageField"
+                class="text_pole"
+              >
+                <option value="auto">自动（OpenAI image[]／中转 image）</option>
+                <option value="image">image</option>
+                <option value="image[]">image[]</option>
+              </select>
+            </label>
+            <label
+              v-if="settings.gift.requestMode === 'json-reference'"
               class="story-image-settings__field"
               for="story-image-gift-reference-field"
             >
@@ -280,8 +298,15 @@
           <div class="story-image-settings__recent-intro">
             <h4 class="story-image-settings__section-title">最近生成</h4>
             <p class="story-image-settings__description">
-              仅保留本次网页会话内最近成功生成的 10 张图片；刷新网页或脚本重载后会清空。
+              仅保留本次网页会话内最近成功生成的 5 张图片；刷新网页或脚本重载后会清空。
             </p>
+            <button
+              class="story-image-settings__button story-image-settings__button--quiet"
+              type="button"
+              @click="undoLastReuse"
+            >
+              撤回上一次复用
+            </button>
           </div>
 
           <p v-if="recentImages.length === 0" class="story-image-settings__recent-empty">
@@ -295,24 +320,71 @@
               role="listitem"
             >
               <div class="story-image-settings__recent-thumbnail">
-                <img :src="image.url" alt="" loading="lazy" />
+                <img :src="image.url" alt="" loading="lazy" @error="removeRecentImage(image.id)" />
               </div>
               <div class="story-image-settings__recent-actions">
                 <button class="story-image-settings__button" type="button" @click="downloadRecentImage(image)">
                   下载
                 </button>
+                <button
+                  v-if="reuseEditorImageId !== image.id"
+                  class="story-image-settings__button"
+                  type="button"
+                  :disabled="reuseSubmittingImageId === image.id"
+                  @click="openReuseEditor(image.id)"
+                >
+                  复用到最新回复…
+                </button>
               </div>
+              <form
+                v-if="reuseEditorImageId === image.id"
+                class="story-image-settings__reuse-editor"
+                @submit.prevent="submitReuse(image.id)"
+                @keydown.esc.prevent="cancelReuse"
+              >
+                <input
+                  v-model="reuseCaption"
+                  class="text_pole story-image-settings__reuse-caption"
+                  type="text"
+                  maxlength="240"
+                  placeholder="这次配一句话（可留空）"
+                  :disabled="reuseSubmittingImageId === image.id"
+                  aria-label="复用图片的配文"
+                />
+                <div class="story-image-settings__reuse-actions">
+                  <button
+                    class="story-image-settings__button story-image-settings__button--primary"
+                    type="submit"
+                    :disabled="reuseSubmittingImageId === image.id"
+                  >
+                    {{ reuseSubmittingImageId === image.id ? '放置中…' : '放到最新回复' }}
+                  </button>
+                  <button
+                    class="story-image-settings__button story-image-settings__button--quiet"
+                    type="button"
+                    :disabled="reuseSubmittingImageId === image.id"
+                    @click="cancelReuse"
+                  >
+                    取消
+                  </button>
+                </div>
+                <p v-if="reuseError" class="story-image-settings__error story-image-settings__reuse-error">
+                  {{ reuseError }}
+                </p>
+              </form>
             </article>
           </div>
         </div>
 
         <div v-else class="story-image-settings__panel story-image-settings__settings-panel">
           <h4 class="story-image-settings__section-title">API 配置档案</h4>
-          <p class="story-image-settings__description">每个档案独立保存图片接口、认证信息和生成参数。</p>
+          <p class="story-image-settings__description">
+            每个档案独立保存图片接口、认证信息和生成参数；每次生成只请求一次，失败后需手动重新生成。
+          </p>
           <div class="story-image-settings__advanced-content">
             <div class="story-image-settings__profile-toolbar">
               <label class="story-image-settings__field" for="story-image-profile-select">
-                <span class="story-image-settings__label">当前配置</span>
+                <span class="story-image-settings__label">正在编辑</span>
                 <select id="story-image-profile-select" v-model="settings.activeApiProfileId" class="text_pole">
                   <option v-for="profile in settings.apiProfiles" :key="profile.id" :value="profile.id">
                     {{ profile.name || '未命名配置' }}
@@ -330,6 +402,25 @@
                   删除配置
                 </button>
               </div>
+            </div>
+
+            <div class="story-image-settings__advanced-grid">
+              <label class="story-image-settings__field" for="story-image-story-profile-select">
+                <span class="story-image-settings__label">随文／预测使用</span>
+                <select id="story-image-story-profile-select" v-model="settings.storyApiProfileId" class="text_pole">
+                  <option v-for="profile in settings.apiProfiles" :key="profile.id" :value="profile.id">
+                    {{ profile.name || '未命名配置' }}
+                  </option>
+                </select>
+              </label>
+              <label class="story-image-settings__field" for="story-image-gift-profile-select">
+                <span class="story-image-settings__label">礼物 CG 使用</span>
+                <select id="story-image-gift-profile-select" v-model="settings.giftApiProfileId" class="text_pole">
+                  <option v-for="profile in settings.apiProfiles" :key="profile.id" :value="profile.id">
+                    {{ profile.name || '未命名配置' }}
+                  </option>
+                </select>
+              </label>
             </div>
 
             <label class="story-image-settings__field" for="story-image-profile-name">
@@ -424,28 +515,6 @@
                   type="number"
                 />
               </label>
-              <label class="story-image-settings__field" for="story-image-retry">
-                <span class="story-image-settings__label">失败重试次数</span>
-                <input
-                  id="story-image-retry"
-                  v-model.number="activeProfile.retryAttempts"
-                  class="text_pole"
-                  min="0"
-                  max="5"
-                  type="number"
-                />
-              </label>
-              <label class="story-image-settings__field" for="story-image-retry-delay">
-                <span class="story-image-settings__label">重试间隔（毫秒）</span>
-                <input
-                  id="story-image-retry-delay"
-                  v-model.number="activeProfile.retryDelayMs"
-                  class="text_pole"
-                  min="0"
-                  step="100"
-                  type="number"
-                />
-              </label>
             </div>
             <label class="story-image-settings__field" for="story-image-extra-body">
               <span class="story-image-settings__label">额外请求 JSON</span>
@@ -474,7 +543,7 @@ import type { GiftImageTask } from './gift-image-cache';
 import type { RecentGeneratedImage } from './recent-image-cache';
 import type { StoryImageRuntime } from './runtime';
 import type { GiftReferenceSlot, GiftSettings, ImageApiProfile } from './settings';
-import { useStoryImageSettingsStore } from './settings';
+import { repairApiProfileRouteIds, useStoryImageSettingsStore } from './settings';
 
 const props = defineProps<{ runtime: StoryImageRuntime }>();
 const { settings } = storeToRefs(useStoryImageSettingsStore());
@@ -525,6 +594,10 @@ let modelRequestController: AbortController | null = null;
 let profileSequence = 0;
 const extraBodyText = ref(JSON.stringify(activeProfile.value.extraBody, null, 2));
 const extraBodyError = ref('');
+const reuseEditorImageId = ref<string | null>(null);
+const reuseCaption = ref('');
+const reuseSubmittingImageId = ref<string | null>(null);
+const reuseError = ref('');
 
 const runtimeStatus = computed(() => props.runtime.status.value);
 const recentImages = computed(() => props.runtime.recentImages.value);
@@ -544,8 +617,7 @@ const hasAllGiftReferences = computed(() => giftReferences.value.length === 3);
 const giftBusy = computed(() => giftTasks.value.some(task => task.status === 'pending' || task.status === 'running'));
 const giftError = ref('');
 const statusLabel = computed(() => {
-  if (settings.value.mode === 'gift')
-    return settings.value.gift.enabled ? '礼物 CG 图生图模块已就绪' : '礼物 CG 已关闭';
+  if (activeTab.value === 'gift') return settings.value.gift.enabled ? '礼物 CG 图生图模块已就绪' : '礼物 CG 已关闭';
   if (!settings.value.enabled) return '已关闭';
   if (runtimeStatus.value === 'generating') return '正在生成，聊天正文不受阻塞';
   if (runtimeStatus.value === 'error') return '最近一次图片任务失败';
@@ -556,7 +628,6 @@ const statusLabel = computed(() => {
 
 function selectTab(tab: TabValue) {
   activeTab.value = tab;
-  if (tab === 'inline' || tab === 'gift') settings.value.mode = tab;
 }
 
 function createProfileId(): string {
@@ -574,7 +645,7 @@ function createProfile(): void {
     model: '',
     imageSize: '1024x1024',
     timeoutMs: 120_000,
-    retryAttempts: 1,
+    retryAttempts: 0,
     retryDelayMs: 1_500,
     extraBody: {},
   });
@@ -587,9 +658,8 @@ function deleteActiveProfile(): void {
   const deletedIndex = settings.value.apiProfiles.findIndex(profile => profile.id === deletedId);
   settings.value.apiProfiles.splice(deletedIndex, 1);
   modelCache.delete(deletedId);
-  if (settings.value.activeApiProfileId === deletedId) {
-    settings.value.activeApiProfileId = settings.value.apiProfiles[Math.max(0, deletedIndex - 1)].id;
-  }
+  const adjacentProfile = settings.value.apiProfiles[Math.min(deletedIndex, settings.value.apiProfiles.length - 1)];
+  repairApiProfileRouteIds(settings.value, adjacentProfile.id);
 }
 
 function referenceFor(slot: GiftReferenceSlot): GiftImageReference | undefined {
@@ -722,6 +792,59 @@ function downloadRecentImage(image: RecentGeneratedImage): void {
   link.click();
 }
 
+function openReuseEditor(imageId: string): void {
+  if (reuseEditorImageId.value !== imageId) {
+    reuseCaption.value = '';
+    reuseError.value = '';
+  }
+  reuseEditorImageId.value = imageId;
+}
+
+function cancelReuse(): void {
+  reuseEditorImageId.value = null;
+  reuseCaption.value = '';
+  reuseError.value = '';
+}
+
+function reuseFailureMessage(reason: 'artifact_missing' | 'no_assistant_message' | 'target_unavailable'): string {
+  if (reason === 'artifact_missing') return '这张图片已经不在本页内存里了。';
+  if (reason === 'no_assistant_message') return '当前聊天还没有可放置的 AI 回复。';
+  return '最新回复暂时无法放置图片。';
+}
+
+function submitReuse(imageId: string): void {
+  if (reuseSubmittingImageId.value) return;
+
+  reuseSubmittingImageId.value = imageId;
+  reuseError.value = '';
+  try {
+    const result = props.runtime.reuseArtifactToLatestAssistant(imageId, reuseCaption.value.trim());
+    if (!result.ok) {
+      reuseError.value = reuseFailureMessage(result.reason);
+      return;
+    }
+    toastr.success('已复用到最新回复。');
+    cancelReuse();
+  } catch {
+    reuseError.value = '这次放置没有成功。';
+  } finally {
+    reuseSubmittingImageId.value = null;
+  }
+}
+
+function undoLastReuse(): void {
+  if (props.runtime.undoLastReuse()) {
+    toastr.success('已撤回上一次复用。');
+    return;
+  }
+  toastr.info('当前没有可撤回的复用图片。');
+}
+
+function removeRecentImage(id: string): void {
+  if (reuseEditorImageId.value === id) cancelReuse();
+  props.runtime.removeRecentImage(id);
+}
+
 watch(
   activeProfileState,
   state => {
@@ -765,3 +888,25 @@ onBeforeUnmount(() => {
   modelRequestController?.abort();
 });
 </script>
+
+<style scoped>
+.story-image-settings__reuse-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+}
+
+.story-image-settings__reuse-caption {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.story-image-settings__reuse-actions {
+  display: flex;
+  gap: 0.4em;
+}
+
+.story-image-settings__reuse-error {
+  margin: 0;
+}
+</style>

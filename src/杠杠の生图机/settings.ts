@@ -98,11 +98,13 @@ export const DEFAULT_GIFT_PROMPT_SECTIONS = {
 
 export type GiftReferenceSlot = 'character-1' | 'character-2' | 'template';
 export type GiftRequestMode = 'auto' | 'multipart-edit' | 'chat-multimodal' | 'json-reference';
+export type MultipartImageField = 'auto' | 'image' | 'image[]';
 
 export const GiftImageSettings = z.object({
   enabled: z.boolean().default(false),
   triggerInterval: z.enum(['manual', '3', '5']).default('manual'),
   requestMode: z.enum(['auto', 'multipart-edit', 'chat-multimodal', 'json-reference']).default('auto'),
+  multipartImageField: z.enum(['auto', 'image', 'image[]']).default('auto'),
   jsonReferenceField: z.enum(['images', 'reference_images', 'image']).default('images'),
   identityPrompt: z.string().default(DEFAULT_GIFT_PROMPT_SECTIONS.identity.join('\n')),
   templatePrompt: z.string().default(DEFAULT_GIFT_PROMPT_SECTIONS.template.join('\n')),
@@ -131,7 +133,7 @@ const DEFAULT_IMAGE_API_PROFILE = {
   model: 'gpt-image-1',
   imageSize: '1024x1024',
   timeoutMs: 120_000,
-  retryAttempts: 1,
+  retryAttempts: 0,
   retryDelayMs: 1_500,
   extraBody: {},
 } as const;
@@ -145,7 +147,7 @@ export const ImageApiProfile = z.object({
   model: z.string().default('gpt-image-1'),
   imageSize: z.string().default('1024x1024'),
   timeoutMs: z.number().int().min(1000).max(900_000).default(120_000),
-  retryAttempts: z.number().int().min(0).max(5).default(1),
+  retryAttempts: z.number().int().min(0).max(5).default(0),
   retryDelayMs: z.number().int().min(0).max(60_000).default(1_500),
   extraBody: z.record(z.string(), z.unknown()).default({}),
 });
@@ -162,6 +164,8 @@ export const ImageSettings = z
     safetyPrompt: z.string().default(DEFAULT_PROMPT_SECTIONS.safety.join('\n')),
     gift: GiftImageSettings.prefault({}),
     activeApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
+    storyApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
+    giftApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
     apiProfiles: z.array(ImageApiProfile).min(1).default([DEFAULT_IMAGE_API_PROFILE]),
   })
   .prefault({});
@@ -172,10 +176,27 @@ export function getActiveApiProfile(settings: StoryImageSettings): ImageApiProfi
   return settings.apiProfiles.find(profile => profile.id === settings.activeApiProfileId) ?? settings.apiProfiles[0];
 }
 
-const scriptVariableOption = { type: 'script' as const, script_id: getScriptId() };
+export function repairApiProfileRouteIds(settings: StoryImageSettings, fallbackProfileId?: string): void {
+  const hasProfile = (id: string) => settings.apiProfiles.some(profile => profile.id === id);
+  const fallback = fallbackProfileId && hasProfile(fallbackProfileId) ? fallbackProfileId : settings.apiProfiles[0].id;
+  if (!hasProfile(settings.activeApiProfileId)) settings.activeApiProfileId = fallback;
+  if (!hasProfile(settings.storyApiProfileId)) settings.storyApiProfileId = settings.activeApiProfileId;
+  if (!hasProfile(settings.giftApiProfileId)) settings.giftApiProfileId = settings.activeApiProfileId;
+}
 
-export const useStoryImageSettingsStore = defineStore('story-image-settings', () => {
-  const raw = getVariables(scriptVariableOption);
+export function getStoryApiProfile(settings: StoryImageSettings): ImageApiProfile {
+  return (
+    settings.apiProfiles.find(profile => profile.id === settings.storyApiProfileId) ?? getActiveApiProfile(settings)
+  );
+}
+
+export function getGiftApiProfile(settings: StoryImageSettings): ImageApiProfile {
+  return (
+    settings.apiProfiles.find(profile => profile.id === settings.giftApiProfileId) ?? getActiveApiProfile(settings)
+  );
+}
+
+export function parseStoryImageSettings(raw: unknown): StoryImageSettings {
   const rawRecord = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const migratedRaw = Array.isArray(rawRecord.apiProfiles)
     ? rawRecord
@@ -199,19 +220,28 @@ export const useStoryImageSettingsStore = defineStore('story-image-settings', ()
         ],
       };
   const parsed = ImageSettings.safeParse(migratedRaw);
-  const parsedSettings = parsed.success ? parsed.data : ImageSettings.parse({});
-  if (!parsedSettings.apiProfiles.some(profile => profile.id === parsedSettings.activeApiProfileId)) {
-    parsedSettings.activeApiProfileId = parsedSettings.apiProfiles[0].id;
+  const settings = parsed.success ? parsed.data : ImageSettings.parse({});
+  if (!Object.prototype.hasOwnProperty.call(migratedRaw, 'storyApiProfileId')) {
+    settings.storyApiProfileId = settings.activeApiProfileId;
   }
-  const settings = ref<StoryImageSettings>(parsedSettings);
-
+  if (!Object.prototype.hasOwnProperty.call(migratedRaw, 'giftApiProfileId')) {
+    settings.giftApiProfileId = settings.activeApiProfileId;
+  }
+  repairApiProfileRouteIds(settings);
   if (
     typeof rawRecord.inlinePrompt === 'string' &&
     !('basePrompt' in rawRecord) &&
     rawRecord.inlinePrompt.trim() !== LEGACY_INLINE_PROMPT_DEFAULT
   ) {
-    settings.value.basePrompt = rawRecord.inlinePrompt;
+    settings.basePrompt = rawRecord.inlinePrompt;
   }
+  return settings;
+}
+
+export const useStoryImageSettingsStore = defineStore('story-image-settings', () => {
+  const scriptVariableOption = { type: 'script' as const, script_id: getScriptId() };
+  const raw = getVariables(scriptVariableOption);
+  const settings = ref<StoryImageSettings>(parseStoryImageSettings(raw));
 
   watch(
     settings,

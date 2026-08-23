@@ -544,6 +544,16 @@
   object-fit: contain;
 }
 
+.story-image-placement-caption {
+  max-width: 42rem;
+  margin: 0.45em auto 0;
+  color: var(--SmartThemeEmColor, #aaa);
+  font-size: 0.88em;
+  line-height: 1.45;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
 @keyframes story-image-spin {
   to {
     transform: rotate(360deg);

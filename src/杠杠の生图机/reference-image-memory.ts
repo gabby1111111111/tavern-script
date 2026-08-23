@@ -75,11 +75,18 @@ export function referenceToBlob(reference: GiftImageReference): Blob {
 
 export class ReferenceImageMemory {
   readonly images: Ref<GiftImageReference[]> = ref([]);
+  private readonly slotVersions: Record<GiftReferenceSlot, number> = {
+    'character-1': 0,
+    'character-2': 0,
+    template: 0,
+  };
 
   async setLocal(slot: GiftReferenceSlot, file: File, name = ''): Promise<GiftImageReference> {
     if (!file.type.startsWith('image/')) throw new Error('参考图必须是图片文件');
+    const version = this.bumpVersion(slot);
     const rawDataUrl = await fileToDataUrl(file);
     const dataUrl = await resizeDataUrl(rawDataUrl, file.type);
+    if (this.slotVersions[slot] !== version) throw new Error('参考图读取已被较新的操作取代');
     const reference: GiftImageReference = {
       id: slot,
       kind: referenceKind(slot),
@@ -98,6 +105,7 @@ export class ReferenceImageMemory {
     const normalized = url.trim();
     if (!/^https?:\/\//i.test(normalized)) throw new Error('参考图 URL 必须以 http:// 或 https:// 开头');
     const fileName = normalized.split('/').pop()?.split('?')[0] || `${slot}.png`;
+    this.bumpVersion(slot);
     const reference: GiftImageReference = {
       id: slot,
       kind: referenceKind(slot),
@@ -118,6 +126,7 @@ export class ReferenceImageMemory {
   }
 
   remove(slot: GiftReferenceSlot): void {
+    this.bumpVersion(slot);
     this.images.value = this.images.value.filter(reference => reference.id !== slot);
   }
 
@@ -132,7 +141,13 @@ export class ReferenceImageMemory {
   }
 
   clear(): void {
+    (Object.keys(this.slotVersions) as GiftReferenceSlot[]).forEach(slot => this.bumpVersion(slot));
     this.images.value = [];
+  }
+
+  private bumpVersion(slot: GiftReferenceSlot): number {
+    this.slotVersions[slot] += 1;
+    return this.slotVersions[slot];
   }
 
   private replace(reference: GiftImageReference): void {
