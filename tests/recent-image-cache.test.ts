@@ -1,5 +1,10 @@
 import type { ImageResource } from '../src/杠杠の生图机/image-api';
-import { MAX_RECENT_GENERATED_IMAGES, RecentImageCache } from '../src/杠杠の生图机/recent-image-cache';
+import {
+  DEFAULT_RECENT_IMAGE_LIMIT,
+  MAX_RECENT_IMAGE_LIMIT,
+  MIN_RECENT_IMAGE_LIMIT,
+  RecentImageCache,
+} from '../src/杠杠の生图机/recent-image-cache';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -12,6 +17,7 @@ function equal(actual: unknown, expected: unknown, message: string): void {
 }
 
 const revokeCounts = new Map<string, number>();
+const removedIds: string[] = [];
 
 function clonableResource(label: string): ImageResource {
   return {
@@ -38,56 +44,111 @@ function addArtifact(cache: RecentImageCache, label: string) {
   );
 }
 
-const cache = new RecentImageCache();
-const initial = Array.from({ length: MAX_RECENT_GENERATED_IMAGES }, (_unused, index) => {
+const cache = new RecentImageCache({ onRemove: artifact => removedIds.push(artifact.id) });
+equal(cache.limit, DEFAULT_RECENT_IMAGE_LIMIT, 'recent cache 默认上限应为十张');
+
+const initial = Array.from({ length: DEFAULT_RECENT_IMAGE_LIMIT }, (_unused, index) => {
   const artifact = addArtifact(cache, `initial-${index}`);
   assert(artifact, '初始 artifact 应创建成功');
   return artifact;
 });
-const oldest = initial[0];
-assert(cache.pinArtifact(oldest.id), '应可 pin 已存在的 artifact');
-equal(cache.pinnedArtifactId, oldest.id, 'pin getter 应只返回当前 artifact id');
+equal(cache.images.value.length, DEFAULT_RECENT_IMAGE_LIMIT, '默认 recent cache 应保留十张');
 
-const overflow = addArtifact(cache, 'overflow-5');
+const overflow = addArtifact(cache, 'overflow-10');
 assert(overflow, '溢出时新 artifact 应创建成功');
-equal(cache.images.value.length, MAX_RECENT_GENERATED_IMAGES, 'pin 不得增加 recent cache 总量');
-assert(cache.getArtifact(oldest.id), '最旧 artifact 被 pin 后不应被 overflow 淘汰');
-assert(!cache.getArtifact(initial[1].id), 'overflow 应淘汰最旧的非 pinned artifact');
-equal(revokeCounts.get('initial-1'), 1, 'overflow 只应 revoke 被淘汰项一次');
+equal(cache.images.value.length, DEFAULT_RECENT_IMAGE_LIMIT, 'FIFO 溢出后 recent cache 总量必须为十');
+equal(
+  cache.images.value.map(image => {
+    const sourceIntentId = image.sourceIntentId;
+    assert(sourceIntentId, '测试 artifact 应始终保留 source intent id');
+    return sourceIntentId.replace('intent-', '');
+  }),
+  [
+    'overflow-10',
+    'initial-9',
+    'initial-8',
+    'initial-7',
+    'initial-6',
+    'initial-5',
+    'initial-4',
+    'initial-3',
+    'initial-2',
+    'initial-1',
+  ],
+  'FIFO 溢出应保留最新十张并按最新到最旧排列',
+);
+assert(!cache.getArtifact(initial[0].id), 'FIFO 溢出应淘汰最旧 artifact');
+equal(revokeCounts.get('initial-0'), 1, 'FIFO 溢出只应 revoke 被淘汰项一次');
+assert(removedIds.includes(initial[0].id), 'FIFO 溢出应调用既有 onRemove 清理回调');
 
-assert(cache.pinArtifact(overflow.id), '切换 pin 应成功');
-equal(cache.pinnedArtifactId, overflow.id, '切换后 getter 应返回新 pinned artifact');
-assert(!cache.pinArtifact('missing-artifact'), '不存在的 artifact 不得成为 pin');
-equal(cache.pinnedArtifactId, overflow.id, '失败的 pin 不得清除现有 pin');
-
-for (let index = 6; index <= 10; index += 1) {
+for (let index = 11; index <= 20; index += 1) {
   assert(addArtifact(cache, `overflow-${index}`), '连续溢出仍应接受新 artifact');
 }
-equal(cache.images.value.length, MAX_RECENT_GENERATED_IMAGES, '连续溢出后总量仍必须为五');
-assert(cache.getArtifact(overflow.id), '当前 pinned artifact 在连续溢出后仍应保留');
-assert(!cache.getArtifact(oldest.id), '旧 pinned 项在切换后应恢复普通淘汰');
-equal(revokeCounts.get('initial-0'), 1, '旧 pinned 项被淘汰时只应 revoke 一次');
-
-assert(cache.remove(overflow.id), '显式移除当前 pinned artifact 应成功');
-equal(cache.pinnedArtifactId, null, '移除 pinned artifact 必须清理 pin');
-equal(revokeCounts.get('overflow-5'), 1, '移除 pinned artifact 只应 revoke 一次');
-assert(!cache.remove(overflow.id), '重复移除应返回 false');
-equal(revokeCounts.get('overflow-5'), 1, '重复移除不得重复 revoke');
-
-const finalPinned = cache.images.value[0];
-assert(finalPinned && cache.pinArtifact(finalPinned.id), 'clear 前应能重新设置 pin');
-const remainingLabels = cache.images.value.map(image => {
-  const sourceIntentId = image.sourceIntentId;
-  assert(sourceIntentId, '测试 artifact 应始终保留 source intent id');
-  return sourceIntentId.replace('intent-', '');
-});
-cache.clear();
-cache.clear();
-equal(cache.pinnedArtifactId, null, 'clear 必须清理 pin');
-equal(cache.images.value.length, 0, 'clear 必须清空 recent cache');
-assert(
-  remainingLabels.every(label => revokeCounts.get(label) === 1),
-  'clear 与重复 clear 对每个 owner 只 revoke 一次',
+equal(cache.images.value.length, DEFAULT_RECENT_IMAGE_LIMIT, '连续溢出后总量仍必须为十');
+equal(
+  cache.images.value.map(image => {
+    const sourceIntentId = image.sourceIntentId;
+    assert(sourceIntentId, '测试 artifact 应始终保留 source intent id');
+    return sourceIntentId.replace('intent-', '');
+  }),
+  [
+    'overflow-20',
+    'overflow-19',
+    'overflow-18',
+    'overflow-17',
+    'overflow-16',
+    'overflow-15',
+    'overflow-14',
+    'overflow-13',
+    'overflow-12',
+    'overflow-11',
+  ],
+  '连续 FIFO 溢出应只保留最后十张',
 );
+
+const beforeShrink = cache.images.value.map(image => image.id);
+const retainedAfterShrink = beforeShrink.slice(0, 3);
+equal(cache.setLimit(3), 3, 'setLimit 应返回归一化后的上限');
+equal(cache.limit, 3, 'setLimit 应更新当前上限');
+equal(
+  cache.images.value.map(image => image.id),
+  retainedAfterShrink,
+  '调小上限应立即保留最新图片',
+);
+equal(cache.images.value.length, 3, '调小上限应立即淘汰超额旧图');
+const evictedByShrink = beforeShrink.slice(3);
+evictedByShrink.forEach(id => {
+  assert(removedIds.includes(id), '调小上限应为每张淘汰图调用 onRemove');
+});
+assert(
+  evictedByShrink.every(id => !cache.getArtifact(id)),
+  '调小上限后超额 artifact 不得继续可取',
+);
+assert(
+  evictedByShrink.every(id => !cache.cloneResource(id)),
+  '调小上限后超额资源不得继续可克隆',
+);
+
+equal(cache.setLimit(0), MIN_RECENT_IMAGE_LIMIT, '低于最小值时应钳制到一张');
+equal(cache.limit, MIN_RECENT_IMAGE_LIMIT, '最小上限应为一张');
+equal(cache.images.value.length, MIN_RECENT_IMAGE_LIMIT, '钳制到一张时应立即释放其余图片');
+equal(cache.setLimit(100), MAX_RECENT_IMAGE_LIMIT, '高于最大值时应钳制到五十张');
+equal(cache.limit, MAX_RECENT_IMAGE_LIMIT, '最大上限应为五十张');
+equal(cache.images.value.length, MIN_RECENT_IMAGE_LIMIT, '提高上限不得凭空恢复已淘汰图片');
+
+const explicitlyRemoved = cache.images.value[0];
+assert(explicitlyRemoved, '显式移除前应有可用 artifact');
+const explicitlyRemovedSourceIntentId = explicitlyRemoved.sourceIntentId;
+assert(explicitlyRemovedSourceIntentId, '待显式移除 artifact 应始终保留 source intent id');
+const explicitlyRemovedLabel = explicitlyRemovedSourceIntentId.replace('intent-', '');
+assert(cache.remove(explicitlyRemoved.id), '显式移除缓存 artifact 应成功');
+equal(revokeCounts.get(explicitlyRemovedLabel), 1, '显式移除只应 revoke 一次');
+assert(!cache.remove(explicitlyRemoved.id), '重复移除应返回 false');
+equal(revokeCounts.get(explicitlyRemovedLabel), 1, '重复移除不得重复 revoke');
+assert(removedIds.filter(id => id === explicitlyRemoved.id).length === 1, '显式移除只应调用回调一次');
+
+cache.clear();
+cache.clear();
+equal(cache.images.value.length, 0, 'clear 必须清空 recent cache');
 
 console.info('<杠杠の生图机> recent image cache tests passed');

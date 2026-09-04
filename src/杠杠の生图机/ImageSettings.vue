@@ -3,7 +3,7 @@
   <section class="story-image-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の生图机</b>
+        <b>杠杠の生图机 V0.3.0</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
@@ -23,76 +23,89 @@
           </button>
         </div>
 
-        <div v-if="activeTab === 'inline'" class="story-image-settings__panel">
+        <div v-if="activeTab === 'preset'" class="story-image-settings__panel">
           <label class="story-image-settings__enable-row" for="story-image-enabled">
             <input id="story-image-enabled" v-model="settings.enabled" type="checkbox" />
-            <span>启用随文插图</span>
+            <span>启用生图机</span>
           </label>
 
-          <div class="story-image-settings__prompt-fields">
-            <details class="story-image-settings__prompt-section">
-              <summary class="story-image-settings__prompt-summary">
-                <span class="story-image-settings__label">基础任务与输出格式</span>
-                <small class="story-image-settings__description"
-                  >规定什么时候生成标记、标记放在哪里，以及最多生成几张图片。</small
-                >
-              </summary>
-              <textarea
-                id="story-image-prompt-base"
-                v-model="settings.basePrompt"
-                class="text_pole story-image-settings__textarea"
-                rows="10"
-                placeholder='填写基础任务与 <pic prompt="..."> 输出格式'
-              ></textarea>
-            </details>
+          <div class="story-image-settings__preset-toolbar">
+            <label class="story-image-settings__field" for="story-image-preset-select">
+              <select
+                id="story-image-preset-select"
+                v-model="settings.currentDrawingPresetId"
+                class="text_pole"
+                aria-label="画图预设"
+              >
+                <option v-for="preset in settings.drawingPresets" :key="preset.id" :value="preset.id">
+                  {{ preset.name || '未命名预设' }}
+                </option>
+              </select>
+            </label>
+            <div class="story-image-settings__profile-actions">
+              <button class="story-image-settings__button" type="button" @click="createPreset">新建预设</button>
+              <button
+                class="story-image-settings__button story-image-settings__button--primary"
+                type="button"
+                @click="savePreset"
+              >
+                保存预设
+              </button>
+              <button
+                class="story-image-settings__button story-image-settings__button--quiet"
+                type="button"
+                :disabled="settings.drawingPresets.length <= 1"
+                @click="deleteActivePreset"
+              >
+                删除预设
+              </button>
+            </div>
+          </div>
 
-            <details class="story-image-settings__prompt-section">
-              <summary class="story-image-settings__prompt-summary">
-                <span class="story-image-settings__label">整体审美、场景和人物规则</span>
-                <small class="story-image-settings__description"
-                  >规定环境、物件、时间、光线、情绪、场景连续性、画面丰富度和人物占比。</small
-                >
-              </summary>
+          <div class="story-image-settings__preset-editor">
+            <label class="story-image-settings__field" for="story-image-preset-name">
+              <span class="story-image-settings__label">预设名称</span>
+              <input id="story-image-preset-name" v-model="activePreset.name" class="text_pole" type="text" />
+            </label>
+            <label class="story-image-settings__field" for="story-image-preset-instruction">
+              <span class="story-image-settings__label">发给正文 AI 的指令</span>
               <textarea
-                id="story-image-prompt-scene"
-                v-model="settings.scenePrompt"
+                id="story-image-preset-instruction"
+                v-model="activePreset.instructionText"
                 class="text_pole story-image-settings__textarea"
-                rows="12"
-                placeholder="填写整体审美、场景和人物规则"
+                rows="14"
+                placeholder='填写正文 AI 应如何输出 <pic prompt="..."> 标记的指令'
               ></textarea>
-            </details>
+            </label>
+          </div>
 
-            <details class="story-image-settings__prompt-section">
-              <summary class="story-image-settings__prompt-summary">
-                <span class="story-image-settings__label">视觉风格库</span>
-                <small class="story-image-settings__description"
-                  >保留视觉类型和强制开头句式；运行时只注入这一份可编辑文本。</small
-                >
-              </summary>
-              <textarea
-                id="story-image-prompt-style"
-                v-model="settings.stylePrompt"
-                class="text_pole story-image-settings__textarea"
-                rows="18"
-                placeholder="填写视觉风格类型和强制开头句式"
-              ></textarea>
-            </details>
-
-            <details class="story-image-settings__prompt-section">
-              <summary class="story-image-settings__prompt-summary">
-                <span class="story-image-settings__label">安全限制与生成前自检</span>
-                <small class="story-image-settings__description"
-                  >规定纯 SFW、敏感措辞替换和生成前检查；只输出最终结果。</small
-                >
-              </summary>
-              <textarea
-                id="story-image-prompt-safety"
-                v-model="settings.safetyPrompt"
-                class="text_pole story-image-settings__textarea"
-                rows="12"
-                placeholder="填写安全限制与生成前自检规则"
-              ></textarea>
-            </details>
+          <div class="story-image-settings__display-settings">
+            <h4 class="story-image-settings__section-title">展现设置</h4>
+            <div class="story-image-settings__grid">
+              <label class="story-image-settings__field" for="story-image-display-mode">
+                <span class="story-image-settings__label">图片展现方式</span>
+                <select id="story-image-display-mode" v-model="settings.displaySettings.displayMode" class="text_pole">
+                  <option value="inline">随文插入</option>
+                  <option value="gift">礼物异步</option>
+                </select>
+              </label>
+              <label class="story-image-settings__field" for="story-image-skip-floors">
+                <span class="story-image-settings__label">跳过楼层数</span>
+                <input
+                  id="story-image-skip-floors"
+                  v-model.number="settings.displaySettings.skipFloors"
+                  class="text_pole"
+                  type="number"
+                  min="0"
+                  max="1000"
+                  step="1"
+                />
+              </label>
+            </div>
+            <p class="story-image-settings__description">
+              0 表示每个符合条件的新 AI 楼层都触发；1 表示每隔一楼触发。只统计正常新回复，重生成、切换 swipe
+              和历史消息不会重复计数。
+            </p>
           </div>
 
           <p
@@ -101,214 +114,96 @@
           >
             当前状态：{{ statusLabel }}
           </p>
-          <p class="story-image-settings__hint">
-            每条 AI 回复最多处理两个标记；图片只保存在当前网页内存，不会写回正文或数据库。
-          </p>
         </div>
 
-        <div v-else-if="activeTab === 'gift'" class="story-image-settings__panel story-image-settings__gift-panel">
-          <div class="story-image-settings__gift-intro">
-            <h4 class="story-image-settings__section-title">礼物 CG／图生图</h4>
-            <p class="story-image-settings__description">
-              三张参考图只保存在当前网页内存：角色 1、角色 2
-              决定人物身份，模板图决定动作、姿势、镜头和构图；正文上下文决定服装、场景、道具、表情、光线和氛围。
-            </p>
+        <div v-else-if="activeTab === 'output'" class="story-image-settings__panel">
+          <div class="story-image-settings__preset-toolbar">
+            <label class="story-image-settings__field" for="story-image-output-preset-select">
+              <span class="story-image-settings__label">正在编辑</span>
+              <select
+                id="story-image-output-preset-select"
+                v-model="settings.currentOutputPresetId"
+                class="text_pole"
+                aria-label="出图预设"
+              >
+                <option v-for="preset in settings.outputPresets" :key="preset.id" :value="preset.id">
+                  {{ preset.name || '未命名出图预设' }}
+                </option>
+              </select>
+            </label>
+            <div class="story-image-settings__profile-actions">
+              <button class="story-image-settings__button" type="button" @click="createOutputPresetEntry">
+                新建预设
+              </button>
+              <button
+                class="story-image-settings__button story-image-settings__button--primary"
+                type="button"
+                @click="saveOutputPresetEntry"
+              >
+                保存预设
+              </button>
+              <button
+                class="story-image-settings__button story-image-settings__button--quiet"
+                type="button"
+                :disabled="settings.outputPresets.length <= 1"
+                @click="deleteActiveOutputPreset"
+              >
+                删除预设
+              </button>
+            </div>
           </div>
 
-          <label class="story-image-settings__enable-row" for="story-image-gift-enabled">
-            <input id="story-image-gift-enabled" v-model="settings.gift.enabled" type="checkbox" />
-            <span>启用礼物 CG</span>
-          </label>
-
-          <div class="story-image-settings__gift-options">
-            <label class="story-image-settings__field" for="story-image-gift-trigger">
-              <span class="story-image-settings__label">触发方式</span>
-              <select id="story-image-gift-trigger" v-model="settings.gift.triggerInterval" class="text_pole">
-                <option value="manual">手动生成</option>
-                <option value="3">每 3 条 AI 回复</option>
-                <option value="5">每 5 条 AI 回复</option>
-              </select>
-              <small class="story-image-settings__description">
-                只按首次出现的新 AI 楼层计数；到点时若参考图不齐或已有任务，直接跳过且不补跑。
-              </small>
-            </label>
-            <label class="story-image-settings__field" for="story-image-gift-request-mode">
-              <span class="story-image-settings__label">图生图请求模式</span>
-              <select id="story-image-gift-request-mode" v-model="settings.gift.requestMode" class="text_pole">
-                <option value="auto">自动判断</option>
-                <option value="multipart-edit">multipart／images/edits</option>
-                <option value="chat-multimodal">chat/completions 多模态</option>
-                <option value="json-reference">JSON 参考图</option>
-              </select>
-            </label>
-            <label
-              v-if="settings.gift.requestMode === 'multipart-edit' || settings.gift.requestMode === 'auto'"
-              class="story-image-settings__field"
-              for="story-image-gift-multipart-field"
-            >
-              <span class="story-image-settings__label">multipart 图片字段</span>
-              <select
-                id="story-image-gift-multipart-field"
-                v-model="settings.gift.multipartImageField"
-                class="text_pole"
-              >
-                <option value="auto">自动（OpenAI image[]／中转 image）</option>
-                <option value="image">image</option>
-                <option value="image[]">image[]</option>
-              </select>
-            </label>
-            <label
-              v-if="settings.gift.requestMode === 'json-reference'"
-              class="story-image-settings__field"
-              for="story-image-gift-reference-field"
-            >
-              <span class="story-image-settings__label">JSON 参考图字段</span>
-              <select
-                id="story-image-gift-reference-field"
-                v-model="settings.gift.jsonReferenceField"
-                class="text_pole"
-              >
-                <option value="images">images</option>
-                <option value="reference_images">reference_images</option>
-                <option value="image">image</option>
-              </select>
-            </label>
-          </div>
-
-          <div class="story-image-settings__gift-input-grid story-image-settings__gift-input-grid--three">
-            <div v-for="slot in giftReferenceSlots" :key="slot.id" class="story-image-settings__gift-reference-card">
-              <div class="story-image-settings__gift-reference-heading">
-                <span class="story-image-settings__label">{{ slot.label }}</span>
-                <button
-                  v-if="referenceFor(slot.id)"
-                  class="story-image-settings__button story-image-settings__button--quiet"
-                  type="button"
-                  @click="removeGiftReference(slot.id)"
-                >
-                  删除
-                </button>
-              </div>
-              <small class="story-image-settings__description">{{ slot.description }}</small>
-              <div class="story-image-settings__gift-file-picker">
-                <button
-                  class="story-image-settings__button story-image-settings__button--primary"
-                  type="button"
-                  @click="openGiftFilePicker(slot.id)"
-                >
-                  选择本地图片
-                </button>
-                <input
-                  :id="`story-image-gift-file-${slot.id}`"
-                  class="story-image-settings__gift-file-input"
-                  type="file"
-                  accept="image/*"
-                  :aria-label="`${slot.label}：选择本地图片`"
-                  @change="onGiftFileChange($event, slot.id)"
-                />
-              </div>
-              <div v-if="referenceFor(slot.id)" class="story-image-settings__gift-selected">
-                <span class="story-image-settings__gift-selected-name">
-                  已选择：{{ referenceFor(slot.id)?.fileName }}
-                </span>
-                <img :src="referencePreview(referenceFor(slot.id))" :alt="`${slot.label}缩略图`" />
-              </div>
+          <div class="story-image-settings__preset-editor">
+            <label class="story-image-settings__field" for="story-image-output-preset-name">
+              <span class="story-image-settings__label">预设名称</span>
               <input
-                :value="giftNameInputs[slot.id]"
+                id="story-image-output-preset-name"
+                v-model="activeOutputPreset.name"
                 class="text_pole"
                 type="text"
-                placeholder="可选：给这张图起个名字"
-                @change="renameGiftReference(slot.id, $event)"
               />
-              <input
-                v-model="giftUrlInputs[slot.id]"
-                class="text_pole"
-                type="url"
-                placeholder="或者填写图片 URL"
-                @change="setGiftReferenceUrl(slot.id)"
-              />
-            </div>
-          </div>
-
-          <p class="story-image-settings__hint">当前模板只在本次网页会话有效；刷新网页或脚本重载后需要重新选择。</p>
-          <div class="story-image-settings__gift-actions">
-            <button
-              class="story-image-settings__button story-image-settings__button--primary"
-              type="button"
-              :disabled="giftBusy || !settings.gift.enabled || !hasAllGiftReferences"
-              @click="generateGift"
-            >
-              {{ giftBusy ? '礼物 CG 准备中…' : '读取当前上下文并生成礼物 CG' }}
-            </button>
-            <button
-              class="story-image-settings__button story-image-settings__button--quiet"
-              type="button"
-              :disabled="giftTasks.length === 0"
-              @click="clearGiftImages"
-            >
-              清空本页结果
-            </button>
-          </div>
-          <p v-if="giftError" class="story-image-settings__error">{{ giftError }}</p>
-
-          <div class="story-image-settings__gift-prompt-fields">
-            <details
-              v-for="section in giftPromptSections"
-              :key="section.key"
-              class="story-image-settings__prompt-section"
-            >
-              <summary class="story-image-settings__prompt-summary">
-                <span class="story-image-settings__label">{{ section.label }}</span>
-                <small class="story-image-settings__description">{{ section.description }}</small>
-              </summary>
+            </label>
+            <label class="story-image-settings__field" for="story-image-output-preset-template">
+              <span class="story-image-settings__label">出图模板</span>
               <textarea
-                v-model="settings.gift[section.key]"
+                id="story-image-output-preset-template"
+                v-model="activeOutputPreset.templateText"
                 class="text_pole story-image-settings__textarea"
-                rows="5"
+                rows="8"
+                placeholder="使用 {{xx}} 代表当前图片提示词"
               ></textarea>
-            </details>
-          </div>
-
-          <div class="story-image-settings__gift-results">
-            <h4 class="story-image-settings__section-title">本页礼物 CG 结果</h4>
-            <p v-if="giftTasks.length === 0" class="story-image-settings__recent-empty">尚未生成礼物 CG。</p>
-            <div v-else class="story-image-settings__recent-grid" role="list">
-              <article
-                v-for="task in giftTasks"
-                :key="task.id"
-                class="story-image-settings__recent-card"
-                role="listitem"
-              >
-                <div v-if="task.image" class="story-image-settings__recent-thumbnail">
-                  <img :src="task.image.url" alt="礼物 CG 结果" loading="lazy" />
-                </div>
-                <div v-else class="story-image-settings__gift-result-state">
-                  {{ giftTaskStatus(task.status, task.error) }}
-                </div>
-                <div v-if="task.image" class="story-image-settings__recent-actions">
-                  <button class="story-image-settings__button" type="button" @click="downloadGiftImage(task)">
-                    下载
-                  </button>
-                </div>
-              </article>
-            </div>
+            </label>
+            <label class="story-image-settings__enable-row" for="story-image-output-avatar-references">
+              <input
+                id="story-image-output-avatar-references"
+                v-model="activeOutputPreset.useAvatarReferences"
+                type="checkbox"
+              />
+              <span>使用当前 User 和角色头像</span>
+            </label>
+            <p class="story-image-settings__description story-image-settings__avatar-reference-note">
+              开启后固定参考图顺序：User = 图1，当前角色 = 图2。关闭时不附加头像参考图。
+            </p>
           </div>
         </div>
 
         <div v-else-if="activeTab === 'recent'" class="story-image-settings__panel story-image-settings__recent-panel">
-          <div class="story-image-settings__recent-intro">
-            <h4 class="story-image-settings__section-title">最近生成</h4>
-            <p class="story-image-settings__description">
-              仅保留本次网页会话内最近成功生成的 5 张图片；刷新网页或脚本重载后会清空。
-            </p>
-            <button
-              class="story-image-settings__button story-image-settings__button--quiet"
-              type="button"
-              @click="undoLastReuse"
-            >
-              撤回上一次复用
-            </button>
+          <div class="story-image-settings__recent-limit">
+            <label class="story-image-settings__field" for="story-image-recent-limit">
+              <span class="story-image-settings__label">最近图片保留张数</span>
+              <input
+                id="story-image-recent-limit"
+                v-model.number="settings.recentImageLimit"
+                class="text_pole"
+                type="number"
+                min="1"
+                max="50"
+                step="1"
+                @change="normalizeRecentImageLimitInput"
+                @blur="normalizeRecentImageLimitInput"
+              />
+            </label>
           </div>
-
           <p v-if="recentImages.length === 0" class="story-image-settings__recent-empty">
             当前会话还没有成功生成的图片。
           </p>
@@ -320,67 +215,31 @@
               role="listitem"
             >
               <div class="story-image-settings__recent-thumbnail">
-                <img :src="image.url" alt="" loading="lazy" @error="removeRecentImage(image.id)" />
+                <img :src="image.url" alt="生成图片" loading="lazy" @error="removeRecentImage(image.id)" />
               </div>
               <div class="story-image-settings__recent-actions">
-                <button class="story-image-settings__button" type="button" @click="downloadRecentImage(image)">
-                  下载
-                </button>
                 <button
-                  v-if="reuseEditorImageId !== image.id"
                   class="story-image-settings__button"
                   type="button"
-                  :disabled="reuseSubmittingImageId === image.id"
-                  @click="openReuseEditor(image.id)"
+                  :disabled="savingGalleryImageId === image.id"
+                  @click="saveRecentImageToGallery(image.id)"
                 >
-                  复用到最新回复…
+                  {{ savingGalleryImageId === image.id ? '保存中…' : '保存到角色图库' }}
+                </button>
+                <button
+                  class="story-image-settings__button story-image-settings__button--quiet"
+                  type="button"
+                  @click="removeRecentImage(image.id)"
+                >
+                  删除
                 </button>
               </div>
-              <form
-                v-if="reuseEditorImageId === image.id"
-                class="story-image-settings__reuse-editor"
-                @submit.prevent="submitReuse(image.id)"
-                @keydown.esc.prevent="cancelReuse"
-              >
-                <input
-                  v-model="reuseCaption"
-                  class="text_pole story-image-settings__reuse-caption"
-                  type="text"
-                  maxlength="240"
-                  placeholder="这次配一句话（可留空）"
-                  :disabled="reuseSubmittingImageId === image.id"
-                  aria-label="复用图片的配文"
-                />
-                <div class="story-image-settings__reuse-actions">
-                  <button
-                    class="story-image-settings__button story-image-settings__button--primary"
-                    type="submit"
-                    :disabled="reuseSubmittingImageId === image.id"
-                  >
-                    {{ reuseSubmittingImageId === image.id ? '放置中…' : '放到最新回复' }}
-                  </button>
-                  <button
-                    class="story-image-settings__button story-image-settings__button--quiet"
-                    type="button"
-                    :disabled="reuseSubmittingImageId === image.id"
-                    @click="cancelReuse"
-                  >
-                    取消
-                  </button>
-                </div>
-                <p v-if="reuseError" class="story-image-settings__error story-image-settings__reuse-error">
-                  {{ reuseError }}
-                </p>
-              </form>
+              <p v-if="saveGalleryError === image.id" class="story-image-settings__error">保存失败，请稍后重试。</p>
             </article>
           </div>
         </div>
 
         <div v-else class="story-image-settings__panel story-image-settings__settings-panel">
-          <h4 class="story-image-settings__section-title">API 配置档案</h4>
-          <p class="story-image-settings__description">
-            每个档案独立保存图片接口、认证信息和生成参数；每次生成只请求一次，失败后需手动重新生成。
-          </p>
           <div class="story-image-settings__advanced-content">
             <div class="story-image-settings__profile-toolbar">
               <label class="story-image-settings__field" for="story-image-profile-select">
@@ -402,25 +261,6 @@
                   删除配置
                 </button>
               </div>
-            </div>
-
-            <div class="story-image-settings__advanced-grid">
-              <label class="story-image-settings__field" for="story-image-story-profile-select">
-                <span class="story-image-settings__label">随文／预测使用</span>
-                <select id="story-image-story-profile-select" v-model="settings.storyApiProfileId" class="text_pole">
-                  <option v-for="profile in settings.apiProfiles" :key="profile.id" :value="profile.id">
-                    {{ profile.name || '未命名配置' }}
-                  </option>
-                </select>
-              </label>
-              <label class="story-image-settings__field" for="story-image-gift-profile-select">
-                <span class="story-image-settings__label">礼物 CG 使用</span>
-                <select id="story-image-gift-profile-select" v-model="settings.giftApiProfileId" class="text_pole">
-                  <option v-for="profile in settings.apiProfiles" :key="profile.id" :value="profile.id">
-                    {{ profile.name || '未命名配置' }}
-                  </option>
-                </select>
-              </label>
             </div>
 
             <label class="story-image-settings__field" for="story-image-profile-name">
@@ -499,6 +339,47 @@
               </p>
             </div>
 
+            <label class="story-image-settings__field" for="story-image-request-mode">
+              <span class="story-image-settings__label">参考图请求模式</span>
+              <select id="story-image-request-mode" v-model="activeProfile.requestMode" class="text_pole">
+                <option value="auto">自动判断</option>
+                <option value="multipart-edit">Multipart 编辑</option>
+                <option value="chat-multimodal">Chat 多模态</option>
+                <option value="json-reference">JSON 参考图</option>
+              </select>
+              <small class="story-image-settings__description">
+                仅在当前出图预设开启头像参考并取得头像时使用；无参考图始终走普通生图。
+              </small>
+            </label>
+            <label
+              v-if="activeProfile.requestMode === 'multipart-edit'"
+              class="story-image-settings__field"
+              for="story-image-multipart-field"
+            >
+              <span class="story-image-settings__label">Multipart 图片字段</span>
+              <select id="story-image-multipart-field" v-model="activeProfile.multipartImageField" class="text_pole">
+                <option value="auto">自动判断</option>
+                <option value="image">image</option>
+                <option value="image[]">image[]</option>
+              </select>
+            </label>
+            <label
+              v-if="activeProfile.requestMode === 'json-reference'"
+              class="story-image-settings__field"
+              for="story-image-json-reference-field"
+            >
+              <span class="story-image-settings__label">JSON 参考图字段</span>
+              <select
+                id="story-image-json-reference-field"
+                v-model="activeProfile.jsonReferenceField"
+                class="text_pole"
+              >
+                <option value="images">images</option>
+                <option value="reference_images">reference_images</option>
+                <option value="image">image</option>
+              </select>
+            </label>
+
             <div class="story-image-settings__grid">
               <label class="story-image-settings__field" for="story-image-size">
                 <span class="story-image-settings__label">尺寸</span>
@@ -509,9 +390,9 @@
                 <input
                   id="story-image-timeout"
                   v-model.number="activeProfile.timeoutMs"
-                  class="text_pole"
                   min="1000"
                   step="1000"
+                  class="text_pole"
                   type="number"
                 />
               </label>
@@ -536,49 +417,45 @@
 
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
-import type { GiftImageReference } from './reference-image-memory';
+import { computed, onBeforeUnmount, ref, type Ref, watch } from 'vue';
+import { createDrawingPreset, deleteDrawingPreset, updateDrawingPreset } from './drawing-preset';
 import { fetchModelList, ModelListApiError } from './model-api';
-import type { GiftImageTask } from './gift-image-cache';
 import type { RecentGeneratedImage } from './recent-image-cache';
-import type { StoryImageRuntime } from './runtime';
-import type { GiftReferenceSlot, GiftSettings, ImageApiProfile } from './settings';
-import { repairApiProfileRouteIds, useStoryImageSettingsStore } from './settings';
+import { createOutputPreset, deleteOutputPreset, updateOutputPreset } from './output-preset';
+import type { ImageApiProfile } from './settings';
+import {
+  getCurrentDrawingPreset,
+  getCurrentOutputPreset,
+  normalizeRecentImageLimit,
+  repairApiProfileRouteIds,
+  useStoryImageSettingsStore,
+} from './settings';
 
-const props = defineProps<{ runtime: StoryImageRuntime }>();
+type ImageSettingsRuntime = {
+  status: Readonly<Ref<string>>;
+  recentImages: Readonly<Ref<RecentGeneratedImage[]>>;
+  removeRecentImage: (id: string) => boolean;
+  /** Runtime adapter implemented by the parent agent; it must not persist data automatically. */
+  saveRecentImageToGallery?: (artifactId: string) => Promise<unknown> | unknown;
+};
+
+const props = defineProps<{ runtime: ImageSettingsRuntime }>();
 const { settings } = storeToRefs(useStoryImageSettingsStore());
 const tabs = [
-  { value: 'inline', label: '随文插图' },
-  { value: 'gift', label: '礼物 CG' },
+  { value: 'preset', label: '画图预设' },
+  { value: 'output', label: '出图预设' },
   { value: 'recent', label: '最近生成' },
-  { value: 'settings', label: '设置' },
+  { value: 'settings', label: 'API 设置' },
 ] as const;
 type TabValue = (typeof tabs)[number]['value'];
-const giftReferenceSlots: Array<{
-  id: GiftReferenceSlot;
-  label: string;
-  description: string;
-}> = [
-  { id: 'character-1', label: '角色 1 参考图', description: '决定角色 1 的身份特征。' },
-  { id: 'character-2', label: '角色 2 参考图', description: '决定角色 2 的身份特征。' },
-  { id: 'template', label: '当前模板图', description: '决定动作、姿势、镜头和构图。' },
-];
-const giftPromptSections: Array<{
-  key: keyof Pick<GiftSettings, 'identityPrompt' | 'templatePrompt' | 'scenePrompt' | 'stylePrompt' | 'outputPrompt'>;
-  label: string;
-  description: string;
-}> = [
-  { key: 'identityPrompt', label: '身份规则', description: '角色身份只来自角色参考图。' },
-  { key: 'templatePrompt', label: '模板图规则', description: '模板图只提供动作和构图信息。' },
-  { key: 'scenePrompt', label: '正文场景规则', description: '从当前聊天上下文读取剧情、服装、场景和氛围。' },
-  { key: 'stylePrompt', label: '画风规则', description: '控制二次元重绘和礼物 CG 的视觉风格。' },
-  { key: 'outputPrompt', label: '输出规则', description: '只输出一条安全的中文图生图提示词。' },
-];
-const activeTab = ref<TabValue>(settings.value.mode);
+const activeTab = ref<TabValue>('preset');
+
+const activePreset = computed(() => getCurrentDrawingPreset(settings.value));
+const activeOutputPreset = computed(() => getCurrentOutputPreset(settings.value));
 const activeProfile = computed<ImageApiProfile>(
   () =>
     settings.value.apiProfiles.find(profile => profile.id === settings.value.activeApiProfileId) ??
-    settings.value.apiProfiles[0],
+    settings.value.apiProfiles[0]!,
 );
 const activeProfileState = computed(() => ({
   id: activeProfile.value.id,
@@ -594,30 +471,12 @@ let modelRequestController: AbortController | null = null;
 let profileSequence = 0;
 const extraBodyText = ref(JSON.stringify(activeProfile.value.extraBody, null, 2));
 const extraBodyError = ref('');
-const reuseEditorImageId = ref<string | null>(null);
-const reuseCaption = ref('');
-const reuseSubmittingImageId = ref<string | null>(null);
-const reuseError = ref('');
+const savingGalleryImageId = ref<string | null>(null);
+const saveGalleryError = ref<string | null>(null);
 
 const runtimeStatus = computed(() => props.runtime.status.value);
 const recentImages = computed(() => props.runtime.recentImages.value);
-const giftTasks = computed(() => props.runtime.giftImages.value);
-const giftReferences = computed(() => props.runtime.referenceImages.value);
-const giftNameInputs = reactive<Record<GiftReferenceSlot, string>>({
-  'character-1': '',
-  'character-2': '',
-  template: '',
-});
-const giftUrlInputs = reactive<Record<GiftReferenceSlot, string>>({
-  'character-1': '',
-  'character-2': '',
-  template: '',
-});
-const hasAllGiftReferences = computed(() => giftReferences.value.length === 3);
-const giftBusy = computed(() => giftTasks.value.some(task => task.status === 'pending' || task.status === 'running'));
-const giftError = ref('');
 const statusLabel = computed(() => {
-  if (activeTab.value === 'gift') return settings.value.gift.enabled ? '礼物 CG 图生图模块已就绪' : '礼物 CG 已关闭';
   if (!settings.value.enabled) return '已关闭';
   if (runtimeStatus.value === 'generating') return '正在生成，聊天正文不受阻塞';
   if (runtimeStatus.value === 'error') return '最近一次图片任务失败';
@@ -626,8 +485,74 @@ const statusLabel = computed(() => {
   return '等待 AI 回复';
 });
 
-function selectTab(tab: TabValue) {
+function selectTab(tab: TabValue): void {
   activeTab.value = tab;
+}
+
+function createPreset(): void {
+  const preset = createDrawingPreset({
+    name: `新预设 ${settings.value.drawingPresets.length + 1}`,
+    instructionText: activePreset.value.instructionText,
+  });
+  settings.value.drawingPresets = [...settings.value.drawingPresets, preset];
+  settings.value.currentDrawingPresetId = preset.id;
+}
+
+function savePreset(): void {
+  const index = settings.value.drawingPresets.findIndex(preset => preset.id === settings.value.currentDrawingPresetId);
+  if (index < 0) return;
+  const [saved] = updateDrawingPreset(settings.value.drawingPresets, settings.value.currentDrawingPresetId, {
+    name: activePreset.value.name.trim() || '未命名预设',
+    instructionText: activePreset.value.instructionText,
+  }).filter(preset => preset.id === settings.value.currentDrawingPresetId);
+  if (!saved) return;
+  settings.value.drawingPresets.splice(index, 1, saved);
+  toastr.success('画图预设已保存。');
+}
+
+function deleteActivePreset(): void {
+  const result = deleteDrawingPreset(
+    settings.value.drawingPresets,
+    settings.value.currentDrawingPresetId,
+    settings.value.currentDrawingPresetId,
+  );
+  if (!result.deleted) return;
+  settings.value.drawingPresets = result.presets;
+  settings.value.currentDrawingPresetId = result.currentId;
+}
+
+function createOutputPresetEntry(): void {
+  const preset = createOutputPreset({
+    name: `新预设 ${settings.value.outputPresets.length + 1}`,
+    templateText: activeOutputPreset.value.templateText,
+    useAvatarReferences: activeOutputPreset.value.useAvatarReferences,
+  });
+  settings.value.outputPresets = [...settings.value.outputPresets, preset];
+  settings.value.currentOutputPresetId = preset.id;
+}
+
+function saveOutputPresetEntry(): void {
+  const index = settings.value.outputPresets.findIndex(preset => preset.id === settings.value.currentOutputPresetId);
+  if (index < 0) return;
+  const [saved] = updateOutputPreset(settings.value.outputPresets, settings.value.currentOutputPresetId, {
+    name: activeOutputPreset.value.name.trim() || '未命名出图预设',
+    templateText: activeOutputPreset.value.templateText,
+    useAvatarReferences: activeOutputPreset.value.useAvatarReferences,
+  }).filter(preset => preset.id === settings.value.currentOutputPresetId);
+  if (!saved) return;
+  settings.value.outputPresets.splice(index, 1, saved);
+  toastr.success('出图预设已保存。');
+}
+
+function deleteActiveOutputPreset(): void {
+  const result = deleteOutputPreset(
+    settings.value.outputPresets,
+    settings.value.currentOutputPresetId,
+    settings.value.currentOutputPresetId,
+  );
+  if (!result.deleted) return;
+  settings.value.outputPresets = result.presets;
+  settings.value.currentOutputPresetId = result.currentId;
 }
 
 function createProfileId(): string {
@@ -647,6 +572,9 @@ function createProfile(): void {
     timeoutMs: 120_000,
     retryAttempts: 0,
     retryDelayMs: 1_500,
+    requestMode: 'auto',
+    multipartImageField: 'auto',
+    jsonReferenceField: 'images',
     extraBody: {},
   });
   settings.value.activeApiProfileId = id;
@@ -657,105 +585,35 @@ function deleteActiveProfile(): void {
   const deletedId = activeProfile.value.id;
   const deletedIndex = settings.value.apiProfiles.findIndex(profile => profile.id === deletedId);
   settings.value.apiProfiles.splice(deletedIndex, 1);
-  modelCache.delete(deletedId);
   const adjacentProfile = settings.value.apiProfiles[Math.min(deletedIndex, settings.value.apiProfiles.length - 1)];
   repairApiProfileRouteIds(settings.value, adjacentProfile.id);
 }
 
-function referenceFor(slot: GiftReferenceSlot): GiftImageReference | undefined {
-  return giftReferences.value.find(reference => reference.id === slot);
-}
-
-function referencePreview(reference: GiftImageReference | undefined): string {
-  return reference?.dataUrl || reference?.url || '';
-}
-
-function openGiftFilePicker(slot: GiftReferenceSlot): void {
-  document.getElementById(`story-image-gift-file-${slot}`)?.click();
-}
-
-function syncReferenceInputs(reference: GiftImageReference): void {
-  giftNameInputs[reference.id] = reference.name;
-  giftUrlInputs[reference.id] = reference.source === 'url' ? reference.url || '' : '';
-}
-
-async function onGiftFileChange(event: Event, slot: GiftReferenceSlot): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0] ?? null;
-  if (!file) return;
-  if (!file.type.startsWith('image/')) {
-    giftError.value = '请选择图片文件。';
-    input.value = '';
+async function saveRecentImageToGallery(artifactId: string): Promise<void> {
+  if (!props.runtime.saveRecentImageToGallery) {
+    saveGalleryError.value = artifactId;
+    toastr.info('角色图库保存接口将在运行时验收阶段接入。');
     return;
   }
-  giftError.value = '';
+  savingGalleryImageId.value = artifactId;
+  saveGalleryError.value = null;
   try {
-    const reference = await props.runtime.setGiftReferenceFile(slot, file, giftNameInputs[slot]);
-    syncReferenceInputs(reference);
-  } catch (error) {
-    giftError.value = error instanceof Error ? error.message : '参考图读取失败。';
+    await props.runtime.saveRecentImageToGallery(artifactId);
+    toastr.success('已保存到当前角色图库。');
+  } catch {
+    saveGalleryError.value = artifactId;
+    toastr.error('保存到角色图库失败，图片仍保留在本页内存中。');
   } finally {
-    input.value = '';
+    savingGalleryImageId.value = null;
   }
 }
 
-function setGiftReferenceUrl(slot: GiftReferenceSlot): void {
-  const url = giftUrlInputs[slot].trim();
-  if (!url) return;
-  try {
-    const reference = props.runtime.setGiftReferenceUrl(slot, url, giftNameInputs[slot]);
-    syncReferenceInputs(reference);
-    giftError.value = '';
-  } catch (error) {
-    giftError.value = error instanceof Error ? error.message : '参考图 URL 无效。';
-  }
+function removeRecentImage(id: string): void {
+  props.runtime.removeRecentImage(id);
 }
 
-function renameGiftReference(slot: GiftReferenceSlot, event: Event): void {
-  const input = event.target as HTMLInputElement;
-  giftNameInputs[slot] = input.value;
-  props.runtime.renameGiftReference(slot, input.value);
-}
-
-function removeGiftReference(slot: GiftReferenceSlot): void {
-  props.runtime.removeGiftReference(slot);
-  giftNameInputs[slot] = '';
-  giftUrlInputs[slot] = '';
-  giftError.value = '';
-}
-
-function generateGift(): void {
-  giftError.value = '';
-  if (!settings.value.gift.enabled) {
-    giftError.value = '请先启用礼物 CG。';
-    return;
-  }
-  if (!hasAllGiftReferences.value) {
-    giftError.value = '请先准备角色 1、角色 2 和模板图。';
-    return;
-  }
-  const task = props.runtime.generateGift(getLastMessageId());
-  if (!task) giftError.value = '礼物 CG 任务未能启动，请检查参考图和 API 配置。';
-}
-
-function giftTaskStatus(status: GiftImageTask['status'], error: string | null): string {
-  if (status === 'pending') return '等待生成…';
-  if (status === 'running') return '正在生成…';
-  if (status === 'cancelled') return '已取消';
-  return error ? `生成失败：${error}` : '生成失败';
-}
-
-function downloadGiftImage(task: GiftImageTask): void {
-  if (!task.image) return;
-  const link = document.createElement('a');
-  link.href = task.image.url;
-  link.download = `gift-cg-${task.id}.png`;
-  link.rel = 'noopener';
-  link.click();
-}
-
-function clearGiftImages(): void {
-  props.runtime.clearGiftImages();
+function normalizeRecentImageLimitInput(): void {
+  settings.value.recentImageLimit = normalizeRecentImageLimit(settings.value.recentImageLimit);
 }
 
 async function pullModels(): Promise<void> {
@@ -779,70 +637,6 @@ async function pullModels(): Promise<void> {
   } finally {
     if (modelRequestController === controller) modelRequestController = null;
   }
-}
-
-function downloadRecentImage(image: RecentGeneratedImage): void {
-  const link = document.createElement('a');
-  link.href = image.url;
-  link.download =
-    image.source === '礼物 CG'
-      ? `gift-cg-${image.giftTaskId || image.createdAt}.png`
-      : `story-image-${image.messageId ?? 'unknown'}-${image.swipeId ?? 0}-${(image.imageIndex ?? 0) + 1}.png`;
-  link.rel = 'noopener';
-  link.click();
-}
-
-function openReuseEditor(imageId: string): void {
-  if (reuseEditorImageId.value !== imageId) {
-    reuseCaption.value = '';
-    reuseError.value = '';
-  }
-  reuseEditorImageId.value = imageId;
-}
-
-function cancelReuse(): void {
-  reuseEditorImageId.value = null;
-  reuseCaption.value = '';
-  reuseError.value = '';
-}
-
-function reuseFailureMessage(reason: 'artifact_missing' | 'no_assistant_message' | 'target_unavailable'): string {
-  if (reason === 'artifact_missing') return '这张图片已经不在本页内存里了。';
-  if (reason === 'no_assistant_message') return '当前聊天还没有可放置的 AI 回复。';
-  return '最新回复暂时无法放置图片。';
-}
-
-function submitReuse(imageId: string): void {
-  if (reuseSubmittingImageId.value) return;
-
-  reuseSubmittingImageId.value = imageId;
-  reuseError.value = '';
-  try {
-    const result = props.runtime.reuseArtifactToLatestAssistant(imageId, reuseCaption.value.trim());
-    if (!result.ok) {
-      reuseError.value = reuseFailureMessage(result.reason);
-      return;
-    }
-    toastr.success('已复用到最新回复。');
-    cancelReuse();
-  } catch {
-    reuseError.value = '这次放置没有成功。';
-  } finally {
-    reuseSubmittingImageId.value = null;
-  }
-}
-
-function undoLastReuse(): void {
-  if (props.runtime.undoLastReuse()) {
-    toastr.success('已撤回上一次复用。');
-    return;
-  }
-  toastr.info('当前没有可撤回的复用图片。');
-}
-
-function removeRecentImage(id: string): void {
-  if (reuseEditorImageId.value === id) cancelReuse();
-  props.runtime.removeRecentImage(id);
 }
 
 watch(
@@ -873,7 +667,7 @@ watch(
   { deep: true },
 );
 
-function applyExtraBody() {
+function applyExtraBody(): void {
   try {
     const parsed: unknown = JSON.parse(extraBodyText.value || '{}');
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('必须是 JSON 对象');
@@ -888,25 +682,3 @@ onBeforeUnmount(() => {
   modelRequestController?.abort();
 });
 </script>
-
-<style scoped>
-.story-image-settings__reuse-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4em;
-}
-
-.story-image-settings__reuse-caption {
-  box-sizing: border-box;
-  width: 100%;
-}
-
-.story-image-settings__reuse-actions {
-  display: flex;
-  gap: 0.4em;
-}
-
-.story-image-settings__reuse-error {
-  margin: 0;
-}
-</style>

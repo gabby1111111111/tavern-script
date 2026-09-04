@@ -1,5 +1,9 @@
-import type { GiftRequestMode, ImageApiProfile, MultipartImageField } from './settings';
-import { referenceToBlob, type GiftImageReference } from './reference-image-memory';
+import type { ImageRequestInput } from './pipeline-types';
+import type { ImageApiProfile } from './settings';
+
+/** v0.3 统一入口支持的参考图请求形态。 */
+export type ImageRequestMode = 'auto' | 'multipart-edit' | 'chat-multimodal' | 'json-reference';
+export type MultipartImageField = 'auto' | 'image' | 'image[]';
 
 export type ImageResource = {
   url: string;
@@ -13,9 +17,9 @@ export type ImageEditInput = {
   filename: string;
 };
 
-export type GiftImageRequestMode = Exclude<GiftRequestMode, 'auto'>;
+export type ResolvedImageRequestMode = Exclude<ImageRequestMode, 'auto'>;
 
-export function resolveGiftRequestMode(serviceUrl: string, configured: GiftRequestMode): GiftImageRequestMode {
+export function resolveImageRequestMode(serviceUrl: string, configured: ImageRequestMode): ResolvedImageRequestMode {
   if (configured !== 'auto') return configured;
   const normalized = serviceUrl.toLowerCase();
   if (normalized.includes('/images/edits')) return 'multipart-edit';
@@ -154,30 +158,143 @@ function appendExtraBody(form: FormData, extraBody: Record<string, unknown>): vo
   });
 }
 
-async function referenceToInput(
-  reference: GiftImageReference,
+function dataUrlToBlob(value: string): Blob {
+  const match = value.match(/^data:(image\/[\w.+-]+);base64,(.*)$/is);
+  if (!match) throw new ImageApiError('参考图数据格式无效');
+  const decode = typeof window !== 'undefined' && typeof window.atob === 'function' ? window.atob.bind(window) : atob;
+  const binary = decode(match[2].replace(/\s/g, ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: match[1] });
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const mimeType = blob.type.startsWith('image/') ? blob.type : 'image/png';
+  if (typeof FileReader !== 'undefined') {
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === 'string' && result.startsWith('data:')) resolve(result);
+        else reject(new ImageApiError('参考图读取结果无效'));
+      };
+      reader.onerror = () => reject(new ImageApiError('参考图读取失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // FileReader is a browser API, but this fallback keeps the adapter testable in
+  // a non-DOM harness. The resulting data URL is still request-local only.
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  const encode = typeof window !== 'undefined' && typeof window.btoa === 'function' ? window.btoa.bind(window) : btoa;
+  return `data:${mimeType};base64,${encode(binary)}`;
+}
+
+function referenceFilename(value: string, index: number): string {
+  try {
+    const baseUrl = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
+    const pathname = new URL(value, baseUrl).pathname;
+    const candidate = pathname.split('/').pop()?.trim() ?? '';
+    const safe = candidate.replace(/[^a-zA-Z0-9._-]/g, '-');
+    if (safe) return safe;
+  } catch {
+    // Use a deterministic fallback for data URLs and malformed relative paths.
+  }
+  return `reference-${index + 1}.png`;
+}
+
+async function referenceStringToInput(
+  value: string,
+  index: number,
   timeoutMs: number,
   signal: AbortSignal,
 ): Promise<ImageEditInput> {
-  if (reference.dataUrl) {
-    return { file: referenceToBlob(reference), filename: reference.fileName };
+  const normalized = value.trim();
+  if (!normalized) throw new ImageApiError('参考图地址为空');
+  if (isDataImageUrl(normalized)) {
+    return { file: dataUrlToBlob(normalized), filename: referenceFilename(normalized, index) };
   }
-  if (!reference.url) throw new ImageApiError(`参考图“${reference.name}”没有可用地址`);
-  const response = await fetchWithTimeout(reference.url, { method: 'GET' }, timeoutMs, signal);
-  if (!response.ok) throw new ImageApiError(`参考图“${reference.name}”读取失败（HTTP ${response.status}）`);
-  return { file: await response.blob(), filename: reference.fileName };
+  const response = await fetchWithTimeout(normalized, { method: 'GET' }, timeoutMs, signal);
+  if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
+  return { file: await response.blob(), filename: referenceFilename(normalized, index) };
 }
 
-function referenceUrl(reference: GiftImageReference): string {
-  return reference.dataUrl || reference.url || '';
+function isHttpReference(value: string): boolean {
+  return /^https?:\/\//i.test(value);
 }
 
-function collectGiftResponse(responseText: string): ImageResource {
-  const resources = collectImageResources(parseResponsePayload(responseText), responseText);
-  const resource = resources[0];
-  resources.slice(1).forEach(item => item.revoke?.());
-  if (!resource) throw new ImageApiError('图生图 API 响应中没有可显示的图片');
-  return resource;
+function isSameOriginReference(value: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const pageUrl = new URL(window.location.href);
+    return new URL(value, pageUrl).origin === pageUrl.origin;
+  } catch {
+    return false;
+  }
+}
+
+function shouldUseReferenceDirectly(value: string): boolean {
+  if (isDataImageUrl(value)) return true;
+  // A remote provider can fetch a genuinely remote HTTPS URL itself. Relative,
+  // blob, and same-origin URLs point back to ST and must be uploaded inline.
+  return isHttpReference(value) && !isSameOriginReference(value);
+}
+
+async function resolveJsonReference(value: string, timeoutMs: number, signal: AbortSignal): Promise<string> {
+  const normalized = value.trim();
+  if (!normalized) throw new ImageApiError('参考图地址为空');
+  if (shouldUseReferenceDirectly(normalized)) return normalized;
+
+  const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, window.location.href).toString() : normalized;
+  const response = await fetchWithTimeout(sourceUrl, { method: 'GET' }, timeoutMs, signal);
+  if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
+  if (signal.aborted) throw makeAbortError('图片请求已取消');
+  const dataUrl = await blobToDataUrl(await response.blob());
+  if (signal.aborted) throw makeAbortError('图片请求已取消');
+  return dataUrl;
+}
+
+async function resolveJsonReferences(values: string[], timeoutMs: number, signal: AbortSignal): Promise<string[]> {
+  const resolved: string[] = [];
+  for (let index = 0; index < values.length; index += 1) {
+    resolved.push(await resolveJsonReference(values[index], timeoutMs, signal));
+  }
+  return resolved;
+}
+
+export type ImageApiProfileWithMode = ImageApiProfile & {
+  requestMode?: ImageRequestMode;
+  multipartImageField?: MultipartImageField;
+  jsonReferenceField?: 'images' | 'reference_images' | 'image';
+};
+
+function profileRequestMode(profile: ImageApiProfileWithMode): ImageRequestMode {
+  return profile.requestMode ?? 'auto';
+}
+
+function profileMultipartImageField(profile: ImageApiProfileWithMode): MultipartImageField {
+  return profile.multipartImageField ?? 'auto';
+}
+
+function profileJsonReferenceField(profile: ImageApiProfileWithMode): 'images' | 'reference_images' | 'image' {
+  return profile.jsonReferenceField ?? 'images';
+}
+
+function jsonBodyWithoutReferenceFields(
+  profile: ImageApiProfileWithMode,
+  includeReferenceField: string | null,
+): Record<string, unknown> {
+  const referenceFields = new Set(['images', 'reference_images', 'image']);
+  const body: Record<string, unknown> = {};
+  Object.entries(profile.extraBody).forEach(([key, value]) => {
+    if (referenceFields.has(key) && key !== includeReferenceField) return;
+    body[key] = value;
+  });
+  return body;
 }
 
 type ImageValueOptions = {
@@ -324,32 +441,92 @@ function parseResponsePayload(responseText: string): unknown {
 }
 
 export async function requestImage(
-  prompt: string,
-  profile: ImageApiProfile,
+  profile: ImageApiProfileWithMode,
+  input: ImageRequestInput,
   signal: AbortSignal,
 ): Promise<ImageResource> {
+  const prompt = input.prompt;
+  const referenceImages = (input.referenceImages ?? []).map(reference => reference.trim()).filter(Boolean);
   const url = profile.serviceUrl.trim();
   if (!url) throw new ImageApiError('图片服务地址为空');
   if (!prompt.trim()) throw new ImageApiError('绘图提示词为空');
-
-  const body = {
-    ...profile.extraBody,
-    model: profile.model.trim(),
-    prompt: prompt.trim(),
-    n: 1,
-    size: profile.imageSize,
-  };
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (profile.apiKey.trim()) headers.Authorization = `Bearer ${profile.apiKey.trim()}`;
+  if (!profile.model.trim()) throw new ImageApiError('当前 API 配置尚未选择模型');
 
   const timeoutMs = Number.isFinite(profile.timeoutMs) ? Math.max(1_000, profile.timeoutMs) : 120_000;
+  const configuredMode = profileRequestMode(profile);
+  // An empty reference list must remain a normal generation request. In particular,
+  // An output preset with avatar references disabled must never accidentally turn into an edit request.
+  const resolvedMode =
+    referenceImages.length === 0 && configuredMode === 'auto'
+      ? 'generation'
+      : configuredMode === 'auto'
+        ? resolveImageRequestMode(url, configuredMode)
+        : configuredMode;
+
   try {
-    const response = await fetchWithTimeout(
-      url,
-      { method: 'POST', headers, body: JSON.stringify(body) },
-      timeoutMs,
-      signal,
-    );
+    const apiKey = profile.apiKey.trim();
+    const authHeaders: Record<string, string> = {};
+    if (apiKey) authHeaders.Authorization = `Bearer ${apiKey}`;
+
+    const jsonReferences =
+      referenceImages.length > 0 && (resolvedMode === 'chat-multimodal' || resolvedMode === 'json-reference')
+        ? await resolveJsonReferences(referenceImages, timeoutMs, signal)
+        : referenceImages;
+
+    let requestUrl = url;
+    let request: RequestInit;
+
+    if (resolvedMode === 'multipart-edit' && referenceImages.length > 0) {
+      requestUrl = inferImageEditUrl(url);
+      const form = new FormData();
+      form.append('model', profile.model.trim());
+      form.append('prompt', prompt.trim());
+      form.append('n', '1');
+      form.append('size', profile.imageSize);
+      const imageField = resolveMultipartImageField(requestUrl, profileMultipartImageField(profile));
+      for (let index = 0; index < referenceImages.length; index += 1) {
+        const inputImage = await referenceStringToInput(referenceImages[index], index, timeoutMs, signal);
+        form.append(imageField, inputImage.file, inputImage.filename);
+      }
+      appendExtraBody(form, profile.extraBody);
+      const headers = { ...authHeaders };
+      if (apiKey && serviceHostname(requestUrl) !== 'api.openai.com') headers['X-Api-Key'] = apiKey;
+      request = { method: 'POST', headers, body: form };
+    } else if (resolvedMode === 'chat-multimodal') {
+      const content = [
+        { type: 'text', text: prompt.trim() },
+        ...jsonReferences.map(reference => ({ type: 'image_url', image_url: { url: reference } })),
+      ];
+      request = {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...jsonBodyWithoutReferenceFields(profile, null),
+          model: profile.model.trim(),
+          messages: [{ role: 'user', content }],
+          n: 1,
+          size: profile.imageSize,
+        }),
+      };
+    } else {
+      const includeReferenceField =
+        resolvedMode === 'json-reference' && referenceImages.length > 0 ? profileJsonReferenceField(profile) : null;
+      const body: Record<string, unknown> = {
+        ...jsonBodyWithoutReferenceFields(profile, includeReferenceField),
+        model: profile.model.trim(),
+        prompt: prompt.trim(),
+        n: 1,
+        size: profile.imageSize,
+      };
+      if (includeReferenceField) body[includeReferenceField] = jsonReferences;
+      request = {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      };
+    }
+
+    const response = await fetchWithTimeout(requestUrl, request, timeoutMs, signal);
     const responseText = await response.text();
     if (!response.ok) {
       throw new ImageApiError(`图片 API 返回 HTTP ${response.status}`, { status: response.status });
@@ -363,148 +540,7 @@ export async function requestImage(
   } catch (error) {
     if (isAbortError(error) || signal.aborted) throw makeAbortError('图片请求已取消');
     if (error instanceof ImageApiError) throw error;
+    // Do not include prompt, URL, response body, or authentication data in errors.
     throw new ImageApiError('图片 API 请求失败');
-  }
-}
-
-export async function requestImageEdit(
-  prompt: string,
-  profile: ImageApiProfile,
-  inputs: ImageEditInput[],
-  signal: AbortSignal,
-): Promise<ImageResource> {
-  const url = inferImageEditUrl(profile.serviceUrl);
-  if (!profile.serviceUrl.trim()) throw new ImageApiError('图片服务地址为空');
-  if (!prompt.trim()) throw new ImageApiError('礼物 CG 绘图提示词为空');
-  if (inputs.length < 2) throw new ImageApiError('礼物 CG 至少需要角色参考图和模板图');
-  if (!profile.model.trim()) throw new ImageApiError('当前 API 配置尚未选择模型');
-
-  const form = new FormData();
-  form.append('model', profile.model.trim());
-  form.append('prompt', prompt.trim());
-  form.append('n', '1');
-  form.append('size', profile.imageSize);
-  inputs.forEach(input => form.append('image', input.file, input.filename));
-  appendExtraBody(form, profile.extraBody);
-
-  const headers: Record<string, string> = {};
-  if (profile.apiKey.trim()) headers.Authorization = `Bearer ${profile.apiKey.trim()}`;
-  const timeoutMs = Number.isFinite(profile.timeoutMs) ? Math.max(1_000, profile.timeoutMs) : 120_000;
-  try {
-    const response = await fetchWithTimeout(url, { method: 'POST', headers, body: form }, timeoutMs, signal);
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new ImageApiError(`图生图 API 返回 HTTP ${response.status}`, { status: response.status });
-    }
-    const resources = collectImageResources(parseResponsePayload(responseText), responseText);
-    const resource = resources[0];
-    resources.slice(1).forEach(item => item.revoke?.());
-    if (!resource) throw new ImageApiError('图生图 API 响应中没有可显示的图片');
-    return resource;
-  } catch (error) {
-    if (isAbortError(error) || signal.aborted) throw makeAbortError('礼物 CG 请求已取消');
-    if (error instanceof ImageApiError) throw error;
-    throw new ImageApiError('图生图 API 请求失败');
-  }
-}
-
-export async function requestGiftImage({
-  prompt,
-  references,
-  profile,
-  requestMode,
-  multipartImageField = 'auto',
-  jsonReferenceField,
-  signal,
-}: {
-  prompt: string;
-  references: GiftImageReference[];
-  profile: ImageApiProfile;
-  requestMode: GiftRequestMode;
-  multipartImageField?: MultipartImageField;
-  jsonReferenceField: 'images' | 'reference_images' | 'image';
-  signal: AbortSignal;
-}): Promise<ImageResource> {
-  const url = profile.serviceUrl.trim();
-  if (!url) throw new ImageApiError('图片服务地址为空');
-  if (!prompt.trim()) throw new ImageApiError('礼物 CG 绘图提示词为空');
-  if (references.length < 3) throw new ImageApiError('礼物 CG 需要角色 1、角色 2 和模板图');
-  if (!profile.model.trim()) throw new ImageApiError('当前 API 配置尚未选择模型');
-
-  const resolvedMode = resolveGiftRequestMode(url, requestMode);
-  const timeoutMs = Number.isFinite(profile.timeoutMs) ? Math.max(1_000, profile.timeoutMs) : 120_000;
-  try {
-    const headers: Record<string, string> = {};
-    const apiKey = profile.apiKey.trim();
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-      if (resolvedMode === 'multipart-edit' && serviceHostname(url) !== 'api.openai.com') {
-        headers['X-Api-Key'] = apiKey;
-      }
-    }
-    let requestUrl = url;
-    let request: RequestInit;
-
-    if (resolvedMode === 'multipart-edit') {
-      requestUrl = inferImageEditUrl(url);
-      const form = new FormData();
-      form.append('model', profile.model.trim());
-      form.append('prompt', prompt.trim());
-      form.append('n', '1');
-      form.append('size', profile.imageSize);
-      const imageField = resolveMultipartImageField(requestUrl, multipartImageField);
-      for (const reference of references) {
-        const input = await referenceToInput(reference, timeoutMs, signal);
-        form.append(imageField, input.file, input.filename);
-      }
-      appendExtraBody(form, profile.extraBody);
-      request = { method: 'POST', headers, body: form };
-    } else if (resolvedMode === 'chat-multimodal') {
-      const content = [
-        { type: 'text', text: prompt.trim() },
-        ...references.map(reference => ({
-          type: 'image_url',
-          image_url: { url: referenceUrl(reference) },
-        })),
-      ];
-      request = {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...profile.extraBody,
-          model: profile.model.trim(),
-          messages: [{ role: 'user', content }],
-          n: 1,
-          size: profile.imageSize,
-        }),
-      };
-    } else {
-      request = {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...profile.extraBody,
-          model: profile.model.trim(),
-          prompt: prompt.trim(),
-          n: 1,
-          size: profile.imageSize,
-          [jsonReferenceField]: references.map(referenceUrl),
-          reference_characters: references
-            .filter(reference => reference.kind === 'character')
-            .map(reference => reference.name),
-        }),
-      };
-    }
-
-    const response = await fetchWithTimeout(requestUrl, request, timeoutMs, signal);
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new ImageApiError(`图生图 API 返回 HTTP ${response.status}`, { status: response.status });
-    }
-    return collectGiftResponse(responseText);
-  } catch (error) {
-    if (isAbortError(error) || signal.aborted) throw makeAbortError('礼物 CG 请求已取消');
-    if (error instanceof ImageApiError) throw error;
-    throw new ImageApiError('图生图 API 请求失败');
   }
 }

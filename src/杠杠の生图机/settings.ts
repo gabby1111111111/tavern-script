@@ -2,6 +2,57 @@ import { klona } from 'klona';
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { z } from 'zod';
+import {
+  DEFAULT_DRAWING_PRESET,
+  DEFAULT_DRAWING_PRESET_ID,
+  DrawingPresetSchema,
+  LEGACY_GIFT_DRAWING_PRESET_ID,
+  LEGACY_GIFT_DRAWING_PRESET_NAME,
+  getCurrentDrawingPreset as getCurrentDrawingPresetFromList,
+  normalizeDrawingPresets,
+  type DrawingPreset,
+} from './drawing-preset';
+import {
+  DEFAULT_OUTPUT_PRESET,
+  DEFAULT_OUTPUT_PRESET_ID,
+  ImageOutputPresetSchema,
+  getCurrentOutputPreset as getCurrentOutputPresetFromList,
+  normalizeOutputPresets,
+  type ImageOutputPreset,
+} from './output-preset';
+
+export {
+  DEFAULT_DRAWING_PRESET,
+  DEFAULT_DRAWING_PRESET_ID,
+  DrawingPresetSchema,
+  LEGACY_GIFT_DRAWING_PRESET_ID,
+  LEGACY_GIFT_DRAWING_PRESET_NAME,
+  createDrawingPreset,
+  deleteDrawingPreset,
+  normalizeDrawingPreset,
+  normalizeDrawingPresets,
+  updateDrawingPreset,
+} from './drawing-preset';
+export type { DrawingPreset } from './drawing-preset';
+export {
+  DEFAULT_IMAGE_OUTPUT_PRESET,
+  DEFAULT_IMAGE_OUTPUT_PRESET_ID,
+  DEFAULT_OUTPUT_PRESET,
+  DEFAULT_OUTPUT_PRESET_ID,
+  ImageOutputPresetSchema,
+  createImageOutputPreset,
+  createOutputPreset,
+  deleteImageOutputPreset,
+  deleteOutputPreset,
+  getCurrentImageOutputPreset,
+  normalizeImageOutputPreset,
+  normalizeImageOutputPresets,
+  normalizeOutputPreset,
+  normalizeOutputPresets,
+  updateImageOutputPreset,
+  updateOutputPreset,
+} from './output-preset';
+export type { ImageOutputPreset } from './output-preset';
 
 const LEGACY_INLINE_PROMPT_DEFAULT =
   '当回复中确实需要一张或两张随文插图时，在对应正文段落中输出最多两个 <pic prompt="英文绘图提示词"> 标记；没有需要时不要输出标记。不要输出分析过程。';
@@ -115,10 +166,19 @@ export const GiftImageSettings = z.object({
 
 export type GiftSettings = z.infer<typeof GiftImageSettings>;
 
-export function composeInlinePrompt(settings: Pick<StoryImageSettings, PromptSectionKey>): string {
+type LegacyInlinePromptSettings = Partial<Record<PromptSectionKey, string>> & {
+  drawingPresets?: DrawingPreset[];
+  currentDrawingPresetId?: string;
+};
+
+export function composeInlinePrompt(settings: LegacyInlinePromptSettings): string {
   const sections = [settings.basePrompt, settings.scenePrompt, settings.stylePrompt, settings.safetyPrompt]
-    .map(section => section.trim())
-    .filter(Boolean);
+    .filter((section): section is string => typeof section === 'string' && section.trim().length > 0)
+    .map(section => section.trim());
+  if (sections.length === 0 && settings.drawingPresets) {
+    const current = getCurrentDrawingPresetFromList(settings.drawingPresets, settings.currentDrawingPresetId ?? '');
+    if (current.instructionText.trim()) sections.push(current.instructionText.trim());
+  }
   return `<杠杠の生图机>\n${sections.join('\n\n')}\n</杠杠の生图机>`;
 }
 
@@ -135,6 +195,9 @@ const DEFAULT_IMAGE_API_PROFILE = {
   timeoutMs: 120_000,
   retryAttempts: 0,
   retryDelayMs: 1_500,
+  requestMode: 'auto',
+  multipartImageField: 'auto',
+  jsonReferenceField: 'images',
   extraBody: {},
 } as const;
 
@@ -149,28 +212,338 @@ export const ImageApiProfile = z.object({
   timeoutMs: z.number().int().min(1000).max(900_000).default(120_000),
   retryAttempts: z.number().int().min(0).max(5).default(0),
   retryDelayMs: z.number().int().min(0).max(60_000).default(1_500),
+  requestMode: z.enum(['auto', 'multipart-edit', 'chat-multimodal', 'json-reference']).default('auto'),
+  multipartImageField: z.enum(['auto', 'image', 'image[]']).default('auto'),
+  jsonReferenceField: z.enum(['images', 'reference_images', 'image']).default('images'),
   extraBody: z.record(z.string(), z.unknown()).default({}),
 });
 
 export type ImageApiProfile = z.infer<typeof ImageApiProfile>;
 
-export const ImageSettings = z
+export const MAX_SKIP_FLOORS = 1000;
+
+export const DisplaySettingsSchema = z.object({
+  displayMode: z.enum(['inline', 'gift']).default('inline'),
+  // The UI accepts a number input, while old or hand-edited script variables
+  // can contain strings. Coercion is kept at the persistence boundary.
+  skipFloors: z.coerce.number().int().min(0).max(MAX_SKIP_FLOORS).default(0),
+});
+
+export type DisplaySettings = z.infer<typeof DisplaySettingsSchema>;
+export type DisplayMode = DisplaySettings['displayMode'];
+export type StoryImageDisplaySettings = DisplaySettings;
+
+export const DEFAULT_RECENT_IMAGE_LIMIT = 10;
+export const MIN_RECENT_IMAGE_LIMIT = 1;
+export const MAX_RECENT_IMAGE_LIMIT = 50;
+
+export const RecentImageLimitSchema = z.coerce
+  .number()
+  .int()
+  .min(MIN_RECENT_IMAGE_LIMIT)
+  .max(MAX_RECENT_IMAGE_LIMIT)
+  .default(DEFAULT_RECENT_IMAGE_LIMIT);
+
+const DEFAULT_DRAWING_INSTRUCTION = [
+  DEFAULT_PROMPT_SECTIONS.base.join('\n'),
+  DEFAULT_PROMPT_SECTIONS.scene.join('\n'),
+  DEFAULT_PROMPT_SECTIONS.style.join('\n'),
+  DEFAULT_PROMPT_SECTIONS.safety.join('\n'),
+]
+  .map(section => section.trim())
+  .filter(Boolean)
+  .join('\n\n');
+
+const DEFAULT_DRAWING_PRESETS: DrawingPreset[] = [
+  { ...DEFAULT_DRAWING_PRESET, instructionText: DEFAULT_DRAWING_INSTRUCTION },
+];
+
+const DEFAULT_OUTPUT_PRESETS: ImageOutputPreset[] = [{ ...DEFAULT_OUTPUT_PRESET }];
+
+export function normalizeRecentImageLimit(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_RECENT_IMAGE_LIMIT;
+  return Math.min(MAX_RECENT_IMAGE_LIMIT, Math.max(MIN_RECENT_IMAGE_LIMIT, Math.trunc(numeric)));
+}
+
+function parseApiProfiles(raw: Record<string, unknown>): ImageApiProfile[] {
+  if (Array.isArray(raw.apiProfiles)) {
+    const profiles = raw.apiProfiles
+      .map(item => ImageApiProfile.safeParse(item))
+      .filter((result): result is { success: true; data: ImageApiProfile } => result.success)
+      .map(result => result.data);
+    if (profiles.length > 0) return profiles;
+  }
+
+  const legacyProfile = ImageApiProfile.safeParse({
+    id: DEFAULT_IMAGE_API_PROFILE_ID,
+    name: '默认配置',
+    serviceUrl: raw.serviceUrl,
+    modelListUrl: '',
+    apiKey: raw.apiKey,
+    model: raw.model,
+    imageSize: raw.imageSize,
+    timeoutMs: raw.timeoutMs,
+    retryAttempts: raw.retryAttempts,
+    retryDelayMs: raw.retryDelayMs,
+    requestMode: raw.requestMode,
+    multipartImageField: raw.multipartImageField,
+    jsonReferenceField: raw.jsonReferenceField,
+    extraBody: raw.extraBody,
+  });
+  return legacyProfile.success ? [legacyProfile.data] : [ImageApiProfile.parse(DEFAULT_IMAGE_API_PROFILE)];
+}
+
+function profileRouteId(raw: Record<string, unknown>, key: string, fallback: string): string {
+  return typeof raw[key] === 'string' && raw[key].trim() ? raw[key].trim() : fallback;
+}
+
+function composeLegacyGiftPrompt(raw: Record<string, unknown>): string {
+  const gift = raw.gift && typeof raw.gift === 'object' ? (raw.gift as Record<string, unknown>) : {};
+  const sanitize = (value: unknown): string => {
+    if (typeof value !== 'string') return '';
+    return value
+      .split(/\r?\n/)
+      .filter(line => !/(模板图|模板|只输出一条|输出一条|图生图)/.test(line))
+      .join('\n')
+      .trim();
+  };
+  const values = [
+    ['身份约束', sanitize(gift.identityPrompt)],
+    ['正文场景约束', sanitize(gift.scenePrompt)],
+    ['画风约束', sanitize(gift.stylePrompt)],
+  ]
+    .filter((entry): entry is [string, string] => entry[1].length > 0)
+    .map(([label, text]) => `【${label}】\n${text}`);
+  return values.join('\n\n');
+}
+
+function legacyInlineInstruction(raw: Record<string, unknown>): string {
+  const sections = [raw.basePrompt, raw.scenePrompt, raw.stylePrompt, raw.safetyPrompt]
+    .filter((section): section is string => typeof section === 'string' && section.trim().length > 0)
+    .map(section => section.trim());
+  if (sections.length > 0) return sections.join('\n\n');
+  if (
+    typeof raw.inlinePrompt === 'string' &&
+    raw.inlinePrompt.trim() &&
+    raw.inlinePrompt.trim() !== LEGACY_INLINE_PROMPT_DEFAULT
+  ) {
+    return raw.inlinePrompt.trim();
+  }
+  return DEFAULT_DRAWING_INSTRUCTION;
+}
+
+function parseDrawingPresets(raw: Record<string, unknown>): DrawingPreset[] {
+  if (Array.isArray(raw.drawingPresets)) {
+    const presets = normalizeDrawingPresets(raw.drawingPresets);
+    // If only malformed values were supplied, normalizeDrawingPresets returns
+    // one safe default. Existing valid presets are otherwise preserved byte for
+    // byte apart from whitespace-normalized IDs/names.
+    return presets;
+  }
+
+  const inlinePreset: DrawingPreset = {
+    ...DEFAULT_DRAWING_PRESET,
+    instructionText: legacyInlineInstruction(raw),
+  };
+  const giftPrompt = composeLegacyGiftPrompt(raw);
+  if (!giftPrompt) return [inlinePreset];
+  return [
+    inlinePreset,
+    {
+      id: LEGACY_GIFT_DRAWING_PRESET_ID,
+      name: LEGACY_GIFT_DRAWING_PRESET_NAME,
+      // Keep the marker contract in front of the migrated gift rules so this
+      // compatibility preset remains usable when selected in v0.3.
+      instructionText: `${DEFAULT_DRAWING_PRESET.instructionText}\n\n${giftPrompt}`,
+    },
+  ];
+}
+
+function legacyCurrentDrawingPresetNeedsProcessing(raw: Record<string, unknown>): boolean {
+  const source = Array.isArray(raw.drawingPresets) ? raw.drawingPresets : [];
+  if (source.length === 0) return raw.needsProcessing === true;
+
+  const currentId = typeof raw.currentDrawingPresetId === 'string' ? raw.currentDrawingPresetId.trim() : '';
+  const current =
+    (currentId
+      ? source.find(
+          item =>
+            item &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            typeof (item as Record<string, unknown>).id === 'string' &&
+            ((item as Record<string, unknown>).id as string).trim() === currentId,
+        )
+      : undefined) ?? source[0];
+  return Boolean(
+    current &&
+    typeof current === 'object' &&
+    !Array.isArray(current) &&
+    (current as Record<string, unknown>).needsProcessing === true,
+  );
+}
+
+function parseOutputPresets(raw: Record<string, unknown>, inheritedUseAvatarReferences: boolean): ImageOutputPreset[] {
+  if (Array.isArray(raw.outputPresets) && raw.outputPresets.length > 0) {
+    return normalizeOutputPresets(raw.outputPresets);
+  }
+  return [{ ...DEFAULT_OUTPUT_PRESET, useAvatarReferences: inheritedUseAvatarReferences }];
+}
+
+type LegacyGiftTriggerInterval = 'manual' | '3' | '5';
+
+type LegacyDisplayMigration = {
+  displaySettings: StoryImageDisplaySettings;
+  disableAutomaticGeneration: boolean;
+};
+
+function hasExplicitDisplaySettings(raw: Record<string, unknown>): boolean {
+  return raw.displaySettings !== null && typeof raw.displaySettings === 'object' && !Array.isArray(raw.displaySettings);
+}
+
+function parseLegacyGiftTrigger(value: unknown): LegacyGiftTriggerInterval | null {
+  return value === 'manual' || value === '3' || value === '5' ? value : null;
+}
+
+function getLegacyDisplayMode(raw: Record<string, unknown>, legacyGift: Record<string, unknown>): 'inline' | 'gift' {
+  const trigger = parseLegacyGiftTrigger(legacyGift.triggerInterval);
+  if (legacyGift.enabled === true) {
+    // The old schema persisted mode:inline even when the independent gift
+    // route was enabled. Scheduled gift intervals are the stronger signal and
+    // must migrate to unified gift display rather than stale inline mode.
+    if (trigger === '3' || trigger === '5') return 'gift';
+
+    // A legacy manual gift route did not schedule anything. When inline is
+    // enabled and gift mode was not explicitly selected, preserve inline;
+    // otherwise keep gift mode so the migration can disable it safely.
+    if (trigger === 'manual' || trigger === null) {
+      if (raw.mode === 'gift') return 'gift';
+      if (raw.enabled === true) return 'inline';
+      return 'gift';
+    }
+
+    // Unknown/old gift intervals retain the historical gift preference.
+    return 'gift';
+  }
+
+  // If the legacy gift route was disabled, the old mode is the only remaining
+  // display hint. This is intentionally a fallback, not an override for an
+  // enabled gift route above.
+  if (raw.mode === 'gift' || raw.mode === 'inline') return raw.mode;
+  return 'inline';
+}
+
+function parseDisplaySettings(
+  raw: Record<string, unknown>,
+  legacyGift: Record<string, unknown> = {},
+): StoryImageDisplaySettings {
+  const nested = hasExplicitDisplaySettings(raw) ? (raw.displaySettings as Record<string, unknown>) : {};
+  const legacyMode = getLegacyDisplayMode(raw, legacyGift);
+  const displayMode =
+    nested.displayMode === 'gift' || nested.displayMode === 'inline'
+      ? nested.displayMode
+      : hasExplicitDisplaySettings(raw)
+        ? 'inline'
+        : legacyMode;
+  const numericSkipFloors = Number(nested.skipFloors);
+  const skipFloors = Number.isFinite(numericSkipFloors)
+    ? Math.min(MAX_SKIP_FLOORS, Math.max(0, Math.trunc(numericSkipFloors)))
+    : 0;
+  const parsed = DisplaySettingsSchema.safeParse({
+    displayMode,
+    skipFloors,
+  });
+  return parsed.success ? parsed.data : DisplaySettingsSchema.parse({ displayMode, skipFloors: 0 });
+}
+
+function migrateLegacyGiftTrigger(
+  raw: Record<string, unknown>,
+  legacyGift: Record<string, unknown>,
+  displaySettings: StoryImageDisplaySettings,
+): LegacyDisplayMigration {
+  // A v3 displaySettings object is authoritative. Do not reinterpret a stale
+  // v0.2 gift block after a successful migration has already been written.
+  if (hasExplicitDisplaySettings(raw)) {
+    return { displaySettings, disableAutomaticGeneration: false };
+  }
+
+  // A disabled legacy gift block is not an automatic route to migrate. Keep
+  // it inert unless the old configuration explicitly selected gift mode.
+  if (legacyGift.enabled !== true && raw.mode !== 'gift') {
+    return { displaySettings, disableAutomaticGeneration: false };
+  }
+
+  const trigger = parseLegacyGiftTrigger(legacyGift.triggerInterval);
+  if (!trigger) {
+    const explicitGiftMode = raw.mode === 'gift';
+    const hasRetainableInlineAutomaticRoute = raw.mode !== 'gift' && raw.enabled === true;
+    if (!explicitGiftMode && hasRetainableInlineAutomaticRoute) {
+      // Missing or invalid v0.2 trigger values are treated like manual: keep
+      // the usable inline route, but never infer an automatic gift schedule.
+      return { displaySettings, disableAutomaticGeneration: false };
+    }
+
+    // A gift route with no trustworthy schedule must not fall back to v3's
+    // skipFloors=0 (every-floor) behavior. Disable it conservatively.
+    return {
+      displaySettings: { ...displaySettings, skipFloors: MAX_SKIP_FLOORS },
+      disableAutomaticGeneration: true,
+    };
+  }
+
+  if (trigger === 'manual') {
+    const explicitGiftMode = raw.mode === 'gift';
+    const hasRetainableInlineAutomaticRoute = raw.mode !== 'gift' && raw.enabled === true;
+    if (!explicitGiftMode && hasRetainableInlineAutomaticRoute) {
+      // With no explicit gift mode, v0.2 could have inline generation enabled
+      // alongside a manual-only gift route. Keep inline mode and its enabled
+      // state; the manual gift route must not disable the whole plugin.
+      return { displaySettings, disableAutomaticGeneration: false };
+    }
+
+    // v0.2 manual meant “never schedule automatically”. v0.3 has no disabled
+    // value inside DisplaySettings, so disable the top-level switch as the
+    // only unambiguous migration. The large interval is a second guard for
+    // code that inspects this object directly; it is not relied on for safety.
+    return {
+      displaySettings: { ...displaySettings, skipFloors: MAX_SKIP_FLOORS },
+      disableAutomaticGeneration: true,
+    };
+  }
+
+  // v0.2 scheduled on the 3rd/5th reply. v0.3 always considers the first
+  // counted floor eligible, so exact phase preservation is impossible. Map
+  // 3→skip 2 and 5→skip 4 (the documented v3 interval) and keep the choice
+  // explicit rather than silently turning either value into every-floor mode.
+  const interval = Number(trigger);
+  return {
+    displaySettings: { ...displaySettings, skipFloors: interval - 1 },
+    disableAutomaticGeneration: false,
+  };
+}
+
+const StoryImageSettingsSchema = z
   .object({
     enabled: z.boolean().default(false),
-    mode: z.enum(['inline', 'gift']).default('inline'),
-    basePrompt: z.string().default(DEFAULT_PROMPT_SECTIONS.base.join('\n')),
-    scenePrompt: z.string().default(DEFAULT_PROMPT_SECTIONS.scene.join('\n')),
-    stylePrompt: z.string().default(DEFAULT_PROMPT_SECTIONS.style.join('\n')),
-    safetyPrompt: z.string().default(DEFAULT_PROMPT_SECTIONS.safety.join('\n')),
-    gift: GiftImageSettings.prefault({}),
+    drawingPresets: z.array(DrawingPresetSchema).min(1).default(DEFAULT_DRAWING_PRESETS),
+    currentDrawingPresetId: z.string().default(DEFAULT_DRAWING_PRESET_ID),
+    outputPresets: z.array(ImageOutputPresetSchema).min(1).default(DEFAULT_OUTPUT_PRESETS),
+    currentOutputPresetId: z.string().default(DEFAULT_OUTPUT_PRESET_ID),
+    recentImageLimit: RecentImageLimitSchema,
+    displaySettings: DisplaySettingsSchema.prefault({}),
     activeApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
+    apiProfiles: z.array(ImageApiProfile).min(1).default([DEFAULT_IMAGE_API_PROFILE]),
+
+    // Kept as non-UI compatibility routes while v0.2 callers are removed.
+    // They contain no image data and are repaired to an existing profile.
     storyApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
     giftApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
-    apiProfiles: z.array(ImageApiProfile).min(1).default([DEFAULT_IMAGE_API_PROFILE]),
   })
   .prefault({});
 
-export type StoryImageSettings = z.infer<typeof ImageSettings>;
+export const ImageSettings = StoryImageSettingsSchema;
+export type StoryImageSettings = z.infer<typeof StoryImageSettingsSchema>;
 
 export function getActiveApiProfile(settings: StoryImageSettings): ImageApiProfile {
   return settings.apiProfiles.find(profile => profile.id === settings.activeApiProfileId) ?? settings.apiProfiles[0];
@@ -196,44 +569,79 @@ export function getGiftApiProfile(settings: StoryImageSettings): ImageApiProfile
   );
 }
 
+export function getCurrentDrawingPreset(settings: StoryImageSettings): DrawingPreset {
+  return getCurrentDrawingPresetFromList(settings.drawingPresets, settings.currentDrawingPresetId);
+}
+
+export function getCurrentOutputPreset(settings: StoryImageSettings): ImageOutputPreset {
+  return getCurrentOutputPresetFromList(settings.outputPresets, settings.currentOutputPresetId);
+}
+
+// Explicitly named alias for callers that prefer to distinguish the settings
+// lookup from the pure list helper exported by drawing-preset.ts.
+export const getCurrentDrawingPresetForSettings = getCurrentDrawingPreset;
+export const getCurrentImageOutputPresetForSettings = getCurrentOutputPreset;
+
 export function parseStoryImageSettings(raw: unknown): StoryImageSettings {
   const rawRecord = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  const migratedRaw = Array.isArray(rawRecord.apiProfiles)
-    ? rawRecord
-    : {
-        ...rawRecord,
-        activeApiProfileId: DEFAULT_IMAGE_API_PROFILE_ID,
-        apiProfiles: [
-          {
-            id: DEFAULT_IMAGE_API_PROFILE_ID,
-            name: '默认配置',
-            serviceUrl: rawRecord.serviceUrl,
-            modelListUrl: '',
-            apiKey: rawRecord.apiKey,
-            model: rawRecord.model,
-            imageSize: rawRecord.imageSize,
-            timeoutMs: rawRecord.timeoutMs,
-            retryAttempts: rawRecord.retryAttempts,
-            retryDelayMs: rawRecord.retryDelayMs,
-            extraBody: rawRecord.extraBody,
-          },
-        ],
-      };
-  const parsed = ImageSettings.safeParse(migratedRaw);
-  const settings = parsed.success ? parsed.data : ImageSettings.parse({});
-  if (!Object.prototype.hasOwnProperty.call(migratedRaw, 'storyApiProfileId')) {
-    settings.storyApiProfileId = settings.activeApiProfileId;
+  const legacyGift =
+    rawRecord.gift && typeof rawRecord.gift === 'object' ? (rawRecord.gift as Record<string, unknown>) : {};
+  const parsedProfiles = parseApiProfiles(rawRecord);
+  const legacyGiftProfileId = profileRouteId(rawRecord, 'giftApiProfileId', parsedProfiles[0].id);
+  const profiles = parsedProfiles.map(profile => {
+    if (profile.id !== legacyGiftProfileId) return profile;
+    const requestMode = GiftImageSettings.shape.requestMode.safeParse(legacyGift.requestMode);
+    const multipartImageField = GiftImageSettings.shape.multipartImageField.safeParse(legacyGift.multipartImageField);
+    const jsonReferenceField = GiftImageSettings.shape.jsonReferenceField.safeParse(legacyGift.jsonReferenceField);
+    return {
+      ...profile,
+      requestMode: requestMode.success ? requestMode.data : profile.requestMode,
+      multipartImageField: multipartImageField.success ? multipartImageField.data : profile.multipartImageField,
+      jsonReferenceField: jsonReferenceField.success ? jsonReferenceField.data : profile.jsonReferenceField,
+    };
+  });
+  const activeApiProfileId = profileRouteId(rawRecord, 'activeApiProfileId', profiles[0].id);
+  const drawingPresets = parseDrawingPresets(rawRecord);
+  const currentDrawingPresetId = profileRouteId(rawRecord, 'currentDrawingPresetId', drawingPresets[0].id);
+  const outputPresets = parseOutputPresets(rawRecord, legacyCurrentDrawingPresetNeedsProcessing(rawRecord));
+  const currentOutputPresetId = profileRouteId(rawRecord, 'currentOutputPresetId', outputPresets[0].id);
+  const recentImageLimit = normalizeRecentImageLimit(rawRecord.recentImageLimit);
+  const legacyDisplayMigration = migrateLegacyGiftTrigger(
+    rawRecord,
+    legacyGift,
+    parseDisplaySettings(rawRecord, legacyGift),
+  );
+  const displaySettings = legacyDisplayMigration.displaySettings;
+  const enabled = hasExplicitDisplaySettings(rawRecord)
+    ? typeof rawRecord.enabled === 'boolean'
+      ? rawRecord.enabled
+      : false
+    : legacyDisplayMigration.disableAutomaticGeneration
+      ? false
+      : typeof rawRecord.enabled === 'boolean'
+        ? rawRecord.enabled || (displaySettings.displayMode === 'gift' && legacyGift.enabled === true)
+        : displaySettings.displayMode === 'gift' && legacyGift.enabled === true;
+
+  const parsed = StoryImageSettingsSchema.safeParse({
+    enabled,
+    drawingPresets,
+    currentDrawingPresetId,
+    outputPresets,
+    currentOutputPresetId,
+    recentImageLimit,
+    displaySettings,
+    activeApiProfileId,
+    apiProfiles: profiles,
+    storyApiProfileId: profileRouteId(rawRecord, 'storyApiProfileId', activeApiProfileId),
+    giftApiProfileId: profileRouteId(rawRecord, 'giftApiProfileId', activeApiProfileId),
+  });
+  const settings = parsed.success ? parsed.data : StoryImageSettingsSchema.parse({});
+  repairApiProfileRouteIds(settings, activeApiProfileId);
+  if (!settings.drawingPresets.some(preset => preset.id === settings.currentDrawingPresetId)) {
+    settings.currentDrawingPresetId = settings.drawingPresets[0].id;
   }
-  if (!Object.prototype.hasOwnProperty.call(migratedRaw, 'giftApiProfileId')) {
-    settings.giftApiProfileId = settings.activeApiProfileId;
-  }
-  repairApiProfileRouteIds(settings);
-  if (
-    typeof rawRecord.inlinePrompt === 'string' &&
-    !('basePrompt' in rawRecord) &&
-    rawRecord.inlinePrompt.trim() !== LEGACY_INLINE_PROMPT_DEFAULT
-  ) {
-    settings.basePrompt = rawRecord.inlinePrompt;
+  if (!settings.outputPresets.some(preset => preset.id === settings.currentOutputPresetId)) {
+    settings.currentOutputPresetId = settings.outputPresets[0].id;
   }
   return settings;
 }
@@ -249,6 +657,12 @@ export const useStoryImageSettingsStore = defineStore('story-image-settings', ()
       updateVariablesWith(variables => {
         const {
           inlinePrompt: _legacyInlinePrompt,
+          mode: _legacyMode,
+          basePrompt: _legacyBasePrompt,
+          scenePrompt: _legacyScenePrompt,
+          stylePrompt: _legacyStylePrompt,
+          safetyPrompt: _legacySafetyPrompt,
+          gift: _legacyGift,
           serviceUrl: _legacyServiceUrl,
           apiKey: _legacyApiKey,
           model: _legacyModel,

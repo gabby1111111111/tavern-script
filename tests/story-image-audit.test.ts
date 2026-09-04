@@ -2,6 +2,7 @@ import {
   clearLastErrorIfUnchanged,
   notifyGiftArrivalOnce,
   runReceivedInlineMessageEffects,
+  shouldRenderInlineTask,
   shouldProcessReceivedInlineMessage,
   type GiftArrivalNoticeAudit,
   type GiftArrivalNoticeReadiness,
@@ -14,6 +15,12 @@ function assert(condition: unknown, message: string): asserts condition {
 assert(!shouldProcessReceivedInlineMessage(false), '关闭随文生图时不得扫描或持久清理收到的消息');
 assert(!shouldProcessReceivedInlineMessage(undefined), '设置尚未就绪时不得处理收到的消息');
 assert(shouldProcessReceivedInlineMessage(true), '开启随文生图时应保留原有消息处理流程');
+
+assert(shouldRenderInlineTask('inline', 'pending'), '随文任务等待请求时应显示占位');
+assert(shouldRenderInlineTask('inline', 'running'), '随文任务请求进行中应显示占位');
+assert(!shouldRenderInlineTask('inline', 'success'), '随文任务成功后不得继续保留占位');
+assert(!shouldRenderInlineTask('inline', 'failed'), '随文任务失败后不得留下失败占位');
+assert(!shouldRenderInlineTask('gift', 'pending'), '礼物任务等待请求时不应显示随文占位');
 
 let giftEventCount = 0;
 const inlineEventEffects: string[] = [];

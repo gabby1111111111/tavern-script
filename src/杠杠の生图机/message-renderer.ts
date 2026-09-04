@@ -270,8 +270,7 @@ export function renderMessagePlacements(
   return activePlacements.filter(placement => renderImagePlacement(placement, handlers, activeSwipeId)).length;
 }
 
-function renderPending($host: JQuery<HTMLElement>, task: ImageTask): void {
-  const label = task.status === 'running' ? '正在生成随文插图…' : '等待生成随文插图…';
+function renderPending($host: JQuery<HTMLElement>): void {
   if ($host[0]) renderedTaskByHost.delete($host[0]);
   $host
     .empty()
@@ -279,7 +278,7 @@ function renderPending($host: JQuery<HTMLElement>, task: ImageTask): void {
     .append(
       $('<div class="story-image-card story-image-card--pending">')
         .append($('<span class="story-image-card__spinner" aria-hidden="true">'))
-        .append($('<span>').text(label)),
+        .append($('<span>').text('正在生图…')),
     );
 }
 
@@ -335,14 +334,16 @@ export function renderImageTask(
   removeStaleHosts($message, task.chatId, task.messageId, activeSwipeId);
   if (activeSwipeId !== task.swipeId) return false;
 
-  const $mesText = $message.find('.mes_text').first() as JQuery<HTMLElement>;
+  const $displayedText = displayedMessageText(task.messageId);
+  const $mesText =
+    $displayedText.length > 0 ? $displayedText : ($message.find('.mes_text').first() as JQuery<HTMLElement>);
   if ($mesText.length === 0) return false;
   removeRenderedMarkerText($mesText);
   const $host = findOrCreateHost($mesText, task);
 
   if (task.status === 'success') renderSuccess($host, task, handlers);
   else if (task.status === 'failed') renderFailed($host);
-  else renderPending($host, task);
+  else renderPending($host);
   return true;
 }
 

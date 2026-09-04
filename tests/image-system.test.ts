@@ -161,8 +161,8 @@ for (let index = 0; index < MAX_RECENT_GENERATED_IMAGES + 1; index += 1) {
     inlineAssociation.artifactId = item.id;
   }
 }
-equal(cache.artifacts.value.length, MAX_RECENT_GENERATED_IMAGES, 'artifact store 上限应继续保持五张');
-assert(!cache.artifacts.value.some(item => item.id === oldestId), '第六张 artifact 应淘汰最旧条目');
+equal(cache.artifacts.value.length, MAX_RECENT_GENERATED_IMAGES, 'artifact store 应保持默认十张上限');
+assert(!cache.artifacts.value.some(item => item.id === oldestId), '超出默认上限的 artifact 应淘汰最旧条目');
 equal(removalCounts.get(oldestId), 1, '容量淘汰回调应且仅应触发一次');
 assert(inlineAssociation.artifactId === null, '容量淘汰也应清空对应任务关联');
 assert(
