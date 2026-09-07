@@ -174,4 +174,13 @@ const cleanedMessage = cleanInlineImageMessage('<content>\n第一段剧情\n\n<p
 equal(cleanedMessage, '\n第一段剧情\n\n\n第二段剧情\n', '源数据清理应保留正文和原始换行');
 assert(!/<\/?content\b|<pic\b/i.test(cleanedMessage), '源数据中不应残留控制标签');
 
+const cleanedCodeMessage = cleanInlineImageMessage(
+  '<content>正文 <pic prompt="real">\n\n```html\n<content>\n<pic prompt="fenced example">\n</content>\n```\n\n`<pic prompt="inline example">`\n</content>',
+);
+assert(!cleanedCodeMessage.includes('<pic prompt="real">'), '代码块保护不应阻止正常控制标签清理');
+assert(cleanedCodeMessage.includes('<content>\n<pic prompt="fenced example">\n</content>'), '围栏代码中的示例标签必须保留');
+assert(cleanedCodeMessage.includes('`<pic prompt="inline example">`'), '行内代码中的示例标签必须保留');
+assert(cleanedCodeMessage.startsWith('正文 '), '正文中的 content 控制标签应被清理');
+assert(cleanedCodeMessage.endsWith('`\n'), '正文结尾的 content 控制标签应被清理');
+
 console.info('<杠杠の生图机> marker tests passed');

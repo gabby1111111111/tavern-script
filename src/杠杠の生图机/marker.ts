@@ -23,10 +23,52 @@ function blankNonLineBreaks(value: string): string {
   return value.replace(/[^\r\n]/g, ' ');
 }
 
+type TextRange = { start: number; end: number };
+
+function collectCodeRanges(value: string): TextRange[] {
+  const ranges: TextRange[] = [];
+  for (const pattern of [/```[\s\S]*?```/g, /`[^`\r\n]*`/g]) {
+    for (let match = pattern.exec(value); match; match = pattern.exec(value)) {
+      ranges.push({ start: match.index, end: match.index + match[0].length });
+      if (pattern.lastIndex === match.index) pattern.lastIndex += 1;
+    }
+  }
+
+  ranges.sort((lhs, rhs) => lhs.start - rhs.start || lhs.end - rhs.end);
+  return ranges.reduce<TextRange[]>((merged, range) => {
+    const previous = merged[merged.length - 1];
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+    return merged;
+  }, []);
+}
+
 function maskCodeBlocks(value: string): string {
-  let masked = value.replace(/```[\s\S]*?```/g, blankNonLineBreaks);
-  masked = masked.replace(/`[^`\r\n]*`/g, blankNonLineBreaks);
-  return masked;
+  const ranges = collectCodeRanges(value);
+  let masked = '';
+  let cursor = 0;
+  for (const range of ranges) {
+    masked += value.slice(cursor, range.start);
+    masked += blankNonLineBreaks(value.slice(range.start, range.end));
+    cursor = range.end;
+  }
+  return masked + value.slice(cursor);
+}
+
+function replaceOutsideCode(value: string, pattern: RegExp, replacement: string): string {
+  const ranges = collectCodeRanges(value);
+  const replace = (segment: string): string => segment.replace(new RegExp(pattern.source, pattern.flags), replacement);
+  let result = '';
+  let cursor = 0;
+  for (const range of ranges) {
+    result += replace(value.slice(cursor, range.start));
+    result += value.slice(range.start, range.end);
+    cursor = range.end;
+  }
+  return result + replace(value.slice(cursor));
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -111,5 +153,9 @@ export function cleanInlineImageMarkers(value: string): string {
 
 /** 清理聊天消息源数据中的生图控制标签，但保留标签内部的正文和原始换行。 */
 export function cleanInlineImageMessage(value: string): string {
-  return value.replace(PIC_SOURCE_CONTROL_PATTERN, '').replace(CONTENT_SOURCE_CONTROL_PATTERN, '');
+  return replaceOutsideCode(
+    replaceOutsideCode(value, PIC_SOURCE_CONTROL_PATTERN, ''),
+    CONTENT_SOURCE_CONTROL_PATTERN,
+    '',
+  );
 }

@@ -6,6 +6,7 @@ import {
   updateDrawingPreset,
   type DrawingPreset,
 } from '../src/杠杠の生图机/drawing-preset';
+import { createPinia, setActivePinia } from 'pinia';
 import {
   getCurrentDrawingPreset,
   getCurrentOutputPreset,
@@ -14,6 +15,7 @@ import {
   parseStoryImageSettings,
   repairApiProfileRouteIds,
   type ImageApiProfile,
+  useStoryImageSettingsStore,
 } from '../src/杠杠の生图机/settings';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -35,6 +37,8 @@ function profile(id: string): ImageApiProfile {
     apiKey: '',
     model: `${id}-model`,
     imageSize: '1024x1024',
+    quality: 'auto',
+    imageCount: 1,
     timeoutMs: 120_000,
     retryAttempts: 0,
     retryDelayMs: 1_500,
@@ -47,6 +51,8 @@ function profile(id: string): ImageApiProfile {
 
 const profiles = [profile('profile-a'), profile('profile-b')];
 const defaults = parseStoryImageSettings({ apiProfiles: profiles, activeApiProfileId: 'profile-b' });
+equal(defaults.apiProfiles[0].quality, 'auto', '生图质量默认应为自动');
+equal(defaults.apiProfiles[0].imageCount, 1, '生成数量默认应为一张');
 assert(defaults.drawingPresets.length === 1, '新设置应至少包含一个画图预设');
 assert(defaults.drawingPresets[0].instructionText.length > 0, '默认画图预设应有正文 AI 指令');
 equal(defaults.currentDrawingPresetId, defaults.drawingPresets[0].id, '默认当前预设应指向可用预设');
@@ -56,8 +62,98 @@ assert(!defaults.outputPresets[0].useAvatarReferences, '默认出图预设不得
 equal(defaults.currentOutputPresetId, defaults.outputPresets[0].id, '默认当前出图预设应指向可用预设');
 equal(getCurrentOutputPreset(defaults).id, defaults.outputPresets[0].id, 'settings lookup 应返回当前出图预设');
 equal(defaults.recentImageLimit, 10, '最近图片默认保留张数应为 10');
-equal(defaults.displaySettings, { displayMode: 'inline', skipFloors: 0 }, '展现设置应有安全默认值');
+equal(
+  defaults.displaySettings,
+  { displayMode: 'inline', skipFloors: 0, generateOnSwipe: true },
+  '展现设置应有安全默认值且默认允许新 Swipe 生图',
+);
 equal(getCurrentDrawingPreset(defaults).id, defaults.drawingPresets[0].id, 'settings lookup 应返回当前预设');
+
+const legacyProfileWithoutGenerationOptions = profile('legacy-profile') as Partial<ImageApiProfile>;
+delete legacyProfileWithoutGenerationOptions.quality;
+delete legacyProfileWithoutGenerationOptions.imageCount;
+const migratedGenerationOptions = parseStoryImageSettings({
+  apiProfiles: [legacyProfileWithoutGenerationOptions],
+  activeApiProfileId: 'legacy-profile',
+});
+equal(migratedGenerationOptions.apiProfiles[0].quality, 'auto', '旧 API 档案缺少质量时应迁移为自动');
+equal(migratedGenerationOptions.apiProfiles[0].imageCount, 1, '旧 API 档案缺少数量时应迁移为一张');
+
+const profileWithEmptyTimeout = parseStoryImageSettings({
+  apiProfiles: [
+    {
+      ...profile('timeout-empty'),
+      serviceUrl: 'http://fixture.invalid/v1/images/generations',
+      apiKey: 'fixture-key',
+      model: 'fixture-model',
+      timeoutMs: '',
+    },
+  ],
+});
+equal(profileWithEmptyTimeout.apiProfiles.length, 1, '空 timeout 不得丢弃整个 API 档案');
+equal(profileWithEmptyTimeout.apiProfiles[0].serviceUrl, 'http://fixture.invalid/v1/images/generations', '空 timeout 时必须保留 API 地址');
+assert(profileWithEmptyTimeout.apiProfiles[0].apiKey === 'fixture-key', '空 timeout 时必须保留 API key');
+equal(profileWithEmptyTimeout.apiProfiles[0].model, 'fixture-model', '空 timeout 时必须保留模型');
+equal(profileWithEmptyTimeout.apiProfiles[0].timeoutMs, 120_000, '空 timeout 应回退到默认超时');
+
+const profileWithOutOfRangeTimeout = parseStoryImageSettings({
+  apiProfiles: [{ ...profile('timeout-range'), timeoutMs: 900_001 }],
+});
+equal(profileWithOutOfRangeTimeout.apiProfiles.length, 1, '越界 timeout 不得丢弃整个 API 档案');
+equal(profileWithOutOfRangeTimeout.apiProfiles[0].id, 'timeout-range', '越界 timeout 时必须保留档案 ID');
+equal(profileWithOutOfRangeTimeout.apiProfiles[0].timeoutMs, 120_000, '越界 timeout 应回退到默认超时');
+
+for (const [label, invalidTimeout] of [
+  ['zero', 0],
+  ['fraction', 1_000.5],
+] as const) {
+  const repaired = parseStoryImageSettings({ apiProfiles: [{ ...profile(`timeout-${label}`), timeoutMs: invalidTimeout }] });
+  equal(repaired.apiProfiles[0].id, `timeout-${label}`, `${label} timeout 时必须保留档案`);
+  equal(repaired.apiProfiles[0].timeoutMs, 120_000, `${label} timeout 应回退到默认超时`);
+}
+
+const runtime = globalThis as unknown as Record<string, unknown>;
+const previousRuntime = {
+  getScriptId: runtime.getScriptId,
+  getVariables: runtime.getVariables,
+  updateVariablesWith: runtime.updateVariablesWith,
+};
+let persistedVariables: Record<string, unknown> = {
+  apiProfiles: [
+    {
+      ...profile('writeback-profile'),
+      serviceUrl: 'http://fixture.invalid/v1/images/generations',
+      apiKey: 'writeback-fixture-key',
+      model: 'writeback-fixture-model',
+      timeoutMs: '',
+    },
+  ],
+};
+runtime.getScriptId = () => 'story-image-settings-fixture';
+runtime.getVariables = () => persistedVariables;
+runtime.updateVariablesWith = (updater: (variables: Record<string, unknown>) => Record<string, unknown>) => {
+  persistedVariables = updater(persistedVariables);
+  return persistedVariables;
+};
+try {
+  setActivePinia(createPinia());
+  useStoryImageSettingsStore();
+} finally {
+  for (const [key, previous] of Object.entries(previousRuntime)) {
+    if (typeof previous === 'undefined') Reflect.deleteProperty(runtime, key);
+    else runtime[key] = previous;
+  }
+}
+const persistedProfile = (persistedVariables.apiProfiles as Array<Record<string, unknown>>)[0];
+assert(persistedProfile?.serviceUrl === 'http://fixture.invalid/v1/images/generations', '设置 store 立即写回不得丢失 API 地址');
+assert(persistedProfile?.apiKey === 'writeback-fixture-key', '设置 store 立即写回不得丢失 API key');
+assert(persistedProfile?.model === 'writeback-fixture-model', '设置 store 立即写回不得丢失模型');
+equal(persistedProfile?.timeoutMs, 120_000, '设置 store 立即写回应保存修复后的默认超时');
+const reloadedAfterWriteback = parseStoryImageSettings(persistedVariables);
+assert(
+  reloadedAfterWriteback.apiProfiles[0].apiKey === 'writeback-fixture-key',
+  '设置 store 写回后的下一次加载仍应保留 API key',
+);
 
 const explicitPresets: DrawingPreset[] = [
   { id: 'scene', name: '场景', instructionText: 'scene instructions' },
@@ -67,13 +163,17 @@ const explicit = parseStoryImageSettings({
   enabled: true,
   currentDrawingPresetId: 'portrait',
   drawingPresets: explicitPresets,
-  displaySettings: { displayMode: 'gift', skipFloors: '2.9' },
+  displaySettings: { displayMode: 'gift', skipFloors: '2.9', generateOnSwipe: false },
   activeApiProfileId: 'profile-b',
   apiProfiles: profiles,
 });
 equal(explicit.drawingPresets, explicitPresets, '已有画图预设不得被默认值覆盖');
 equal(explicit.currentDrawingPresetId, 'portrait', '已有当前预设 ID 应保留');
-equal(explicit.displaySettings, { displayMode: 'gift', skipFloors: 2 }, '展现设置应归一化为整数');
+equal(
+  explicit.displaySettings,
+  { displayMode: 'gift', skipFloors: 2, generateOnSwipe: false },
+  '展现设置应归一化楼层数并保留 Swipe 开关',
+);
 assert(!('needsProcessing' in getCurrentDrawingPreset(explicit)), 'v0.3 画图预设不应继续暴露 needsProcessing');
 
 const explicitOutputPresets = [
@@ -142,7 +242,7 @@ const explicitDisplaySettingsAreAuthoritative = parseStoryImageSettings({
 assert(!explicitDisplaySettingsAreAuthoritative.enabled, '显式 v0.3 enabled=false 不得被残留 gift.enabled 覆盖');
 equal(
   explicitDisplaySettingsAreAuthoritative.displaySettings,
-  { displayMode: 'inline', skipFloors: 0 },
+  { displayMode: 'inline', skipFloors: 0, generateOnSwipe: true },
   '显式 v0.3 displaySettings 不得被旧礼物触发配置改写',
 );
 
@@ -184,7 +284,11 @@ assert(!migratedGift?.instructionText.includes('旧输出规则'), 'v0.2 outputP
 assert(!('gift' in migratedV02), '新版设置对象不应继续暴露旧礼物触发配置');
 equal(migratedV02.apiProfiles[0].requestMode, 'json-reference', 'v0.2 礼物请求模式应迁移到原礼物 API 档案');
 equal(migratedV02.apiProfiles[0].jsonReferenceField, 'reference_images', 'v0.2 JSON 参考图字段不得丢失');
-equal(migratedV02.displaySettings, { displayMode: 'gift', skipFloors: 2 }, 'v0.2 3 楼触发应迁移为跳过 2 楼');
+equal(
+  migratedV02.displaySettings,
+  { displayMode: 'gift', skipFloors: 2, generateOnSwipe: true },
+  'v0.2 3 楼触发应迁移为跳过 2 楼并默认允许新 Swipe 生图',
+);
 
 const migratedManualGift = parseStoryImageSettings({
   enabled: true,
@@ -204,7 +308,7 @@ const migratedInlineAndManualGift = parseStoryImageSettings({
 assert(migratedInlineAndManualGift.enabled, 'inline 与 manual 礼物并存时应保留原有 enabled=true');
 equal(
   migratedInlineAndManualGift.displaySettings,
-  { displayMode: 'inline', skipFloors: 0 },
+  { displayMode: 'inline', skipFloors: 0, generateOnSwipe: true },
   '没有显式 mode:gift 时 manual 礼物不得把随文模式改成礼物模式',
 );
 
@@ -217,7 +321,7 @@ const migratedScheduledGiftWithStaleInlineMode = parseStoryImageSettings({
 assert(migratedScheduledGiftWithStaleInlineMode.enabled, '启用的旧 3 楼礼物调度不得被 stale mode:inline 关闭');
 equal(
   migratedScheduledGiftWithStaleInlineMode.displaySettings,
-  { displayMode: 'gift', skipFloors: 2 },
+  { displayMode: 'gift', skipFloors: 2, generateOnSwipe: true },
   '启用的旧 3 楼礼物调度应优先迁移为礼物展现',
 );
 
@@ -236,7 +340,7 @@ assert(
 );
 equal(
   migratedMissingGiftTrigger.displaySettings,
-  { displayMode: 'gift', skipFloors: 1000 },
+  { displayMode: 'gift', skipFloors: 1000, generateOnSwipe: true },
   '缺失旧礼物触发值应按 manual 语义使用安全禁用设置',
 );
 
@@ -255,7 +359,7 @@ assert(
 );
 equal(
   migratedInvalidGiftTrigger.displaySettings,
-  { displayMode: 'gift', skipFloors: 1000 },
+  { displayMode: 'gift', skipFloors: 1000, generateOnSwipe: true },
   '非法旧礼物触发值应按 manual 语义使用安全禁用设置',
 );
 
@@ -268,7 +372,7 @@ const migratedInvalidGiftWithInline = parseStoryImageSettings({
 assert(migratedInvalidGiftWithInline.enabled, '非法礼物触发值且 inline 可用时应保留 inline 自动路线');
 equal(
   migratedInvalidGiftWithInline.displaySettings,
-  { displayMode: 'inline', skipFloors: 0 },
+  { displayMode: 'inline', skipFloors: 0, generateOnSwipe: true },
   '非法礼物触发值且 inline 可用时不得切换到 gift',
 );
 
@@ -280,7 +384,7 @@ const migratedManualWithoutInline = parseStoryImageSettings({
 assert(!migratedManualWithoutInline.enabled, '没有可保留的随文自动能力时 manual 礼物应安全保持关闭');
 equal(
   migratedManualWithoutInline.displaySettings,
-  { displayMode: 'gift', skipFloors: 1000 },
+  { displayMode: 'gift', skipFloors: 1000, generateOnSwipe: true },
   '没有可保留的随文自动能力时 manual 礼物应保留安全禁用设置',
 );
 
@@ -290,7 +394,11 @@ const migratedFiveGift = parseStoryImageSettings({
   apiProfiles: profiles,
 });
 assert(migratedFiveGift.enabled, 'v0.2 启用的 5 楼礼物调度应迁移为启用');
-equal(migratedFiveGift.displaySettings, { displayMode: 'gift', skipFloors: 4 }, 'v0.2 5 楼触发应迁移为跳过 4 楼');
+equal(
+  migratedFiveGift.displaySettings,
+  { displayMode: 'gift', skipFloors: 4, generateOnSwipe: true },
+  'v0.2 5 楼触发应迁移为跳过 4 楼',
+);
 
 const flatLegacy = parseStoryImageSettings({
   serviceUrl: 'https://legacy.test/v1/images/generations',
@@ -301,6 +409,8 @@ const flatLegacy = parseStoryImageSettings({
 equal(flatLegacy.apiProfiles.length, 1, '更老扁平设置应迁移为单一 API profile');
 equal(flatLegacy.apiProfiles[0].serviceUrl, 'https://legacy.test/v1/images/generations', '扁平 API 地址必须保留');
 equal(flatLegacy.apiProfiles[0].apiKey, 'legacy-key', '扁平 API key 必须保留');
+equal(flatLegacy.apiProfiles[0].quality, 'auto', '更老扁平设置应补齐自动质量');
+equal(flatLegacy.apiProfiles[0].imageCount, 1, '更老扁平设置应补齐单张数量');
 equal(flatLegacy.displaySettings.displayMode, 'gift', 'v0.2 mode 应迁移为展现方式');
 
 const routeSettings = parseStoryImageSettings({

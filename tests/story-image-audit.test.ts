@@ -1,5 +1,6 @@
 import {
   clearLastErrorIfUnchanged,
+  createEmptyAudit,
   notifyGiftArrivalOnce,
   runReceivedInlineMessageEffects,
   shouldRenderInlineTask,
@@ -11,6 +12,15 @@ import {
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
+
+const emptyAudit = createEmptyAudit();
+assert(emptyAudit.swipe.enabled, 'swipe 生图审计默认应与公开设置默认值一致');
+assert(emptyAudit.swipe.message_id === null && emptyAudit.swipe.eligible === null, '尚无 swipe 时不得伪造楼层资格');
+assert(!emptyAudit.swipe.started && !emptyAudit.swipe.skipped, '尚无 swipe 时应保持空闲摘要');
+assert(
+  Object.keys(emptyAudit.swipe).sort().join(',') === 'eligible,enabled,message_id,skipped,started',
+  'swipe 审计只能暴露最小标量，不能携带 prompt、URL、Base64、密钥或响应',
+);
 
 assert(!shouldProcessReceivedInlineMessage(false), '关闭随文生图时不得扫描或持久清理收到的消息');
 assert(!shouldProcessReceivedInlineMessage(undefined), '设置尚未就绪时不得处理收到的消息');
@@ -34,7 +44,7 @@ assert(!exerciseMessageReceived(false), '关闭随文插图时 MESSAGE_RECEIVED 
 assert(giftEventCount === 1, '关闭随文插图不得阻断独立的礼物事件链路');
 assert(inlineEventEffects.length === 0, '关闭随文插图不得扫描、启动随文任务、清理或回写正文');
 assert(exerciseMessageReceived(true), '开启随文插图时 MESSAGE_RECEIVED 应保留既有随文处理体');
-assert(giftEventCount === 2, '开启随文插图时礼物事件链路仍应只处理一次');
+assert(Number(giftEventCount) === 2, '开启随文插图时礼物事件链路仍应只处理一次');
 assert(
   inlineEventEffects.join(',') === 'scanMarkers,startMarkerTasks,cleanMessage,setChatMessages',
   '开启随文插图时不得吞掉扫描、任务、清理或回写流程',

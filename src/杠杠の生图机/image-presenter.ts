@@ -14,6 +14,13 @@ export type ImagePresentationInput = {
   placementTarget?: ImagePlacementTarget;
   /** Optional metadata for recent-image consumers. */
   artifactTarget?: Partial<ImageArtifactTarget>;
+  /** Raw page-memory chat object used to reconcile messageId after a floor is deleted. */
+  messageRef?: object | null;
+  /** Zero-based result position when one API request returns multiple images. */
+  variantIndex?: number;
+  revisionIndex?: number;
+  /** Page-memory source prompt used by manual redraw/edit actions. */
+  prompt?: string;
   caption?: string;
 };
 
@@ -60,6 +67,7 @@ export function presentGeneratedImage(
       target: artifactTarget(input),
     },
     input.resource,
+    input.messageRef,
   );
   if (!artifact) return null;
 
@@ -69,6 +77,10 @@ export function presentGeneratedImage(
       artifactId: artifact.id,
       target: input.placementTarget!,
       caption: input.caption,
+      variantIndex: input.variantIndex,
+      revisionIndex: input.revisionIndex,
+      prompt: input.prompt,
+      messageRef: input.messageRef,
     });
     if (!placement) {
       // An artifact without a renderable inline owner is not useful and would

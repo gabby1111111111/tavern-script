@@ -2,7 +2,9 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import type { ImageResource } from './image-api';
 import type { ImagePlacementTarget } from './image-system';
 
-export const MAX_IMAGE_PLACEMENTS = 10;
+// Keep the inline projection large enough to mirror the configurable recent
+// image cache. Each generated variant/revision owns one placement.
+export const MAX_IMAGE_PLACEMENTS = 50;
 export const MAX_IMAGE_PLACEMENT_CAPTION_LENGTH = 240;
 
 export type ImagePlacement = Readonly<{
@@ -10,11 +12,20 @@ export type ImagePlacement = Readonly<{
   artifactId: string;
   target: Readonly<ImagePlacementTarget>;
   caption: string;
+  variantIndex: number;
+  revisionIndex: number;
+  prompt: string;
   url: string;
   createdAt: number;
 }>;
 
-export type ImagePlacementInput = Pick<ImagePlacement, 'artifactId' | 'target'> & { caption?: string };
+export type ImagePlacementInput = Pick<ImagePlacement, 'artifactId' | 'target'> & {
+  caption?: string;
+  variantIndex?: number;
+  revisionIndex?: number;
+  prompt?: string;
+  messageRef?: object | null;
+};
 export type ImagePlacementCloneProvider = (artifactId: string) => ImageResource | null;
 export type ImagePlacementCacheOptions = {
   onRemove?: (placement: ImagePlacement) => void;
@@ -31,6 +42,7 @@ export class ImagePlacementCache {
   );
   private readonly resources = new Map<string, ImageResource>();
   private readonly ownerKeys = new Map<string, string>();
+  private readonly messageRefs = new Map<string, object>();
   private sequence = 0;
 
   constructor(
@@ -47,12 +59,16 @@ export class ImagePlacementCache {
       artifactId: input.artifactId,
       target: Object.freeze({ ...input.target }),
       caption: normalizeCaption(input.caption),
+      variantIndex: Math.max(0, Math.trunc(input.variantIndex ?? 0)),
+      revisionIndex: Math.max(0, Math.trunc(input.revisionIndex ?? 0)),
+      prompt: (input.prompt ?? '').trim(),
       url: resource.url,
       createdAt: Date.now(),
     });
     const ownerKey = `image-placement-owner-${sequence}`;
     this.resources.set(ownerKey, resource);
     this.ownerKeys.set(placement.id, ownerKey);
+    if (input.messageRef) this.messageRefs.set(placement.id, input.messageRef);
     const next = [placement, ...this.items.value];
     const overflow = next.splice(MAX_IMAGE_PLACEMENTS);
     this.items.value = next;
@@ -68,6 +84,54 @@ export class ImagePlacementCache {
     return true;
   }
 
+  get(id: string): ImagePlacement | undefined {
+    return this.items.value.find(item => item.id === id);
+  }
+
+  removeSwipe(messageId: number, swipeId: number): number {
+    const ids = this.items.value
+      .filter(item => item.target.messageId === messageId && item.target.swipeId === swipeId)
+      .map(item => item.id);
+    ids.forEach(id => this.remove(id));
+    return ids.length;
+  }
+
+  shiftSwipeIdsAfterDeletion(messageId: number, deletedSwipeId: number): number {
+    let shifted = 0;
+    this.items.value = this.items.value.map(item => {
+      if (item.target.messageId !== messageId || item.target.swipeId <= deletedSwipeId) return item;
+      shifted += 1;
+      return Object.freeze({
+        ...item,
+        target: Object.freeze({ ...item.target, swipeId: item.target.swipeId - 1 }),
+      });
+    });
+    return shifted;
+  }
+
+  reconcileMessageIndexes(currentChat: ReadonlyArray<object>): { removed: number; shifted: number } {
+    const removed: ImagePlacement[] = [];
+    let shifted = 0;
+    this.items.value = this.items.value.flatMap(item => {
+      const messageRef = this.messageRefs.get(item.id);
+      const messageId = messageRef ? currentChat.indexOf(messageRef) : -1;
+      if (messageId < 0) {
+        removed.push(item);
+        return [];
+      }
+      if (messageId === item.target.messageId) return [item];
+      shifted += 1;
+      return [
+        Object.freeze({
+          ...item,
+          target: Object.freeze({ ...item.target, messageId }),
+        }),
+      ];
+    });
+    removed.forEach(item => this.release(item));
+    return { removed: removed.length, shifted };
+  }
+
   clear(): void {
     const removed = this.items.value;
     this.items.value = [];
@@ -80,6 +144,7 @@ export class ImagePlacementCache {
     this.resources.get(ownerKey)?.revoke?.();
     this.resources.delete(ownerKey);
     this.ownerKeys.delete(placement.id);
+    this.messageRefs.delete(placement.id);
     this.options.onRemove?.(placement);
   }
 }

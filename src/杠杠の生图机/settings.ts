@@ -192,6 +192,8 @@ const DEFAULT_IMAGE_API_PROFILE = {
   apiKey: '',
   model: 'gpt-image-1',
   imageSize: '1024x1024',
+  quality: 'auto',
+  imageCount: 1,
   timeoutMs: 120_000,
   retryAttempts: 0,
   retryDelayMs: 1_500,
@@ -209,6 +211,8 @@ export const ImageApiProfile = z.object({
   apiKey: z.string().default(''),
   model: z.string().default('gpt-image-1'),
   imageSize: z.string().default('1024x1024'),
+  quality: z.enum(['low', 'medium', 'high', 'auto']).default('auto'),
+  imageCount: z.coerce.number().int().min(1).max(4).default(1),
   timeoutMs: z.number().int().min(1000).max(900_000).default(120_000),
   retryAttempts: z.number().int().min(0).max(5).default(0),
   retryDelayMs: z.number().int().min(0).max(60_000).default(1_500),
@@ -222,11 +226,30 @@ export type ImageApiProfile = z.infer<typeof ImageApiProfile>;
 
 export const MAX_SKIP_FLOORS = 1000;
 
+function normalizeApiProfileTimeout(value: unknown): number {
+  if (value === null || value === undefined || value === '') return DEFAULT_IMAGE_API_PROFILE.timeoutMs;
+  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+  return Number.isInteger(numeric) && numeric >= 1_000 && numeric <= 900_000
+    ? numeric
+    : DEFAULT_IMAGE_API_PROFILE.timeoutMs;
+}
+
+function parseApiProfile(value: unknown): ImageApiProfile | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const parsed = ImageApiProfile.safeParse({
+    ...candidate,
+    timeoutMs: normalizeApiProfileTimeout(candidate.timeoutMs),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
 export const DisplaySettingsSchema = z.object({
   displayMode: z.enum(['inline', 'gift']).default('inline'),
   // The UI accepts a number input, while old or hand-edited script variables
   // can contain strings. Coercion is kept at the persistence boundary.
   skipFloors: z.coerce.number().int().min(0).max(MAX_SKIP_FLOORS).default(0),
+  generateOnSwipe: z.boolean().default(true),
 });
 
 export type DisplaySettings = z.infer<typeof DisplaySettingsSchema>;
@@ -269,13 +292,12 @@ export function normalizeRecentImageLimit(value: unknown): number {
 function parseApiProfiles(raw: Record<string, unknown>): ImageApiProfile[] {
   if (Array.isArray(raw.apiProfiles)) {
     const profiles = raw.apiProfiles
-      .map(item => ImageApiProfile.safeParse(item))
-      .filter((result): result is { success: true; data: ImageApiProfile } => result.success)
-      .map(result => result.data);
+      .map(parseApiProfile)
+      .filter((profile): profile is ImageApiProfile => profile !== null);
     if (profiles.length > 0) return profiles;
   }
 
-  const legacyProfile = ImageApiProfile.safeParse({
+  const legacyProfile = parseApiProfile({
     id: DEFAULT_IMAGE_API_PROFILE_ID,
     name: '默认配置',
     serviceUrl: raw.serviceUrl,
@@ -283,6 +305,8 @@ function parseApiProfiles(raw: Record<string, unknown>): ImageApiProfile[] {
     apiKey: raw.apiKey,
     model: raw.model,
     imageSize: raw.imageSize,
+    quality: raw.quality,
+    imageCount: raw.imageCount,
     timeoutMs: raw.timeoutMs,
     retryAttempts: raw.retryAttempts,
     retryDelayMs: raw.retryDelayMs,
@@ -291,7 +315,7 @@ function parseApiProfiles(raw: Record<string, unknown>): ImageApiProfile[] {
     jsonReferenceField: raw.jsonReferenceField,
     extraBody: raw.extraBody,
   });
-  return legacyProfile.success ? [legacyProfile.data] : [ImageApiProfile.parse(DEFAULT_IMAGE_API_PROFILE)];
+  return legacyProfile ? [legacyProfile] : [ImageApiProfile.parse(DEFAULT_IMAGE_API_PROFILE)];
 }
 
 function profileRouteId(raw: Record<string, unknown>, key: string, fallback: string): string {
@@ -450,11 +474,15 @@ function parseDisplaySettings(
   const skipFloors = Number.isFinite(numericSkipFloors)
     ? Math.min(MAX_SKIP_FLOORS, Math.max(0, Math.trunc(numericSkipFloors)))
     : 0;
+  const generateOnSwipe = typeof nested.generateOnSwipe === 'boolean' ? nested.generateOnSwipe : true;
   const parsed = DisplaySettingsSchema.safeParse({
     displayMode,
     skipFloors,
+    generateOnSwipe,
   });
-  return parsed.success ? parsed.data : DisplaySettingsSchema.parse({ displayMode, skipFloors: 0 });
+  return parsed.success
+    ? parsed.data
+    : DisplaySettingsSchema.parse({ displayMode, skipFloors: 0, generateOnSwipe: true });
 }
 
 function migrateLegacyGiftTrigger(

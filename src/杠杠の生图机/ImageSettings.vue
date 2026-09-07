@@ -3,7 +3,7 @@
   <section class="story-image-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の生图机 V0.3.0</b>
+        <b>杠杠の生图机 V0.3.1</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
@@ -43,21 +43,33 @@
               </select>
             </label>
             <div class="story-image-settings__profile-actions">
-              <button class="story-image-settings__button" type="button" @click="createPreset">新建预设</button>
+              <button
+                class="story-image-settings__button"
+                type="button"
+                title="新建预设"
+                aria-label="新建预设"
+                @click="createPreset"
+              >
+                ＋
+              </button>
               <button
                 class="story-image-settings__button story-image-settings__button--primary"
                 type="button"
+                title="保存预设"
+                aria-label="保存预设"
                 @click="savePreset"
               >
-                保存预设
+                ✓
               </button>
               <button
                 class="story-image-settings__button story-image-settings__button--quiet"
                 type="button"
+                title="删除预设"
+                aria-label="删除预设"
                 :disabled="settings.drawingPresets.length <= 1"
                 @click="deleteActivePreset"
               >
-                删除预设
+                ×
               </button>
             </div>
           </div>
@@ -106,6 +118,17 @@
               0 表示每个符合条件的新 AI 楼层都触发；1 表示每隔一楼触发。只统计正常新回复，重生成、切换 swipe
               和历史消息不会重复计数。
             </p>
+            <label class="story-image-settings__enable-row" for="story-image-generate-on-swipe">
+              <input
+                id="story-image-generate-on-swipe"
+                v-model="settings.displaySettings.generateOnSwipe"
+                type="checkbox"
+              />
+              <span>Swipe 新回答也生图</span>
+            </label>
+            <p class="story-image-settings__description">
+              仅对原本符合出图频率的楼层生效；只有生成新的 Swipe 回答时才调用图片 API，切换已有 Swipe 不会调用。
+            </p>
           </div>
 
           <p
@@ -132,23 +155,33 @@
               </select>
             </label>
             <div class="story-image-settings__profile-actions">
-              <button class="story-image-settings__button" type="button" @click="createOutputPresetEntry">
-                新建预设
+              <button
+                class="story-image-settings__button"
+                type="button"
+                title="新建预设"
+                aria-label="新建预设"
+                @click="createOutputPresetEntry"
+              >
+                ＋
               </button>
               <button
                 class="story-image-settings__button story-image-settings__button--primary"
                 type="button"
+                title="保存预设"
+                aria-label="保存预设"
                 @click="saveOutputPresetEntry"
               >
-                保存预设
+                ✓
               </button>
               <button
                 class="story-image-settings__button story-image-settings__button--quiet"
                 type="button"
+                title="删除预设"
+                aria-label="删除预设"
                 :disabled="settings.outputPresets.length <= 1"
                 @click="deleteActiveOutputPreset"
               >
-                删除预设
+                ×
               </button>
             </div>
           </div>
@@ -251,14 +284,24 @@
                 </select>
               </label>
               <div class="story-image-settings__profile-actions">
-                <button class="story-image-settings__button" type="button" @click="createProfile">新增配置</button>
+                <button
+                  class="story-image-settings__button"
+                  type="button"
+                  title="新建设置"
+                  aria-label="新建设置"
+                  @click="createProfile"
+                >
+                  ＋
+                </button>
                 <button
                   class="story-image-settings__button story-image-settings__button--quiet"
                   type="button"
+                  title="删除设置"
+                  aria-label="删除设置"
                   :disabled="settings.apiProfiles.length <= 1"
                   @click="deleteActiveProfile"
                 >
-                  删除配置
+                  ×
                 </button>
               </div>
             </div>
@@ -396,6 +439,24 @@
                   type="number"
                 />
               </label>
+              <label class="story-image-settings__field" for="story-image-quality">
+                <span class="story-image-settings__label">生图质量</span>
+                <select id="story-image-quality" v-model="activeProfile.quality" class="text_pole">
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                  <option value="auto">自动</option>
+                </select>
+              </label>
+              <label class="story-image-settings__field" for="story-image-count">
+                <span class="story-image-settings__label">生成数量</span>
+                <select id="story-image-count" v-model.number="activeProfile.imageCount" class="text_pole">
+                  <option :value="1">1 张</option>
+                  <option :value="2">2 张</option>
+                  <option :value="3">3 张</option>
+                  <option :value="4">4 张</option>
+                </select>
+              </label>
             </div>
             <label class="story-image-settings__field" for="story-image-extra-body">
               <span class="story-image-settings__label">额外请求 JSON</span>
@@ -445,7 +506,7 @@ const tabs = [
   { value: 'preset', label: '画图预设' },
   { value: 'output', label: '出图预设' },
   { value: 'recent', label: '最近生成' },
-  { value: 'settings', label: 'API 设置' },
+  { value: 'settings', label: 'API' },
 ] as const;
 type TabValue = (typeof tabs)[number]['value'];
 const activeTab = ref<TabValue>('preset');
@@ -569,6 +630,8 @@ function createProfile(): void {
     apiKey: '',
     model: '',
     imageSize: '1024x1024',
+    quality: 'auto',
+    imageCount: 1,
     timeoutMs: 120_000,
     retryAttempts: 0,
     retryDelayMs: 1_500,

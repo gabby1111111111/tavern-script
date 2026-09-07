@@ -21,8 +21,10 @@ export type RecentGeneratedImage = ImageArtifact & {
   giftTaskId?: string;
 };
 
+export type RecentImageRemovalReason = 'explicit' | 'evicted' | 'cleared';
+
 export type RecentImageCacheOptions = {
-  onRemove?: (artifact: ImageArtifact) => void;
+  onRemove?: (artifact: ImageArtifact, reason: RecentImageRemovalReason) => void;
 };
 
 function cloneResource(resource: ImageResource): ImageResource | null {
@@ -47,6 +49,7 @@ export class RecentImageCache {
     })),
   );
   private readonly resources = new Map<string, ImageResource>();
+  private readonly messageRefs = new Map<string, object>();
   private currentLimit = DEFAULT_RECENT_IMAGE_LIMIT;
 
   constructor(private readonly options: RecentImageCacheOptions = {}) {}
@@ -68,21 +71,22 @@ export class RecentImageCache {
     const retained = this.artifacts.value.slice(0, nextLimit);
     const overflow = this.artifacts.value.slice(nextLimit);
     this.artifacts.value = retained;
-    overflow.forEach(item => this.release(item));
+    overflow.forEach(item => this.release(item, 'evicted'));
     return nextLimit;
   }
 
-  add(input: ImageArtifactInput, resource: ImageResource): ImageArtifact | null {
+  add(input: ImageArtifactInput, resource: ImageResource, messageRef?: object | null): ImageArtifact | null {
     const ownedResource = cloneResource(resource);
     if (!ownedResource) return null;
 
     const artifact = createImageArtifact(input, ownedResource.url);
     this.resources.set(artifact.id, ownedResource);
+    if (messageRef) this.messageRefs.set(artifact.id, messageRef);
 
     const next = [artifact, ...this.artifacts.value];
     const overflow = next.splice(this.currentLimit);
     this.artifacts.value = next;
-    overflow.forEach(item => this.release(item));
+    overflow.forEach(item => this.release(item, 'evicted'));
     return this.artifacts.value.find(item => item.id === artifact.id)!;
   }
 
@@ -95,23 +99,62 @@ export class RecentImageCache {
     return this.artifacts.value.find(artifact => artifact.id === artifactId);
   }
 
+  reconcileDeletedSwipe(chatId: string, messageId: number, deletedSwipeId: number): number {
+    let changed = 0;
+    this.artifacts.value = this.artifacts.value.map(artifact => {
+      if (artifact.chatId !== chatId || artifact.target.messageId !== messageId) return artifact;
+      if (artifact.target.swipeId === deletedSwipeId) {
+        changed += 1;
+        return { ...artifact, target: { ...artifact.target, swipeId: null } };
+      }
+      if (artifact.target.swipeId !== null && artifact.target.swipeId > deletedSwipeId) {
+        changed += 1;
+        return { ...artifact, target: { ...artifact.target, swipeId: artifact.target.swipeId - 1 } };
+      }
+      return artifact;
+    });
+    return changed;
+  }
+
+  reconcileMessageIndexes(chatId: string, currentChat: ReadonlyArray<object>): number {
+    let changed = 0;
+    this.artifacts.value = this.artifacts.value.map(artifact => {
+      if (artifact.chatId !== chatId) return artifact;
+      const messageRef = this.messageRefs.get(artifact.id);
+      if (!messageRef) return artifact;
+      const nextMessageId = currentChat.indexOf(messageRef);
+      if (nextMessageId === artifact.target.messageId) return artifact;
+      changed += 1;
+      return {
+        ...artifact,
+        target: {
+          ...artifact.target,
+          messageId: nextMessageId >= 0 ? nextMessageId : null,
+          swipeId: nextMessageId >= 0 ? artifact.target.swipeId : null,
+        },
+      };
+    });
+    return changed;
+  }
+
   clear(): void {
     const removed = this.artifacts.value;
     this.artifacts.value = [];
-    removed.forEach(item => this.release(item));
+    removed.forEach(item => this.release(item, 'cleared'));
   }
 
   remove(id: string): boolean {
     const artifact = this.artifacts.value.find(item => item.id === id);
     if (!artifact) return false;
     this.artifacts.value = this.artifacts.value.filter(item => item.id !== id);
-    this.release(artifact);
+    this.release(artifact, 'explicit');
     return true;
   }
 
-  private release(artifact: ImageArtifact): void {
+  private release(artifact: ImageArtifact, reason: RecentImageRemovalReason): void {
     this.resources.get(artifact.id)?.revoke?.();
     this.resources.delete(artifact.id);
-    this.options.onRemove?.(artifact);
+    this.messageRefs.delete(artifact.id);
+    this.options.onRemove?.(artifact, reason);
   }
 }

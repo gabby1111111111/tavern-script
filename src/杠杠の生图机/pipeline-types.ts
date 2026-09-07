@@ -16,6 +16,7 @@ export type DisplayMode = 'inline' | 'gift';
 export type DisplaySettings = {
   displayMode: DisplayMode;
   skipFloors: number;
+  generateOnSwipe: boolean;
 };
 
 export type PictureDirective = {

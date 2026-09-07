@@ -66,12 +66,13 @@ function makeAbortError(message: string): Error {
   return error;
 }
 
-async function fetchWithTimeout(
+async function fetchWithTimeout<T>(
   url: string,
   init: RequestInit,
   timeoutMs: number,
   parentSignal: AbortSignal,
-): Promise<Response> {
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
   const abortFromParent = () => controller.abort();
@@ -87,7 +88,14 @@ async function fetchWithTimeout(
 
   parentSignal.addEventListener('abort', abortFromParent, { once: true });
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    const result = await consume(response);
+    // Some browser readers (for example a FileReader-backed conversion) may
+    // finish after the request signal has already been aborted. Do not let a
+    // late consumer result turn an expired or cancelled request into success.
+    if (parentSignal.aborted) throw makeAbortError('图片请求已取消');
+    if (timedOut) throw new ImageApiError(`图片 API 请求超时（${timeoutMs}ms）`);
+    return result;
   } catch (error) {
     if (parentSignal.aborted) throw makeAbortError('图片请求已取消');
     if (timedOut || isAbortError(error)) throw new ImageApiError(`图片 API 请求超时（${timeoutMs}ms）`);
@@ -152,7 +160,7 @@ export function inferImageEditUrl(serviceUrl: string): string {
 
 function appendExtraBody(form: FormData, extraBody: Record<string, unknown>): void {
   Object.entries(extraBody).forEach(([key, value]) => {
-    if (['model', 'prompt', 'n', 'size', 'image', 'image[]'].includes(key)) return;
+    if (['model', 'prompt', 'n', 'size', 'quality', 'image', 'image[]'].includes(key)) return;
     if (typeof value === 'undefined' || value === null) return;
     form.append(key, typeof value === 'string' ? value : JSON.stringify(value));
   });
@@ -218,9 +226,10 @@ async function referenceStringToInput(
   if (isDataImageUrl(normalized)) {
     return { file: dataUrlToBlob(normalized), filename: referenceFilename(normalized, index) };
   }
-  const response = await fetchWithTimeout(normalized, { method: 'GET' }, timeoutMs, signal);
-  if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
-  return { file: await response.blob(), filename: referenceFilename(normalized, index) };
+  return await fetchWithTimeout(normalized, { method: 'GET' }, timeoutMs, signal, async response => {
+    if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
+    return { file: await response.blob(), filename: referenceFilename(normalized, index) };
+  });
 }
 
 function isHttpReference(value: string): boolean {
@@ -250,12 +259,13 @@ async function resolveJsonReference(value: string, timeoutMs: number, signal: Ab
   if (shouldUseReferenceDirectly(normalized)) return normalized;
 
   const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, window.location.href).toString() : normalized;
-  const response = await fetchWithTimeout(sourceUrl, { method: 'GET' }, timeoutMs, signal);
-  if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
-  if (signal.aborted) throw makeAbortError('图片请求已取消');
-  const dataUrl = await blobToDataUrl(await response.blob());
-  if (signal.aborted) throw makeAbortError('图片请求已取消');
-  return dataUrl;
+  return await fetchWithTimeout(sourceUrl, { method: 'GET' }, timeoutMs, signal, async response => {
+    if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
+    if (signal.aborted) throw makeAbortError('图片请求已取消');
+    const dataUrl = await blobToDataUrl(await response.blob());
+    if (signal.aborted) throw makeAbortError('图片请求已取消');
+    return dataUrl;
+  });
 }
 
 async function resolveJsonReferences(values: string[], timeoutMs: number, signal: AbortSignal): Promise<string[]> {
@@ -300,56 +310,91 @@ function jsonBodyWithoutReferenceFields(
 type ImageValueOptions = {
   allowMarkdown?: boolean;
   allowBase64?: boolean;
+  /** Treat each object in a standard candidate array as one image item. */
+  singleCandidate?: boolean;
 };
 
 export function collectImageResources(payload: unknown, responseText = ''): ImageResource[] {
   const resources: ImageResource[] = [];
   const seen = new Set<string>();
 
-  const pushRemote = (value: string): void => {
+  const pushRemote = (value: string): boolean => {
     const url = value.trim();
-    if (!url || !isRemoteUrl(url) || seen.has(url)) return;
+    if (!url || !isRemoteUrl(url)) return false;
+    if (seen.has(url)) return true;
     seen.add(url);
     resources.push({ url, kind: 'remote-url' });
+    return true;
   };
 
-  const pushData = (value: string): void => {
+  const pushData = (value: string): boolean => {
     const normalized = value.trim();
-    if (!normalized || seen.has(normalized)) return;
+    if (!normalized) return false;
+    if (seen.has(normalized)) return true;
     try {
       const resource = createObjectUrlFromBase64(normalized);
       seen.add(normalized);
       resources.push(resource);
+      return true;
     } catch {
       // Ignore malformed candidate fields and continue looking for another result.
+      return false;
     }
   };
 
-  function collectImageField(value: unknown, options: ImageValueOptions = {}): void {
+  function collectImageField(value: unknown, options: ImageValueOptions = {}): boolean {
     if (typeof value === 'string') {
       const text = value.trim();
-      if (!text) return;
-      if (isDataImageUrl(text)) pushData(text);
-      else if (isRemoteUrl(text)) pushRemote(text);
-      else if (options.allowBase64) pushData(`data:image/png;base64,${text}`);
-      if (options.allowMarkdown) markdownImageUrls(text).forEach(pushRemote);
-      return;
+      if (!text) return false;
+      let collected = false;
+      if (isDataImageUrl(text)) collected = pushData(text);
+      else if (isRemoteUrl(text)) collected = pushRemote(text);
+      else if (options.allowBase64) collected = pushData(`data:image/png;base64,${text}`);
+      if (options.allowMarkdown) {
+        markdownImageUrls(text).forEach(url => {
+          collected = pushRemote(url) || collected;
+        });
+      }
+      return collected;
     }
 
     if (Array.isArray(value)) {
-      value.forEach(item => collectImageField(item, options));
-      return;
+      return value.reduce((collected, item) => collectImageField(item, options) || collected, false);
     }
 
-    if (!value || typeof value !== 'object') return;
+    if (!value || typeof value !== 'object') return false;
     const record = value as Record<string, unknown>;
-    if ('url' in record) collectImageField(record.url);
-    if ('b64_json' in record) collectImageField(record.b64_json, { allowBase64: true });
-    if ('base64' in record) collectImageField(record.base64, { allowBase64: true });
-    if ('base64_json' in record) collectImageField(record.base64_json, { allowBase64: true });
-    if ('image_url' in record) collectImageField(record.image_url);
-    if ('image' in record) collectImageField(record.image, { ...options, allowBase64: true });
-    if ('images' in record) collectImageField(record.images, { ...options, allowBase64: true });
+    if (options.singleCandidate) {
+      const candidateFields: Array<[string, ImageValueOptions]> = [
+        ['url', {}],
+        ['b64_json', { allowBase64: true }],
+        ['base64', { allowBase64: true }],
+        ['base64_json', { allowBase64: true }],
+        ['image_url', {}],
+        ['image', { ...options, allowBase64: true }],
+        ['images', { ...options, allowBase64: true }],
+      ];
+      for (const [key, fieldOptions] of candidateFields) {
+        if (key in record && collectImageField(record[key], fieldOptions)) return true;
+      }
+      return false;
+    }
+
+    let collected = false;
+    if ('url' in record) collected = collectImageField(record.url) || collected;
+    if ('b64_json' in record) collected = collectImageField(record.b64_json, { allowBase64: true }) || collected;
+    if ('base64' in record) collected = collectImageField(record.base64, { allowBase64: true }) || collected;
+    if ('base64_json' in record) {
+      collected = collectImageField(record.base64_json, { allowBase64: true }) || collected;
+    }
+    if ('image_url' in record) collected = collectImageField(record.image_url) || collected;
+    if ('image' in record) {
+      collected = collectImageField(record.image, { ...options, allowBase64: true }) || collected;
+    }
+    if ('images' in record) {
+      collected = collectImageField(record.images, { ...options, allowBase64: true }) || collected;
+    }
+    return collected;
   }
 
   function collectChatContent(value: unknown): void {
@@ -411,10 +456,10 @@ export function collectImageResources(payload: unknown, responseText = ''): Imag
     if (responseText && responseText !== payload) markdownImageUrls(responseText).forEach(pushRemote);
   } else if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
     const record = payload as Record<string, unknown>;
-    collectImageField(record.data);
+    collectImageField(record.data, { singleCandidate: true });
     collectOutputField(record.output);
     collectImageField(record.image, { allowMarkdown: true, allowBase64: true });
-    collectImageField(record.images, { allowMarkdown: true, allowBase64: true });
+    collectImageField(record.images, { allowMarkdown: true, allowBase64: true, singleCandidate: true });
     collectOutputField(record.result);
     collectImageField(record.url);
     collectImageField(record.image_url);
@@ -440,11 +485,11 @@ function parseResponsePayload(responseText: string): unknown {
   }
 }
 
-export async function requestImage(
+export async function requestImages(
   profile: ImageApiProfileWithMode,
   input: ImageRequestInput,
   signal: AbortSignal,
-): Promise<ImageResource> {
+): Promise<ImageResource[]> {
   const prompt = input.prompt;
   const referenceImages = (input.referenceImages ?? []).map(reference => reference.trim()).filter(Boolean);
   const url = profile.serviceUrl.trim();
@@ -453,6 +498,8 @@ export async function requestImage(
   if (!profile.model.trim()) throw new ImageApiError('当前 API 配置尚未选择模型');
 
   const timeoutMs = Number.isFinite(profile.timeoutMs) ? Math.max(1_000, profile.timeoutMs) : 120_000;
+  const imageCount = Number.isFinite(profile.imageCount) ? Math.min(4, Math.max(1, Math.trunc(profile.imageCount))) : 1;
+  const quality = profile.quality ?? 'auto';
   const configuredMode = profileRequestMode(profile);
   // An empty reference list must remain a normal generation request. In particular,
   // An output preset with avatar references disabled must never accidentally turn into an edit request.
@@ -481,8 +528,9 @@ export async function requestImage(
       const form = new FormData();
       form.append('model', profile.model.trim());
       form.append('prompt', prompt.trim());
-      form.append('n', '1');
+      form.append('n', String(imageCount));
       form.append('size', profile.imageSize);
+      form.append('quality', quality);
       const imageField = resolveMultipartImageField(requestUrl, profileMultipartImageField(profile));
       for (let index = 0; index < referenceImages.length; index += 1) {
         const inputImage = await referenceStringToInput(referenceImages[index], index, timeoutMs, signal);
@@ -504,8 +552,9 @@ export async function requestImage(
           ...jsonBodyWithoutReferenceFields(profile, null),
           model: profile.model.trim(),
           messages: [{ role: 'user', content }],
-          n: 1,
+          n: imageCount,
           size: profile.imageSize,
+          quality,
         }),
       };
     } else {
@@ -515,8 +564,9 @@ export async function requestImage(
         ...jsonBodyWithoutReferenceFields(profile, includeReferenceField),
         model: profile.model.trim(),
         prompt: prompt.trim(),
-        n: 1,
+        n: imageCount,
         size: profile.imageSize,
+        quality,
       };
       if (includeReferenceField) body[includeReferenceField] = jsonReferences;
       request = {
@@ -526,21 +576,33 @@ export async function requestImage(
       };
     }
 
-    const response = await fetchWithTimeout(requestUrl, request, timeoutMs, signal);
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new ImageApiError(`图片 API 返回 HTTP ${response.status}`, { status: response.status });
-    }
-
-    const resources = collectImageResources(parseResponsePayload(responseText), responseText);
-    const resource = resources[0];
-    resources.slice(1).forEach(item => item.revoke?.());
-    if (!resource) throw new ImageApiError('图片 API 响应中没有可显示的图片');
-    return resource;
+    const resources = await fetchWithTimeout(requestUrl, request, timeoutMs, signal, async response => {
+      const responseText = await response.text();
+      if (!response.ok) {
+        throw new ImageApiError(`图片 API 返回 HTTP ${response.status}`, { status: response.status });
+      }
+      return collectImageResources(parseResponsePayload(responseText), responseText);
+    });
+    if (resources.length === 0) throw new ImageApiError('图片 API 响应中没有可显示的图片');
+    const selected = resources.slice(0, imageCount);
+    resources.slice(imageCount).forEach(resource => resource.revoke?.());
+    return selected;
   } catch (error) {
     if (isAbortError(error) || signal.aborted) throw makeAbortError('图片请求已取消');
     if (error instanceof ImageApiError) throw error;
     // Do not include prompt, URL, response body, or authentication data in errors.
     throw new ImageApiError('图片 API 请求失败');
   }
+}
+
+/** Backward-compatible single-image adapter for callers and tests that only need the first result. */
+export async function requestImage(
+  profile: ImageApiProfileWithMode,
+  input: ImageRequestInput,
+  signal: AbortSignal,
+): Promise<ImageResource> {
+  const resources = await requestImages(profile, input, signal);
+  const [first, ...overflow] = resources;
+  overflow.forEach(resource => resource.revoke?.());
+  return first;
 }

@@ -146,6 +146,25 @@ export class ImageTaskCache {
     return keys.length;
   }
 
+  removeSwipe(chatId: string, messageId: number, swipeId: number): number {
+    const keys = this.getForMessage(chatId, messageId)
+      .filter(task => task.swipeId === swipeId)
+      .map(imageTaskKey);
+    keys.forEach(key => this.remove(key));
+    return keys.length;
+  }
+
+  shiftSwipeIdsAfterDeletion(chatId: string, messageId: number, deletedSwipeId: number): number {
+    const shifted = this.getForMessage(chatId, messageId).filter(task => task.swipeId > deletedSwipeId);
+    shifted.forEach(task => this.tasks.delete(imageTaskKey(task)));
+    shifted.forEach(task => {
+      task.swipeId -= 1;
+      if (task.intent.requestedTarget) task.intent.requestedTarget.swipeId = task.swipeId;
+      this.tasks.set(imageTaskKey(task), task);
+    });
+    return shifted.length;
+  }
+
   clear(): void {
     Array.from(this.tasks.keys()).forEach(key => this.remove(key));
   }

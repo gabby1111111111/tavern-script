@@ -9,6 +9,7 @@ import type { DisplaySettings, FloorTriggerDecision } from './pipeline-types';
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = Object.freeze({
   displayMode: 'inline',
   skipFloors: 0,
+  generateOnSwipe: true,
 });
 
 export const MAX_SAFE_SKIP_FLOORS = Number.MAX_SAFE_INTEGER - 1;
@@ -35,6 +36,7 @@ export function normalizeDisplaySettings(value: Partial<DisplaySettings> | null 
   return {
     displayMode,
     skipFloors: normalizeSkipFloors(value?.skipFloors),
+    generateOnSwipe: value?.generateOnSwipe !== false,
   };
 }
 

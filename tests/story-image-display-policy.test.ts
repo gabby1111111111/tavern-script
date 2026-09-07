@@ -1,5 +1,6 @@
 import type { ImageResource } from '../src/杠杠の生图机/image-api';
 import {
+  DEFAULT_DISPLAY_SETTINGS,
   decideFloorTrigger,
   floorInterval,
   normalizeDisplaySettings,
@@ -25,12 +26,23 @@ equal(normalizeSkipFloors('2'), 0, '字符串 skipFloors 不应被隐式接受')
 equal(floorInterval(0), 1, 'skipFloors=0 应每楼触发');
 equal(floorInterval(1), 2, 'skipFloors=1 应隔一楼触发');
 equal(
+  DEFAULT_DISPLAY_SETTINGS,
+  { displayMode: 'inline', skipFloors: 0, generateOnSwipe: true },
+  '默认展现设置应允许符合频率楼层的新 Swipe 生图',
+);
+equal(
   normalizeDisplaySettings({ displayMode: 'gift', skipFloors: -1 }),
   {
     displayMode: 'gift',
     skipFloors: 0,
+    generateOnSwipe: true,
   },
-  '展现设置应规范化',
+  '展现设置应规范化且缺少 Swipe 字段时默认开启',
+);
+equal(
+  normalizeDisplaySettings({ displayMode: 'inline', skipFloors: 2, generateOnSwipe: false }),
+  { displayMode: 'inline', skipFloors: 2, generateOnSwipe: false },
+  '展现设置应保留显式关闭的 Swipe 生图开关',
 );
 
 const decisions = [1, 2, 3, 4].map(
