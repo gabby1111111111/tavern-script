@@ -7,7 +7,36 @@ import {
   getNeteaseCandidatesForGeneration,
   type NeteasePlaylistTrack,
 } from './bgm-playlist';
-import { type BgmSourceMode, useBgmSettingsStore } from './bgm-settings';
+import {
+  createBgmPromptCadenceState,
+  createBgmPromptGenerationLifecycle,
+  createBgmPromptSkippedSwipeLifecycle,
+  decideBgmPromptCadenceAtFloor,
+  decideBgmPromptCadence,
+  advanceBgmPromptSkippedSwipeLifecycle,
+  markBgmPromptGenerationAborted,
+  markBgmPromptAfterCommandsAccepted,
+  markBgmPromptGenerationStarted,
+  markBgmPromptGenerationSettled,
+  mergeBgmPromptSwipeAudit,
+  normalizeBgmPromptInterval,
+  isBgmPromptGenerationReady,
+  shouldArmBgmPromptGeneration,
+  shouldHandleBgmGeneration,
+  shouldTrackAudioGeneration,
+  settleBgmPromptCadence,
+  updateBgmPromptCadenceInterval,
+  BgmMessageIdentityStore,
+  type BgmPromptCadenceDecision,
+  type BgmPromptFloorDecision,
+  type BgmPromptGenerationLifecycle,
+  type BgmPromptSkippedSwipeEvent,
+  type BgmPromptSkippedSwipeLifecycle,
+  type BgmPromptSwipeAudit,
+  type BgmPromptCadenceState,
+  type BgmSourceMode,
+  useBgmSettingsStore,
+} from './bgm-settings';
 
 const bgmPinia = createPinia();
 const bgmSettingsStore = useBgmSettingsStore(bgmPinia);
@@ -231,6 +260,7 @@ function createAudioPromptContent(
   sourceContext: BgmSourceContext,
   sourceError: string | null,
   currentAmbientTitle: string,
+  includeBgmPrompt = isBgmEnabled(),
 ) {
   const currentPlaylist = titles.length
     ? titles.map(title => '《' + title + '》').join('、')
@@ -256,7 +286,7 @@ function createAudioPromptContent(
   };
   const promptContent = ['<杠杠の调音台>'];
 
-  if (isBgmEnabled()) {
+  if (includeBgmPrompt) {
     const bgmSections: Array<[string, string]> = [
       ['注入位置', renderPromptTemplate(bgmSettingsStore.settings.bgm_injection_location, values)],
       ['选曲要求', renderPromptTemplate(bgmSettingsStore.settings.bgm_prompt_content, values)],
@@ -319,6 +349,35 @@ let ambientGenerationId = 0;
 let activeAmbientScanner: AmbientMarkerScanner | null = null;
 let activeAmbientGenerationId = 0;
 let activeAmbientRequestController: AbortController | null = null;
+let bgmPromptCadenceState: BgmPromptCadenceState = createBgmPromptCadenceState(
+  bgmSettingsStore.settings.bgm_prompt_interval,
+);
+let normalAssistantFloorCount = bgmPromptCadenceState.completedCount;
+
+type PendingSwipeTarget = {
+  chatId: string;
+  messageId: number;
+  messageRef: object;
+};
+
+let pendingSwipeTarget: PendingSwipeTarget | null = null;
+const floorDecisions = new BgmMessageIdentityStore<BgmPromptFloorDecision>();
+
+type PendingBgmPromptDecision = BgmPromptFloorDecision & BgmPromptGenerationLifecycle & {
+  runtimeStarted: boolean;
+  sourceError: string | null;
+  injectionSucceeded: boolean;
+  generationType: 'normal' | 'swipe';
+  expectedMessageId: number | null;
+  startChatLength: number;
+  startTailRef: object | null;
+  abortSignal?: AbortSignal;
+};
+
+let pendingBgmPromptDecision: PendingBgmPromptDecision | null = null;
+let lastSettledBgmGeneration: { generationType: 'normal' | 'swipe'; messageId: number } | null = null;
+type SkippedSwipeLifecycle = BgmPromptSkippedSwipeLifecycle & { audit: BgmPromptSwipeAudit };
+let skippedSwipeLifecycle: SkippedSwipeLifecycle | null = null;
 
 type RuntimeAudit = {
   run_id: number;
@@ -359,6 +418,18 @@ type RuntimeAudit = {
     playlist_id: string | null;
     candidate_count: number;
     reason: 'generation_after_commands' | 'settings_changed' | null;
+    interval: number;
+    bgm_prompt_included: boolean;
+    skipped_count: number;
+    completed_count: number;
+    assistant_floor_count: number;
+    swipe_enabled: boolean;
+    swipe_message_id: number | null;
+    swipe_eligible: boolean | null;
+    swipe_started: boolean;
+    swipe_skipped: boolean;
+    decision: 'inject' | 'skip' | 'disabled' | 'error' | null;
+    cadence_reason: string | null;
     error: string | null;
   };
   ambient: {
@@ -398,6 +469,18 @@ const runtimeAudit: RuntimeAudit = {
     playlist_id: null,
     candidate_count: 0,
     reason: null,
+    interval: normalizeBgmPromptInterval(bgmSettingsStore.settings.bgm_prompt_interval),
+    bgm_prompt_included: false,
+    skipped_count: 0,
+    completed_count: 0,
+    assistant_floor_count: 0,
+    swipe_enabled: bgmSettingsStore.settings.generate_on_swipe,
+    swipe_message_id: null,
+    swipe_eligible: null,
+    swipe_started: false,
+    swipe_skipped: false,
+    decision: null,
+    cadence_reason: null,
     error: null,
   },
   ambient: {
@@ -431,6 +514,46 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function rawMessageRef(messageId: number): object | null {
+  const message = SillyTavern.chat[messageId];
+  return typeof message === 'object' && message !== null ? message : null;
+}
+
+function currentChatId(): string {
+  return SillyTavern.getCurrentChatId();
+}
+
+function updateSwipePromptAudit(patch: Partial<Pick<RuntimeAudit['playlist_prompt'],
+  'swipe_enabled' | 'swipe_message_id' | 'swipe_eligible' | 'swipe_started' | 'swipe_skipped'>>) {
+  runtimeAudit.playlist_prompt = {
+    ...runtimeAudit.playlist_prompt,
+    ...patch,
+  };
+}
+
+function snapshotSwipePromptAudit(): BgmPromptSwipeAudit {
+  const { swipe_enabled, swipe_message_id, swipe_eligible, swipe_started, swipe_skipped } = runtimeAudit.playlist_prompt;
+  return { swipe_enabled, swipe_message_id, swipe_eligible, swipe_started, swipe_skipped };
+}
+
+function clearSkippedSwipeLifecycle() {
+  skippedSwipeLifecycle = null;
+}
+
+function rememberSkippedSwipeLifecycle(
+  firstEvent: BgmPromptSkippedSwipeEvent,
+  messageId: number | null = runtimeAudit.playlist_prompt.swipe_message_id,
+) {
+  skippedSwipeLifecycle = {
+    ...createBgmPromptSkippedSwipeLifecycle(firstEvent, messageId),
+    audit: snapshotSwipePromptAudit(),
+  };
+}
+
+function updatePlaylistPromptAudit(patch: Partial<RuntimeAudit['playlist_prompt']>) {
+  runtimeAudit.playlist_prompt = { ...runtimeAudit.playlist_prompt, ...patch };
+}
+
 function isBgmEnabled() {
   return bgmSettingsStore.settings.module_enabled.bgm;
 }
@@ -451,8 +574,19 @@ function clearBgmPromptInjections() {
   bgmPromptRuntime.uninjectPlaylist = undefined;
 }
 
-function installCurrentBgmPlaylistPrompt() {
+type BgmPlaylistPromptInstallResult = {
+  bgmPromptIncluded: boolean;
+  sourceError: string | null;
+  injectionSucceeded: boolean;
+};
+
+function installCurrentBgmPlaylistPrompt(
+  cadenceDecision: BgmPromptCadenceDecision = decideBgmPromptCadence(bgmPromptCadenceState),
+  allowBgmPrompt = true,
+  preservedSwipeAudit?: Partial<BgmPromptSwipeAudit>,
+): BgmPlaylistPromptInstallResult {
   let titles: string[] = [];
+  const bgmPromptIncluded = isBgmEnabled() && allowBgmPrompt && cadenceDecision.bgmPromptIncluded;
   const sourceMode = activeGenerationSourceContext?.mode ?? bgmSettingsStore.settings.source_mode;
   let sourceContext: BgmSourceContext = {
     mode: sourceMode,
@@ -460,7 +594,7 @@ function installCurrentBgmPlaylistPrompt() {
     candidates: [],
   };
   let sourceError: string | null = null;
-  runtimeAudit.playlist_prompt = {
+  runtimeAudit.playlist_prompt = mergeBgmPromptSwipeAudit({
     status: 'pending',
     id: bgmPlaylistPromptId,
     count: 0,
@@ -469,29 +603,35 @@ function installCurrentBgmPlaylistPrompt() {
     playlist_id: null,
     candidate_count: 0,
     reason: 'generation_after_commands',
+    interval: cadenceDecision.interval,
+    bgm_prompt_included: bgmPromptIncluded,
+    skipped_count: cadenceDecision.skippedCount,
+    completed_count: cadenceDecision.completedCount,
+    assistant_floor_count: normalAssistantFloorCount,
+    swipe_enabled: bgmSettingsStore.settings.generate_on_swipe,
+    swipe_message_id: null,
+    swipe_eligible: null,
+    swipe_started: false,
+    swipe_skipped: false,
+    decision: !isBgmEnabled() ? 'disabled' : allowBgmPrompt ? cadenceDecision.decision : 'skip',
+    cadence_reason: !isBgmEnabled()
+      ? 'bgm_disabled'
+      : allowBgmPrompt
+        ? cadenceDecision.reason
+        : 'non_bgm_generation',
     error: null,
-  };
+  }, preservedSwipeAudit);
 
   if (!isAnyAudioEnabled()) {
     clearBgmPromptInjections();
-    runtimeAudit.playlist_prompt = {
-      status: 'success',
-      id: bgmPlaylistPromptId,
-      count: 0,
-      titles: [],
-      source_mode: sourceMode,
-      playlist_id: null,
-      candidate_count: 0,
-      reason: 'generation_after_commands',
-      error: null,
-    };
-    return;
+    updatePlaylistPromptAudit({ status: 'success', count: 0, titles: [], error: null });
+    return { bgmPromptIncluded: false, sourceError: null, injectionSucceeded: true };
   }
 
   try {
     clearBgmPromptInjections();
-    titles = isBgmEnabled() ? getCurrentBgmTitles() : [];
-    if (isBgmEnabled()) {
+    titles = bgmPromptIncluded ? getCurrentBgmTitles() : [];
+    if (bgmPromptIncluded) {
       sourceContext = activeGenerationSourceContext ?? getConfiguredBgmSourceContext();
       activeGenerationSourceContext = sourceContext;
       if (sourceContext.mode === 'netease_playlist' && sourceContext.candidates.length === 0) {
@@ -501,7 +641,13 @@ function installCurrentBgmPlaylistPrompt() {
       }
     }
     const currentAmbientTitle = isAmbientEnabled() ? getCurrentAmbientTitle() : '';
-    const content = createAudioPromptContent(titles, sourceContext, sourceError, currentAmbientTitle);
+    const content = createAudioPromptContent(
+      titles,
+      sourceContext,
+      sourceError,
+      currentAmbientTitle,
+      bgmPromptIncluded,
+    );
     bgmPromptRuntime.uninjectPlaylist = injectPrompts(
       [
         {
@@ -522,17 +668,16 @@ function installCurrentBgmPlaylistPrompt() {
       reason: 'generation_after_commands',
       error: sourceError,
     };
-    runtimeAudit.playlist_prompt = {
+    updatePlaylistPromptAudit({
       status: sourceError ? 'fail' : 'success',
-      id: bgmPlaylistPromptId,
       count: titles.length,
       titles,
       source_mode: sourceContext.mode,
       playlist_id: sourceContext.playlistId,
       candidate_count: sourceContext.candidates.length,
-      reason: 'generation_after_commands',
+      cadence_reason: sourceError ? 'source_error' : runtimeAudit.playlist_prompt.cadence_reason,
       error: sourceError,
-    };
+    });
     if (sourceError) {
       runtimeAudit.last_error = sourceError;
       debugWarn('<杠杠-BGM> 指定网易云歌单不可用，本轮不会回退到完全随机', {
@@ -548,19 +693,20 @@ function installCurrentBgmPlaylistPrompt() {
         candidateCount: sourceContext.candidates.length,
       });
     }
+    return { bgmPromptIncluded, sourceError, injectionSucceeded: true };
   } catch (error) {
     const message = errorText(error);
-    runtimeAudit.playlist_prompt = {
+    updatePlaylistPromptAudit({
       status: 'fail',
-      id: bgmPlaylistPromptId,
       count: titles.length,
       titles,
       source_mode: sourceContext.mode,
       playlist_id: sourceContext.playlistId,
       candidate_count: sourceContext.candidates.length,
-      reason: 'generation_after_commands',
+      decision: 'error',
+      cadence_reason: 'injection_error',
       error: message,
-    };
+    });
     runtimeAudit.prompt_injection = {
       status: 'fail',
       id: bgmPlaylistPromptId,
@@ -570,6 +716,7 @@ function installCurrentBgmPlaylistPrompt() {
     };
     runtimeAudit.last_error = message;
     debugWarn('<杠杠-BGM> 当前歌单排重提示注入失败', { message });
+    return { bgmPromptIncluded, sourceError: null, injectionSucceeded: false };
   }
 }
 
@@ -601,10 +748,28 @@ function cancelBgmTransition() {
   }
 }
 
-function resetBgmGeneration() {
+function resetBgmPromptCadence() {
+  bgmPromptCadenceState = createBgmPromptCadenceState(bgmSettingsStore.settings.bgm_prompt_interval);
+  normalAssistantFloorCount = 0;
+  floorDecisions.reset();
+  updatePlaylistPromptAudit({
+    interval: bgmPromptCadenceState.interval,
+    skipped_count: 0,
+    completed_count: 0,
+    assistant_floor_count: 0,
+  });
+}
+
+function resetBgmGeneration(preservePending = false) {
   activeMusicGenerationId = 0;
   activeScanner = null;
   activeGenerationSourceContext = null;
+  if (!preservePending && pendingBgmPromptDecision) {
+    Object.assign(pendingBgmPromptDecision, markBgmPromptGenerationAborted(pendingBgmPromptDecision));
+  }
+  if (!preservePending) pendingBgmPromptDecision = null;
+  if (!preservePending) lastSettledBgmGeneration = null;
+  if (!preservePending) clearSkippedSwipeLifecycle();
   cancelBgmTransition();
 }
 
@@ -1000,14 +1165,8 @@ function handleAmbientAction(runId: number, action: AmbientAction) {
   void searchAndPlayAmbient(runId, action);
 }
 
-function shouldTrack(type: string, dryRun: boolean): boolean {
-  if (dryRun) return false;
-  if (type === 'quiet') return false;
-  return true;
-}
-
 function startGeneration() {
-  if (!isBgmEnabled()) return;
+  if (!isBgmEnabled() || !pendingBgmPromptDecision?.bgmPromptIncluded) return;
   generationId += 1;
   const currentGenerationId = generationId;
   const currentSourceContext = activeGenerationSourceContext ?? getConfiguredBgmSourceContext();
@@ -1053,6 +1212,29 @@ function startGeneration() {
   debugInfo(`<杠杠-BGM> generation started #${currentGenerationId}`);
 }
 
+function startSkippedGeneration() {
+  if (!isBgmEnabled() || !pendingBgmPromptDecision || pendingBgmPromptDecision.bgmPromptIncluded) return;
+  generationId += 1;
+  const currentGenerationId = generationId;
+  activeMusicGenerationId = 0;
+  activeScanner = null;
+  activeGenerationSourceContext = null;
+  runtimeAudit.run_id = currentGenerationId;
+  runtimeAudit.generation = {
+    status: 'success',
+    id: currentGenerationId,
+    source_mode: bgmSettingsStore.settings.source_mode,
+    playlist_id: null,
+  };
+  runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
+  runtimeAudit.stream_finished = { status: 'pending', message_id: null, error: null };
+  runtimeAudit.music_lookup = { status: 'pending', source: null, query: null, track_id: null, error: null };
+  runtimeAudit.playlist = { status: 'pending', before_count: 0, removed_count: 0, after_count: 0, error: null };
+  runtimeAudit.audio_played = { status: 'pending', error: null };
+  runtimeAudit.last_error = null;
+  debugInfo(`<杠杠-BGM> skipped BGM generation started #${currentGenerationId}`);
+}
+
 function startAmbientGeneration() {
   if (!isAmbientEnabled()) return;
   abortActiveAmbientRequest();
@@ -1077,86 +1259,299 @@ function startAmbientGeneration() {
   debugInfo(`<杠杠-环境音> generation started #${currentAmbientGenerationId}`);
 }
 
-clearBgmPromptInjections();
-eventOn(tavern_events.CHAT_CHANGED, () => {
-  resetAudioGenerationState();
-  clearBgmPromptInjections();
-});
-watch(
-  () => [bgmSettingsStore.settings.module_enabled.bgm, bgmSettingsStore.settings.module_enabled.ambient],
-  () => {
-    resetAudioGenerationState();
-    clearBgmPromptInjections();
-  },
-);
-watch(
-  () => [
-    bgmSettingsStore.settings.source_mode,
-    bgmSettingsStore.settings.playlist_id,
-    bgmSettingsStore.settings.playlist_sample_count,
-  ],
-  () => {
-    resetBgmGeneration();
-    clearBgmPromptInjections();
-  },
-);
+function getCurrentBgmPromptCadenceDecision(floorCount = normalAssistantFloorCount + 1) {
+  const interval = normalizeBgmPromptInterval(bgmSettingsStore.settings.bgm_prompt_interval);
+  if (bgmPromptCadenceState.interval !== interval) {
+    bgmPromptCadenceState = updateBgmPromptCadenceInterval(bgmPromptCadenceState, interval);
+  }
+  return decideBgmPromptCadenceAtFloor(bgmPromptCadenceState, floorCount);
+}
 
-eventOn(tavern_events.GENERATION_AFTER_COMMANDS, (type: string, _option: unknown, dry_run: boolean) => {
-  if (!isAnyAudioEnabled()) return;
-  if (!shouldTrack(type, dry_run)) {
-    debugInfo('<杠杠-BGM> 跳过非真实生成的歌单排重提示', { type, dry_run });
+function inspectPendingSwipeTarget() {
+  const target = pendingSwipeTarget;
+  if (!target || target.chatId !== currentChatId() || rawMessageRef(target.messageId) !== target.messageRef) return null;
+  const message = getChatMessages(target.messageId)[0];
+  if (message?.role !== 'assistant') return null;
+  return { target, decision: floorDecisions.get(target.messageRef) };
+}
+
+function consumePendingSwipeTarget(type: string) {
+  const inspected = inspectPendingSwipeTarget();
+  pendingSwipeTarget = null;
+  if (type !== 'swipe') return null;
+  if (inspected) return inspected;
+
+  // Match the image-machine fallback: when host event order does not leave a
+  // pending MESSAGE_SWIPED target, the current assistant tail is the Swipe
+  // source. Its raw object identity still carries the original floor decision.
+  const messageId = getLastMessageId();
+  const messageRef = messageId >= 0 ? rawMessageRef(messageId) : null;
+  const message = messageId >= 0 ? getChatMessages(messageId)[0] : undefined;
+  if (!messageRef || message?.role !== 'assistant') return null;
+  return {
+    target: { chatId: currentChatId(), messageId, messageRef },
+    decision: floorDecisions.get(messageRef),
+  };
+}
+
+function updateSwipeAuditFromPendingTarget() {
+  const inspected = inspectPendingSwipeTarget();
+  updateSwipePromptAudit({
+    swipe_enabled: bgmSettingsStore.settings.generate_on_swipe,
+    swipe_message_id: inspected?.target.messageId ?? null,
+    swipe_eligible: inspected?.decision?.bgmPromptIncluded ?? false,
+    swipe_started: false,
+    swipe_skipped: true,
+  });
+  return inspected;
+}
+
+function abortPendingBgmGeneration() {
+  if (pendingBgmPromptDecision) {
+    Object.assign(pendingBgmPromptDecision, markBgmPromptGenerationAborted(pendingBgmPromptDecision));
+  }
+  pendingBgmPromptDecision = null;
+  lastSettledBgmGeneration = null;
+  clearSkippedSwipeLifecycle();
+  activeScanner = null;
+  activeMusicGenerationId = 0;
+  activeGenerationSourceContext = null;
+  cancelBgmTransition();
+}
+
+function bindBgmGenerationAbort(pending: PendingBgmPromptDecision, signal: AbortSignal | undefined) {
+  if (!signal) return;
+  pending.abortSignal = signal;
+  if (signal.aborted) {
+    if (pendingBgmPromptDecision === pending) abortPendingBgmGeneration();
     return;
   }
-  installCurrentBgmPlaylistPrompt();
-});
+  signal.addEventListener(
+    'abort',
+    () => {
+      if (pendingBgmPromptDecision === pending) {
+        debugInfo('<杠杠-BGM> 生成 signal 已中止，不结算当前 normal 楼', { generationType: pending.generationType });
+        abortPendingBgmGeneration();
+      }
+    },
+    { once: true },
+  );
+}
 
-eventOn(tavern_events.GENERATION_STARTED, (type: string, _option: unknown, dry_run: boolean) => {
-  if (!isAnyAudioEnabled()) return;
-  if (!shouldTrack(type, dry_run)) {
-    debugInfo('<杠杠-BGM> 跳过非真实对话的生成', { type, dry_run });
+function createPendingBgmGeneration(
+  type: 'normal' | 'swipe',
+  signal?: AbortSignal,
+  lifecycleEvent: BgmPromptSkippedSwipeEvent = 'after_commands',
+): PendingBgmPromptDecision | null {
+  if (type === 'swipe' && skippedSwipeLifecycle) {
+    const current = skippedSwipeLifecycle;
+    const advanced = advanceBgmPromptSkippedSwipeLifecycle(current, lifecycleEvent);
+    skippedSwipeLifecycle = { ...advanced.state, audit: current.audit };
+    updateSwipePromptAudit(current.audit);
+    return null;
+  }
+  if (!isBgmEnabled()) return null;
+  const swipe = consumePendingSwipeTarget(type);
+  let floorDecision: BgmPromptFloorDecision | undefined;
+  let expectedMessageId: number | null = null;
+  if (type === 'normal') {
+    floorDecision = decideBgmPromptCadenceAtFloor(bgmPromptCadenceState, normalAssistantFloorCount + 1);
+  } else {
+    expectedMessageId = swipe?.target.messageId ?? null;
+    const swipeDecision = swipe?.decision;
+    updateSwipePromptAudit({
+      swipe_enabled: bgmSettingsStore.settings.generate_on_swipe,
+      swipe_message_id: expectedMessageId,
+      swipe_eligible: swipeDecision?.bgmPromptIncluded ?? false,
+      swipe_started: false,
+      swipe_skipped: true,
+    });
+    if (
+      !shouldArmBgmPromptGeneration({
+        enabled: isBgmEnabled(),
+        type,
+        dryRun: false,
+        generateOnSwipe: bgmSettingsStore.settings.generate_on_swipe,
+        swipeFloorEligible: swipeDecision?.bgmPromptIncluded,
+      })
+    )
+      {
+        rememberSkippedSwipeLifecycle(lifecycleEvent, expectedMessageId);
+        return null;
+      }
+    floorDecision = swipeDecision;
+  }
+  if (!floorDecision) {
+    if (type === 'swipe') {
+      rememberSkippedSwipeLifecycle(lifecycleEvent, expectedMessageId);
+    }
+    return null;
+  }
+  const pending: PendingBgmPromptDecision = {
+    ...floorDecision,
+    ...createBgmPromptGenerationLifecycle(false, false),
+    runtimeStarted: false,
+    sourceError: null,
+    injectionSucceeded: false,
+    generationType: type,
+    expectedMessageId,
+    startChatLength: SillyTavern.chat.length,
+    startTailRef: (() => {
+      const tailId = getLastMessageId();
+      return tailId >= 0 ? rawMessageRef(tailId) : null;
+    })(),
+  };
+  lastSettledBgmGeneration = null;
+  pendingBgmPromptDecision = pending;
+  bindBgmGenerationAbort(pending, signal);
+  return pending.aborted ? null : pending;
+}
+
+function ensurePendingBgmGeneration(
+  type: string,
+  signal?: AbortSignal,
+  lifecycleEvent: BgmPromptSkippedSwipeEvent = 'after_commands',
+): PendingBgmPromptDecision | null {
+  if (type !== 'normal' && type !== 'swipe') return null;
+  if (pendingBgmPromptDecision?.generationType === type && !pendingBgmPromptDecision.aborted) {
+    bindBgmGenerationAbort(pendingBgmPromptDecision, signal);
+    return pendingBgmPromptDecision;
+  }
+  if (pendingBgmPromptDecision) abortPendingBgmGeneration();
+  lastSettledBgmGeneration = null;
+  return createPendingBgmGeneration(type, signal, lifecycleEvent);
+}
+
+function startPendingBgmRuntime(pending: PendingBgmPromptDecision) {
+  if (pending.aborted || pending.runtimeStarted || !pending.generationStarted || !pending.afterCommandsAccepted) return;
+  if (pending.bgmPromptIncluded) startGeneration();
+  else startSkippedGeneration();
+  pending.runtimeStarted = true;
+}
+
+function resolveFinalAssistantMessageId(
+  pending: PendingBgmPromptDecision,
+  eventMessageId: number | null,
+): number | null {
+  const candidates = [
+    eventMessageId,
+    pending.expectedMessageId,
+    pending.generationType === 'normal' ? getLastMessageId() : null,
+    pending.generationType === 'normal' ? SillyTavern.chat.length - 1 : null,
+  ];
+  const seen = new Set<number>();
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0 || seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (pending.generationType === 'normal' && candidate < pending.startChatLength) continue;
+    if (pending.generationType === 'swipe' && pending.expectedMessageId !== null && candidate !== pending.expectedMessageId) {
+      continue;
+    }
+    const rawMessage = rawMessageRef(candidate);
+    const message = getChatMessages(candidate)[0];
+    if (!rawMessage || message?.role !== 'assistant') continue;
+    if (pending.generationType === 'normal' && rawMessage === pending.startTailRef) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function commitNormalAssistantFloor(pending: PendingBgmPromptDecision, messageId: number) {
+  if (pending.settled || pending.aborted || pending.generationType !== 'normal') return;
+  Object.assign(pending, markBgmPromptGenerationSettled(pending));
+  normalAssistantFloorCount = pending.normalAssistantFloorCount;
+  bgmPromptCadenceState = settleBgmPromptCadence(
+    bgmPromptCadenceState,
+    pending.bgmPromptIncluded,
+    pending.sourceError || !pending.injectionSucceeded ? 'source_error' : 'completed',
+  );
+  const messageRef = rawMessageRef(messageId);
+  if (messageRef) {
+    floorDecisions.set(messageRef, {
+      interval: pending.interval,
+      bgmPromptIncluded: pending.bgmPromptIncluded,
+      skippedCount: pending.skippedCount,
+      completedCount: pending.completedCount,
+      decision: pending.decision,
+      reason: pending.reason,
+      normalAssistantFloorCount: pending.normalAssistantFloorCount,
+    });
+  }
+  updatePlaylistPromptAudit({
+    skipped_count: bgmPromptCadenceState.skippedCount,
+    completed_count: bgmPromptCadenceState.completedCount,
+    assistant_floor_count: normalAssistantFloorCount,
+  });
+}
+
+function finishAudioGeneration(eventMessageId: number | null, receivedType?: string) {
+  const pending = pendingBgmPromptDecision;
+  if (pending && receivedType && pending.generationType !== receivedType) {
+    debugInfo('<杠杠-BGM> 当前消息类型与 pending generation 不一致，等待对应生成结束', {
+      eventMessageId,
+      receivedType,
+      pendingType: pending.generationType,
+    });
     return;
   }
-  if (isBgmEnabled()) startGeneration();
-  if (isAmbientEnabled()) startAmbientGeneration();
-});
-
-eventOn(tavern_events.STREAM_TOKEN_RECEIVED, (fullText: string) => {
-  if (!isAnyAudioEnabled()) return;
-  if (isBgmEnabled()) {
-    if (!activeScanner) startGeneration();
-    activeScanner?.pushSnapshot(fullText);
-  }
-  if (isAmbientEnabled()) {
-    if (!activeAmbientScanner) startAmbientGeneration();
-    activeAmbientScanner?.pushSnapshot(fullText);
-  }
-});
-
-eventOn(tavern_events.MESSAGE_RECEIVED, (messageId: number, type: string) => {
-  if (!isAnyAudioEnabled()) return;
-  if (type === 'quiet') {
-    debugInfo('<杠杠-BGM> 跳过 quiet 消息,不结束 scanner', { messageId });
+  if (!pending && lastSettledBgmGeneration && eventMessageId === lastSettledBgmGeneration.messageId) {
+    debugInfo('<杠杠-BGM> 忽略重复的生成结束事件', {
+      eventMessageId,
+      generationType: lastSettledBgmGeneration.generationType,
+    });
     return;
   }
-  let bgmAction = activeScanner?.getState().action ?? null;
-  if (activeScanner && !bgmAction) {
-    const finalMessage = getChatMessages(messageId)[0]?.message ?? '';
-    activeScanner.pushSnapshot(finalMessage);
-    bgmAction = activeScanner.finish();
+  if (!pending && skippedSwipeLifecycle) clearSkippedSwipeLifecycle();
+  if (pending && (!isBgmPromptGenerationReady(pending) || !pending.runtimeStarted)) {
+    debugInfo('<杠杠-BGM> 当前生成生命周期尚未完整，暂不结算正文楼', {
+      eventMessageId,
+      receivedType,
+      generationType: pending.generationType,
+      generationStarted: pending.generationStarted,
+      afterCommandsAccepted: pending.afterCommandsAccepted,
+    });
+    return;
+  }
+  let finalMessageId: number | null = null;
+  if (pending && !pending.aborted) {
+    finalMessageId = resolveFinalAssistantMessageId(pending, eventMessageId);
+  } else if (eventMessageId !== null && Number.isInteger(eventMessageId) && eventMessageId >= 0) {
+    const message = getChatMessages(eventMessageId)[0];
+    finalMessageId = message?.role === 'assistant' && rawMessageRef(eventMessageId) ? eventMessageId : null;
+  }
+  if (finalMessageId === null) return;
+
+  const finalMessage = getChatMessages(finalMessageId)[0];
+  const finalText = finalMessage?.message ?? '';
+  let bgmAction: BgmAction | null = null;
+  if (pending && !pending.aborted) {
+    if (pending.bgmPromptIncluded && activeScanner) {
+      if (!activeScanner.getState().action) activeScanner.pushSnapshot(finalText);
+      bgmAction = activeScanner.finish();
+    }
+    if (pending.generationType === 'normal') {
+      commitNormalAssistantFloor(pending, finalMessageId);
+    } else {
+      Object.assign(pending, markBgmPromptGenerationSettled(pending));
+      updateSwipePromptAudit({
+        swipe_message_id: finalMessageId,
+        swipe_started: true,
+        swipe_skipped: false,
+      });
+    }
+    lastSettledBgmGeneration = { generationType: pending.generationType, messageId: finalMessageId };
+    pendingBgmPromptDecision = null;
   } else if (activeScanner) {
-    bgmAction = activeScanner.finish();
+    activeScanner = null;
   }
 
-  let ambientAction = activeAmbientScanner?.getState().action ?? null;
-  if (activeAmbientScanner && !ambientAction) {
-    const finalMessage = getChatMessages(messageId)[0]?.message ?? '';
-    activeAmbientScanner.pushSnapshot(finalMessage);
-    ambientAction = activeAmbientScanner.finish();
-  } else if (activeAmbientScanner) {
+  let ambientAction: AmbientAction | null = null;
+  if (activeAmbientScanner) {
+    if (!activeAmbientScanner.getState().action) activeAmbientScanner.pushSnapshot(finalText);
     ambientAction = activeAmbientScanner.finish();
   }
 
-  runtimeAudit.stream_finished = { status: 'success', message_id: messageId, error: null };
+  runtimeAudit.stream_finished = { status: 'success', message_id: finalMessageId, error: null };
   if (bgmAction?.type === 'none' && runtimeAudit.marker.status === 'pending') {
     runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
   }
@@ -1169,10 +1564,183 @@ eventOn(tavern_events.MESSAGE_RECEIVED, (messageId: number, type: string) => {
       current_location: currentLocation || null,
     };
   }
-  debugInfo('<杠杠-调音台> stream finished', { generationId, messageId, type, bgmAction, ambientAction });
+  debugInfo('<杠杠-调音台> stream finished', {
+    generationId,
+    messageId: finalMessageId,
+    type: receivedType ?? pending?.generationType ?? 'unknown',
+    bgmAction,
+    ambientAction,
+  });
   activeScanner = null;
   activeAmbientScanner = null;
   activeGenerationSourceContext = null;
+}
+
+clearBgmPromptInjections();
+eventOn(tavern_events.CHAT_CHANGED, () => {
+  resetBgmPromptCadence();
+  resetAudioGenerationState();
+  pendingSwipeTarget = null;
+  clearBgmPromptInjections();
+});
+watch(
+  () => [bgmSettingsStore.settings.module_enabled.bgm, bgmSettingsStore.settings.module_enabled.ambient],
+  ([nextBgmEnabled], [previousBgmEnabled]) => {
+    // Turning BGM off/on must not erase the normal-floor phase. Preserve an
+    // in-flight floor so a reply that already lands can still commit once.
+    resetBgmGeneration(true);
+    resetAmbientGeneration();
+    clearBgmPromptInjections();
+    if (nextBgmEnabled !== previousBgmEnabled) {
+      updateSwipePromptAudit({ swipe_enabled: bgmSettingsStore.settings.generate_on_swipe });
+    }
+  },
+);
+watch(
+  () => [
+    bgmSettingsStore.settings.source_mode,
+    bgmSettingsStore.settings.playlist_id,
+    bgmSettingsStore.settings.playlist_sample_count,
+  ],
+  () => {
+    resetBgmGeneration(true);
+    clearBgmPromptInjections();
+  },
+);
+watch(
+  () => bgmSettingsStore.settings.bgm_prompt_interval,
+  nextInterval => {
+    const normalizedInterval = normalizeBgmPromptInterval(nextInterval);
+    if (nextInterval !== normalizedInterval) bgmSettingsStore.settings.bgm_prompt_interval = normalizedInterval;
+    if (bgmPromptCadenceState.interval === normalizedInterval) return;
+    // Keep the mature image-machine semantics: changing the interval affects
+    // the next normal floor but never resets the accumulated floor count.
+    bgmPromptCadenceState = updateBgmPromptCadenceInterval(bgmPromptCadenceState, normalizedInterval);
+    updatePlaylistPromptAudit({
+      interval: normalizedInterval,
+      skipped_count: bgmPromptCadenceState.skippedCount,
+      completed_count: bgmPromptCadenceState.completedCount,
+      assistant_floor_count: normalAssistantFloorCount,
+    });
+  },
+);
+watch(
+  () => bgmSettingsStore.settings.generate_on_swipe,
+  enabled => updateSwipePromptAudit({ swipe_enabled: enabled }),
+);
+
+eventOn(tavern_events.GENERATION_AFTER_COMMANDS, (type: string, option: { signal?: AbortSignal }, dry_run: boolean) => {
+  const hasMatchingPending =
+    (pendingBgmPromptDecision?.generationType === type && !pendingBgmPromptDecision.aborted) ||
+    (type === 'swipe' && skippedSwipeLifecycle !== null);
+  if (
+    (!isAnyAudioEnabled() && !hasMatchingPending) ||
+    !shouldTrackAudioGeneration(type, dry_run) ||
+    option?.signal?.aborted
+  ) {
+    if (type === 'swipe' && (dry_run || option?.signal?.aborted)) clearSkippedSwipeLifecycle();
+    consumePendingSwipeTarget(type);
+    debugInfo('<杠杠-BGM> 跳过非真实生成的歌单排重提示', { type, dry_run });
+    return;
+  }
+  const isBgmCandidate = shouldHandleBgmGeneration(type, dry_run) && (isBgmEnabled() || hasMatchingPending);
+  const pending = isBgmCandidate
+    ? ensurePendingBgmGeneration(type, option?.signal, type === 'swipe' ? 'after_commands' : undefined)
+    : null;
+  if (!pending) {
+    // createPendingBgmGeneration already recorded the consumed Swipe target.
+    // Only the non-candidate path still needs to snapshot it here.
+    if (type === 'swipe' && !isBgmCandidate) {
+      updateSwipeAuditFromPendingTarget();
+      rememberSkippedSwipeLifecycle('after_commands');
+    }
+    const preservedSwipeAudit = type === 'swipe' ? snapshotSwipePromptAudit() : undefined;
+    consumePendingSwipeTarget(type);
+    installCurrentBgmPlaylistPrompt(getCurrentBgmPromptCadenceDecision(), false, preservedSwipeAudit);
+    debugInfo('<杠杠-BGM> 本轮类型不计入 BGM 正文楼，仍保留环境音提示', { type });
+    return;
+  }
+  if (!pending.afterCommandsAccepted) {
+    const installResult = isBgmEnabled()
+      ? installCurrentBgmPlaylistPrompt(pending, true)
+      : { bgmPromptIncluded: false, sourceError: null, injectionSucceeded: false };
+    pending.sourceError = installResult.sourceError;
+    pending.injectionSucceeded = installResult.injectionSucceeded;
+    // Keep the same object identity so the AbortSignal listener installed when
+    // this generation was created still guards the live pending generation.
+    Object.assign(pending, markBgmPromptAfterCommandsAccepted(pending));
+    pendingBgmPromptDecision = pending;
+    updateSwipePromptAudit({
+      swipe_enabled: bgmSettingsStore.settings.generate_on_swipe,
+      swipe_message_id: pending.expectedMessageId,
+      swipe_eligible: pending.generationType === 'swipe' ? pending.bgmPromptIncluded : runtimeAudit.playlist_prompt.swipe_eligible,
+      swipe_started: false,
+      swipe_skipped: pending.generationType === 'swipe' ? true : runtimeAudit.playlist_prompt.swipe_skipped,
+    });
+  }
+  startPendingBgmRuntime(pendingBgmPromptDecision ?? pending);
+});
+
+eventOn(tavern_events.GENERATION_STARTED, (type: string, option: { signal?: AbortSignal }, dry_run: boolean) => {
+  const hasMatchingPending =
+    (pendingBgmPromptDecision?.generationType === type && !pendingBgmPromptDecision.aborted) ||
+    (type === 'swipe' && skippedSwipeLifecycle !== null);
+  if (
+    (!isAnyAudioEnabled() && !hasMatchingPending) ||
+    !shouldTrackAudioGeneration(type, dry_run) ||
+    option?.signal?.aborted
+  ) {
+    if (type === 'swipe' && (dry_run || option?.signal?.aborted)) clearSkippedSwipeLifecycle();
+    consumePendingSwipeTarget(type);
+    debugInfo('<杠杠-BGM> 跳过非真实对话的生成', { type, dry_run });
+    return;
+  }
+  const isBgmCandidate = shouldHandleBgmGeneration(type, dry_run) && (isBgmEnabled() || hasMatchingPending);
+  const pending = isBgmCandidate
+    ? ensurePendingBgmGeneration(type, option?.signal, type === 'swipe' ? 'started' : undefined)
+    : null;
+  if (pending) {
+    if (!pending.generationStarted) {
+      // Do not replace the pending object: its AbortSignal listener closes over
+      // this identity and must remain able to cancel after both events arrive.
+      Object.assign(pending, markBgmPromptGenerationStarted(pending));
+      pendingBgmPromptDecision = pending;
+    }
+    startPendingBgmRuntime(pendingBgmPromptDecision ?? pending);
+  } else {
+    if (type === 'swipe' && !isBgmCandidate) {
+      updateSwipeAuditFromPendingTarget();
+      rememberSkippedSwipeLifecycle('started');
+    }
+    consumePendingSwipeTarget(type);
+  }
+  if (isAmbientEnabled()) startAmbientGeneration();
+});
+
+eventOn(tavern_events.STREAM_TOKEN_RECEIVED, (fullText: string) => {
+  if (!isAnyAudioEnabled()) return;
+  if (pendingBgmPromptDecision?.generationStarted && pendingBgmPromptDecision.bgmPromptIncluded) {
+    startPendingBgmRuntime(pendingBgmPromptDecision);
+    activeScanner?.pushSnapshot(fullText);
+  }
+  if (isAmbientEnabled()) {
+    if (!activeAmbientScanner) startAmbientGeneration();
+    activeAmbientScanner?.pushSnapshot(fullText);
+  }
+});
+
+eventOn(tavern_events.MESSAGE_RECEIVED, (messageId: number, type: string) => {
+  if (!isAnyAudioEnabled() && !pendingBgmPromptDecision) return;
+  if (!shouldTrackAudioGeneration(type, false)) {
+    debugInfo('<杠杠-BGM> 跳过非正文楼消息,不结束 scanner', { messageId, type });
+    return;
+  }
+  finishAudioGeneration(messageId, type);
+});
+
+eventOn(tavern_events.GENERATION_ENDED, (messageId: number) => {
+  if (!isAnyAudioEnabled() && !pendingBgmPromptDecision) return;
+  finishAudioGeneration(Number.isInteger(messageId) ? messageId : null);
 });
 
 eventOn(tavern_events.GENERATION_STOPPED, () => {
@@ -1181,8 +1749,20 @@ eventOn(tavern_events.GENERATION_STOPPED, () => {
 });
 
 eventOn(tavern_events.MESSAGE_SWIPED, (messageId: number) => {
-  resetAudioGenerationState();
-  debugInfo('<杠杠-调音台> scanner reset after swipe', { messageId });
+  resetBgmGeneration(true);
+  resetAmbientGeneration();
+  lastSettledBgmGeneration = null;
+  clearSkippedSwipeLifecycle();
+  const messageRef = rawMessageRef(messageId);
+  pendingSwipeTarget =
+    Number.isInteger(messageId) && messageRef
+      ? { chatId: currentChatId(), messageId, messageRef }
+      : null;
+  updateSwipeAuditFromPendingTarget();
+  debugInfo('<杠杠-调音台> recorded swipe source floor', {
+    messageId,
+    eligible: runtimeAudit.playlist_prompt.swipe_eligible,
+  });
 });
 
 function mountBgmSettingsPanel() {

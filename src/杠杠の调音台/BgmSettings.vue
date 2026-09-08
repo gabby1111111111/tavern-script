@@ -3,12 +3,12 @@
   <div class="ganggang-console-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の调音台</b>
+        <b>杠杠の调音室 v{{ GANGGANG_STUDIO_VERSION }}</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
       <div class="inline-drawer-content">
-        <nav class="ganggang-console-settings__module-tabs" aria-label="调音台模块">
+        <nav class="ganggang-console-settings__module-tabs" aria-label="调音室模块">
           <button
             v-for="module in modules"
             :key="module.key"
@@ -174,11 +174,70 @@
         </div>
 
         <div v-else-if="activeModule === 'prompt'" class="ganggang-console-settings__module-panel">
+          <div class="ganggang-console-settings__row">
+            <label for="ganggang-console-prompt-preset">提示词方案</label>
+            <div class="ganggang-console-settings__input-group">
+              <select
+                id="ganggang-console-prompt-preset"
+                v-model="selectedPromptPresetId"
+                class="text_pole ganggang-console-settings__control"
+                @change="handlePromptPresetSelection"
+              >
+                <option v-for="preset in promptOptions" :key="preset.id" :value="preset.id">
+                  {{ preset.name }}
+                </option>
+              </select>
+              <button
+                class="menu_button ganggang-console-settings__icon-button"
+                type="button"
+                title="新增提示词方案"
+                aria-label="新增提示词方案"
+                @click="beginNewPromptPreset"
+              >
+                <i class="fa-solid fa-plus" aria-hidden="true"></i>
+              </button>
+              <button
+                class="menu_button ganggang-console-settings__icon-button"
+                type="button"
+                title="删除提示词方案"
+                aria-label="删除提示词方案"
+                @click="deletePromptDraft"
+              >
+                <i class="fa-solid fa-trash" aria-hidden="true"></i>
+              </button>
+            </div>
+          </div>
+
+          <div class="ganggang-console-settings__row">
+            <label for="ganggang-console-prompt-preset-name">方案名称</label>
+            <div class="ganggang-console-settings__input-group">
+              <input
+                id="ganggang-console-prompt-preset-name"
+                v-model="promptDraft.name"
+                class="text_pole ganggang-console-settings__control"
+                placeholder="输入提示词方案名称"
+                type="text"
+                maxlength="80"
+              />
+              <button
+                class="menu_button ganggang-console-settings__icon-button"
+                type="button"
+                title="保存提示词方案"
+                aria-label="保存提示词方案"
+                @click="savePromptDraft"
+              >
+                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>
+              </button>
+            </div>
+          </div>
+
+          <p v-if="promptStatus" class="ganggang-console-settings__status">{{ promptStatus }}</p>
+
           <div class="ganggang-console-settings__row ganggang-console-settings__row--stacked">
             <label for="ganggang-console-bgm-injection-location">BGM注入位置</label>
             <textarea
               id="ganggang-console-bgm-injection-location"
-              v-model="settings.bgm_injection_location"
+              v-model="promptDraft.bgm_injection_location"
               class="text_pole ganggang-console-settings__textarea"
               rows="4"
             ></textarea>
@@ -188,7 +247,7 @@
             <label for="ganggang-console-ambient-prompt">环境音要求</label>
             <textarea
               id="ganggang-console-ambient-prompt"
-              v-model="settings.ambient_prompt_content"
+              v-model="promptDraft.ambient_prompt_content"
               class="text_pole ganggang-console-settings__textarea"
               rows="8"
             ></textarea>
@@ -201,7 +260,7 @@
             <label for="ganggang-console-bgm-prompt">BGM选曲要求</label>
             <textarea
               id="ganggang-console-bgm-prompt"
-              v-model="settings.bgm_prompt_content"
+              v-model="promptDraft.bgm_prompt_content"
               class="text_pole ganggang-console-settings__textarea"
               rows="12"
             ></textarea>
@@ -211,7 +270,7 @@
             <label for="ganggang-console-bgm-forbidden-list">BGM禁选列表</label>
             <textarea
               id="ganggang-console-bgm-forbidden-list"
-              v-model="settings.bgm_forbidden_list_prompt"
+              v-model="promptDraft.bgm_forbidden_list_prompt"
               class="text_pole ganggang-console-settings__textarea ganggang-console-settings__textarea--single-line"
               rows="1"
             ></textarea>
@@ -222,7 +281,7 @@
             <label for="ganggang-console-bgm-required-list">BGM必选列表</label>
             <textarea
               id="ganggang-console-bgm-required-list"
-              v-model="settings.bgm_required_list_prompt"
+              v-model="promptDraft.bgm_required_list_prompt"
               class="text_pole ganggang-console-settings__textarea ganggang-console-settings__textarea--single-line"
               rows="1"
             ></textarea>
@@ -269,6 +328,37 @@
             </div>
           </div>
 
+          <div class="ganggang-console-settings__row">
+            <label for="ganggang-console-bgm-prompt-interval">隔几楼出歌</label>
+            <div class="ganggang-console-settings__input-group">
+              <input
+                id="ganggang-console-bgm-prompt-interval"
+                v-model.number="settings.bgm_prompt_interval"
+                class="text_pole ganggang-console-settings__control"
+                type="number"
+                min="0"
+                step="1"
+                @change="normalizePromptInterval"
+              />
+              <span>楼</span>
+            </div>
+            <span class="ganggang-console-settings__hint">0 表示每楼都出歌</span>
+          </div>
+
+          <div class="ganggang-console-settings__row ganggang-console-settings__row--stacked">
+            <label class="ganggang-console-settings__enable-label" for="ganggang-console-generate-on-swipe">
+              <input
+                id="ganggang-console-generate-on-swipe"
+                v-model="settings.generate_on_swipe"
+                type="checkbox"
+              />
+              <span>Swipe 新回答也出歌</span>
+            </label>
+            <span class="ganggang-console-settings__hint">
+              仅对原本符合出歌频率的楼层生效；Swipe 不计入楼层计数，切换已有 Swipe 不触发。
+            </span>
+          </div>
+
           <div class="ganggang-console-settings__row ganggang-console-settings__row--stacked">
             <label for="ganggang-console-ambient-fallback-bv">环境音保底 BV 号</label>
             <textarea
@@ -279,13 +369,7 @@
               placeholder="每行一个 BV 号，也可以粘贴带描述的文本"
               @change="normalizeFallbackBvIds"
             ></textarea>
-            <span class="ganggang-console-settings__hint">
-              保存时只保留 BV 号；B站关键词只搜索 1 次，最多尝试 2 个搜索结果和 1 个备用 BV，仍失败则本轮不播放。
-            </span>
           </div>
-
-          <p class="ganggang-console-settings__hint">两个数量的可设置范围都是 1–20。</p>
-          <p class="ganggang-console-settings__hint">提示词修改后从下一轮 AI 回复开始生效。</p>
         </div>
       </div>
     </div>
@@ -303,7 +387,15 @@ import {
   getCachedNeteasePlaylist,
   refreshNeteasePlaylist,
 } from './bgm-playlist';
-import { useBgmSettingsStore } from './bgm-settings';
+import {
+  createBgmPromptPreset,
+  getCurrentBgmPromptPreset,
+  areBgmPromptPresetsEqual,
+  GANGGANG_STUDIO_VERSION,
+  type BgmPromptPreset,
+  normalizeBgmPromptInterval,
+  useBgmSettingsStore,
+} from './bgm-settings';
 
 const store = useBgmSettingsStore();
 const { settings } = storeToRefs(store);
@@ -328,6 +420,12 @@ const playlistNames = ref<Record<string, string>>(
   Object.fromEntries(DEFAULT_NETEASE_PLAYLISTS.map(playlist => [playlist.id, playlist.name])),
 );
 const fallbackBvInput = ref(settings.value.ambient_fallback_bv_ids.join('\n'));
+const selectedPromptPresetId = ref(settings.value.current_prompt_preset_id);
+const promptDraft = ref<BgmPromptPreset>({
+  ...getCurrentBgmPromptPreset(settings.value.prompt_presets, selectedPromptPresetId.value),
+});
+const promptDraftIsNew = ref(false);
+const promptStatus = ref('');
 type PlaylistRequest = { controller: AbortController };
 let activePlaylistRequest: PlaylistRequest | null = null;
 
@@ -350,6 +448,102 @@ type CountSetting = 'playlist_limit' | 'playlist_sample_count';
 function normalizeCountSetting(key: CountSetting) {
   const value = Math.floor(Number(settings.value[key]));
   settings.value[key] = Number.isFinite(value) ? Math.min(20, Math.max(1, value)) : 5;
+}
+
+function normalizePromptInterval() {
+  settings.value.bgm_prompt_interval = normalizeBgmPromptInterval(settings.value.bgm_prompt_interval);
+}
+
+const promptOptions = computed(() => {
+  const options = settings.value.prompt_presets.map(preset => ({ id: preset.id, name: preset.name }));
+  if (promptDraftIsNew.value) {
+    options.unshift({
+      id: promptDraft.value.id,
+      name: `${promptDraft.value.name || '新建提示词'}（未保存）`,
+    });
+  }
+  return options;
+});
+
+function clonePromptPreset(preset: BgmPromptPreset): BgmPromptPreset {
+  return { ...preset };
+}
+
+const promptDraftIsDirty = computed(() => {
+  if (promptDraftIsNew.value) return true;
+  const saved = settings.value.prompt_presets.find(preset => preset.id === promptDraft.value.id);
+  return !saved || !areBgmPromptPresetsEqual(promptDraft.value, saved);
+});
+
+function confirmDiscardPromptDraft(action: string) {
+  if (!promptDraftIsDirty.value) return true;
+  return globalThis.confirm(`当前提示词方案有未保存修改，${action}？`);
+}
+
+function loadPromptDraft(id: string) {
+  const preset = settings.value.prompt_presets.find(item => item.id === id);
+  if (!preset) return false;
+  selectedPromptPresetId.value = preset.id;
+  promptDraft.value = clonePromptPreset(preset);
+  promptDraftIsNew.value = false;
+  return true;
+}
+
+function handlePromptPresetSelection() {
+  if (promptDraftIsNew.value && selectedPromptPresetId.value === promptDraft.value.id) return;
+  if (!confirmDiscardPromptDraft('是否放弃修改并继续')) {
+    selectedPromptPresetId.value = promptDraft.value.id;
+    return;
+  }
+  if (!store.selectPromptPreset(selectedPromptPresetId.value)) {
+    selectedPromptPresetId.value = settings.value.current_prompt_preset_id;
+    return;
+  }
+  loadPromptDraft(selectedPromptPresetId.value);
+  promptStatus.value = '';
+}
+
+function getNewPromptPresetName() {
+  const names = new Set(settings.value.prompt_presets.map(preset => preset.name));
+  const base = '新建提示词';
+  if (!names.has(base)) return base;
+  let suffix = 2;
+  while (names.has(`${base} ${suffix}`)) suffix += 1;
+  return `${base} ${suffix}`;
+}
+
+function beginNewPromptPreset() {
+  if (!confirmDiscardPromptDraft('是否放弃修改并新建方案')) return;
+  const existingIds = settings.value.prompt_presets.map(preset => preset.id);
+  promptDraft.value = createBgmPromptPreset({ name: getNewPromptPresetName() }, existingIds);
+  selectedPromptPresetId.value = promptDraft.value.id;
+  promptDraftIsNew.value = true;
+  promptStatus.value = '新提示词方案已创建，请编辑后点击保存。';
+}
+
+function savePromptDraft() {
+  try {
+    const saved = store.savePromptPreset(clonePromptPreset(promptDraft.value));
+    promptDraft.value = clonePromptPreset(saved);
+    selectedPromptPresetId.value = saved.id;
+    promptDraftIsNew.value = false;
+    promptStatus.value = `已保存「${saved.name}」，下一轮 AI 回复将使用这套提示词。`;
+  } catch (error) {
+    promptStatus.value = `保存失败：${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function deletePromptDraft() {
+  if (!confirmDiscardPromptDraft('是否放弃修改并继续')) return;
+  if (promptDraftIsNew.value) {
+    loadPromptDraft(settings.value.current_prompt_preset_id);
+    promptStatus.value = '已放弃未保存的提示词方案。';
+    return;
+  }
+  const result = store.removePromptPreset(selectedPromptPresetId.value);
+  if (!result.deleted) return;
+  loadPromptDraft(result.currentId);
+  promptStatus.value = result.restoredDefault ? '已删除，已自动恢复默认提示词方案。' : '提示词方案已删除。';
 }
 
 function getPlaylistDisplayName(playlistId: string) {
