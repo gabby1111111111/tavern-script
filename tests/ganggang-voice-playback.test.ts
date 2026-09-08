@@ -1,11 +1,11 @@
-import { MAX_RECENT_VOICES, RecentVoiceStore, type PlaybackResult } from '../src/杠杠の配音台/playback';
+import { MAX_RECENT_VOICES, RecentVoiceStore, type PlaybackResult } from '../src/杠杠の配音室/playback';
 import {
   MAX_SOUND_CUES_PER_MESSAGE,
   SoundEffectPlayer,
   parseSoundCuesDetailed,
   validateSoundCue,
-} from '../src/杠杠の配音台/sound-effects';
-import type { SoundEffectEntry, VoiceRef } from '../src/杠杠の配音台/types';
+} from '../src/杠杠の配音室/sound-effects';
+import type { SoundEffectEntry, VoiceRef } from '../src/杠杠の配音室/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -442,7 +442,7 @@ async function run(): Promise<void> {
 
   const playbackAssertion: PlaybackResult = { itemId: null, played: false, status: 'missing' };
   assert(playbackAssertion.status === 'missing', '测试应覆盖缺失音频返回值');
-  console.info('<杠杠の配音台> playback and sound-effect tests passed');
+  console.info('<杠杠の配音室> playback and sound-effect tests passed');
 }
 
 run().catch(error => {

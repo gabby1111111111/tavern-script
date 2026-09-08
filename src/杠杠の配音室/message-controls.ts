@@ -71,7 +71,7 @@ function runAction(action: () => void | Promise<void>): void {
     .then(action)
     .catch(error =>
       console.error(
-        '<杠杠の配音台> 消息按钮操作失败',
+        '<杠杠の配音室> 消息按钮操作失败',
         (error instanceof Error ? error.message : String(error)).slice(0, 300),
       ),
     );

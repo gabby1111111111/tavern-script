@@ -5,7 +5,7 @@ import {
   markPlaybackTimelineStep,
   markVoiceCleanup,
   voiceAudit,
-} from '../src/杠杠の配音台/audit';
+} from '../src/杠杠の配音室/audit';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -80,4 +80,4 @@ markVoiceCleanup(unsafeCleanupRun);
 equal(voiceAudit.cleanup.reason, 'unknown', '运行时传入的非白名单原因必须归一化');
 assert(!JSON.stringify(voiceAudit).includes(sensitiveReason), '清理 Audit 不得回显任意原因正文');
 
-console.info('<杠杠の配音台> audit cleanup tests passed');
+console.info('<杠杠の配音室> audit cleanup tests passed');

@@ -3,9 +3,9 @@ import {
   mapSelectionToSegments,
   routeSpokenSegments,
   voiceRouteKey,
-} from '../src/杠杠の配音台/reading';
-import { buildReadingTimeline } from '../src/杠杠の配音台/reading-timeline';
-import type { CastingTable, SoundCue, SpokenSegment } from '../src/杠杠の配音台/types';
+} from '../src/杠杠の配音室/reading';
+import { buildReadingTimeline } from '../src/杠杠の配音室/reading-timeline';
+import type { CastingTable, SoundCue, SpokenSegment } from '../src/杠杠の配音室/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);

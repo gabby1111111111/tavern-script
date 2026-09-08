@@ -1,6 +1,6 @@
 # Ganggang TTS Bridge
 
-“杠杠の配音台”的可选 SillyTavern server companion，只提供豆包 TTS 同源窄桥接，不是通用网络代理。
+“杠杠の配音室”的可选 SillyTavern server companion，只提供豆包 TTS 同源窄桥接，不是通用网络代理。
 
 ## 路由
 
@@ -18,7 +18,8 @@
 
 ## 安装与验证
 
-把整个目录放入目标 SillyTavern 支持的 server plugin 位置，按目标版本说明启用并重启正确实例。看到 `[ganggang-tts-bridge] Plugin loaded.` 后，再在配音台中检查豆包 Profile。
+把整个目录放入目标 SillyTavern 支持的 server plugin 位置，按目标版本说明启用并重启正确实例。看到
+`[ganggang-tts-bridge] Plugin loaded.` 后，再在配音室中检查豆包 Profile。
 
 ```powershell
 node --check server-plugins/ganggang-tts-bridge/index.mjs
@@ -26,4 +27,4 @@ node --check server-plugins/ganggang-tts-bridge/doubao.mjs
 node --test server-plugins/ganggang-tts-bridge/tests/doubao.test.mjs
 ```
 
-当前 bridge package 版本为 `1.0.0`，配音台首版候选为 `0.1.0`。正式发布前由维护者确认是否统一版本；Agent 不自行改版本或打 Tag。
+当前 bridge package 独立版本为 `1.0.0`，配音室产品版本为 `0.1.0`；两者分别版本化。

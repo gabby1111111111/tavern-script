@@ -3,7 +3,7 @@
   <section class="ganggang-voice-panel" data-testid="ganggang-voice-panel">
     <header class="ganggang-voice-header">
       <div>
-        <h3 class="ganggang-voice-title">杠杠の配音台</h3>
+        <h3 class="ganggang-voice-title">杠杠の配音室</h3>
         <p class="ganggang-voice-subtitle">配好一次，让 AI 认人选声；语音只留在当前页面。</p>
       </div>
       <button
@@ -17,7 +17,7 @@
       </button>
     </header>
 
-    <nav class="ganggang-voice-tabs" aria-label="配音台功能">
+    <nav class="ganggang-voice-tabs" aria-label="配音室功能">
       <button
         v-for="tab in tabs"
         :key="tab.value"

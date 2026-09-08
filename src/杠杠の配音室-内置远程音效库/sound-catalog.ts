@@ -1,4 +1,4 @@
-import type { SoundEffectEntry } from '../杠杠の配音台/types';
+import type { SoundEffectEntry } from '../杠杠の配音室/types';
 
 const REPOSITORY = 'gabby1111111111/ST-Audio-Assets';
 const API_BASE = `https://api.github.com/repos/${REPOSITORY}`;

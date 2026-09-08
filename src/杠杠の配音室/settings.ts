@@ -290,7 +290,7 @@ function resolveScriptVariableApi(api?: Partial<ScriptVariableApi>): ScriptVaria
   const getVariables = api?.getVariables ?? runtime.getVariables;
   const updateVariablesWith = api?.updateVariablesWith ?? runtime.updateVariablesWith;
   if (typeof getVariables !== 'function' || typeof updateVariablesWith !== 'function') {
-    throw new Error('杠杠の配音台需要 Tavern Helper 的脚本变量接口');
+    throw new Error('杠杠の配音室需要 Tavern Helper 的脚本变量接口');
   }
   return { getVariables, updateVariablesWith };
 }

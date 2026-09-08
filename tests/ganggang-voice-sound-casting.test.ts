@@ -1,18 +1,18 @@
-import { planSoundCues } from '../src/杠杠の配音台/sound-casting';
+import { planSoundCues } from '../src/杠杠の配音室/sound-casting';
 import {
   isStAudioAssetsPinnedSound,
   isStAudioAssetsRemoteSound,
   loadDefaultSoundCatalog,
   ST_AUDIO_ASSETS_REVISION,
-} from '../src/杠杠の配音台-内置远程音效库/sound-catalog';
+} from '../src/杠杠の配音室-内置远程音效库/sound-catalog';
 import {
   beginSoundCatalogAudit,
   beginSoundEffectAudit,
   markSoundCatalog,
   markSoundEffect,
   voiceAudit,
-} from '../src/杠杠の配音台/audit';
-import type { SoundEffectEntry, SpokenSegment } from '../src/杠杠の配音台/types';
+} from '../src/杠杠の配音室/audit';
+import type { SoundEffectEntry, SpokenSegment } from '../src/杠杠の配音室/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);

@@ -2,15 +2,15 @@
 
 ## 先读：这是怎样的项目
 
-“杠杠の配音台”是 Tavern
+“杠杠の配音室”是 Tavern
 Helper 前端脚本。它把 TTS 配置、AI 自动配音表、五种朗读路线、最近十条语音和原文旁音效按钮放进一个轻量面板。
 
 维护者不需要记住每个函数和变量，但必须能回答：用户动作从哪里进来、经过哪条管线、状态写到哪里、出错时先查哪一段。
 
 ## 默认制品边界
 
-- `src/杠杠の配音台` 是纯自定义音效正式版的共享核心和默认入口。
-- 用户 README、UI、运行时请求和 `dist/杠杠の配音台/index.js` 只能呈现用户自行配置的音效；不得隐式加载任何内置目录。
+- `src/杠杠の配音室` 是纯自定义音效正式版的共享核心和默认入口。
+- 用户 README、UI、运行时请求和 `dist/杠杠の配音室/index.js` 只能呈现用户自行配置的音效；不得隐式加载任何内置目录。
 - `edition.ts` 只定义小型能力注入边界。默认入口必须始终传入
   `CUSTOM_ONLY_VOICE_EDITION`，共享核心不得反向导入任何可选 wrapper。
 - 设置结构不保存 Edition 或产品版本。若用户新建另一个 Tavern Helper loader 脚本，`{ type: 'script' }`
@@ -115,13 +115,13 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 
 ## 验证与发布
 
-- 本地实时链是 `pnpm watch` → `dist/杠杠の配音台/index.js` → 带 CORS 的 `http://localhost:5500` 静态服务 →
+- 本地实时链是 `pnpm watch` → `dist/杠杠の配音室/index.js` → 带 CORS 的 `http://localhost:5500` 静态服务 →
   8000 角色脚本 loader；只开 watch 不会自动提供 5500。
 - 八组测试：`tests/ganggang-voice-{tts,playback,reading,casting,sound-casting,audit,runtime-lifecycle,editions}.test.ts`。
-- Lint 限定本源码目录和配音台测试，不把其他脚本纳入本项目修复。
+- Lint 限定本源码目录和配音室测试，不把其他脚本纳入本项目修复。
 - 真实验收读取 `window.__ganggangVoiceAudit`，不回传正文、URL、Key、cookie 或完整设置。
-- 第一版 Tag：`杠杠の配音台-v0.1.0`；不要复用仓库全局自动 bundle Tag。
-- 显式暂存本源码目录、配音台测试、豆包 bridge、目标 dist 和目标文档；禁止 `git add -A`。
+- 第一版 Tag：`杠杠の配音室-v0.1.0`；不要复用仓库全局自动 bundle Tag。
+- 显式暂存本源码目录、配音室测试、豆包 bridge、目标 dist 和目标文档；禁止 `git add -A`。
 - 本次 `0.1.0` 已明确批准同时上传纯自定义版和内置目录预览版；后续 Release 是否继续附带预览版，必须再次询问 Gabby。
 - watch 产物是开发 bundle，不能公开发布；生产构建后必须用 exact artifact 完成 8000 实机验收。
 - 纯自定义生产 bundle 必须对所有内置目录标识、请求域名和按钮文案做负向扫描，结果应为零匹配；浏览器 Network 也不得访问相应目录或音频域名。

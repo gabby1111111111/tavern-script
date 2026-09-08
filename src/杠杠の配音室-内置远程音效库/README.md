@@ -1,6 +1,6 @@
-# 杠杠の配音台 · 内置远程音效库版
+# 杠杠の配音室 · 内置远程音效库版
 
-这是“杠杠の配音台”`0.1.0`
+这是“杠杠の配音室”`0.1.0`
 的可选 Edition：保留同一套 TTS、AI 配音表、朗读路线、最近十条和播放生命周期，并额外提供一套可直接读取的远程 SFX/Ambience 目录。
 
 > 发布级别：预览附件。本 fork 在公开来源的目录上加入了维护者自己的内容；维护者已明确同意本次 `0.1.0`
@@ -9,8 +9,8 @@
 ## 版本与制品
 
 - 功能版本：`0.1.0`
-- 与纯自定义音效版共用 Tag：`杠杠の配音台-v0.1.0`
-- 预览 dist：`dist/杠杠の配音台-内置远程音效库/index.js`
+- 与纯自定义音效版共用 Tag：`杠杠の配音室-v0.1.0`
+- 预览 dist：`dist/杠杠の配音室-内置远程音效库/index.js`
 - 固定素材 revision：`f800e5e4f23508b3336d63a7274f4108b84e30c1`
 
 Edition 跟随共享核心版本，不单独制造另一套 SemVer 或 Tag。本次作为同一 GitHub
@@ -18,10 +18,17 @@ Release 的第二个、明确标注为预览的附件上传。
 
 ## 安装与切换
 
-1. 确认没有同时启用 `dist/杠杠の配音台/index.js`。两个 Edition 会挂载同一个面板和全局清理入口，只能选择一个。
-2. 在 Tavern Helper 中加载固定 Tag 下的 `dist/杠杠の配音台-内置远程音效库/index.js`，不要依赖持续变化的 `main` 分支。
+1. 确认没有同时启用纯自定义版。两个 Edition 会挂载同一个面板和全局清理入口，只能选择一个。
+2. 新建或复用一个 Tavern Helper 后台脚本，粘贴并启用下面的固定版本导入语句：
+
+```ts
+import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の配音室-v0.1.0/dist/杠杠の配音室-内置远程音效库/index.js';
+```
+
 3. 配置 TTS Profile，检查音色并生成 AI 配音表。
 4. 在音效页读取内置目录，再试听、请求 AI 放置音效按钮或进行整段朗读。
+
+不要依赖持续变化的 `main` 分支，也不要同时保留两条已启用的 Edition loader。
 
 两个 Edition 的设置结构兼容，但 Tavern
 Helper 的脚本变量按脚本实例隔离。如果把本 Edition 导入成一个新的脚本实例，原脚本中的 Profile、API
@@ -57,7 +64,7 @@ URL；不要同时保留两条已启用的 loader。
 
 ## 开发与验收
 
-- 共享业务规则见 [`../杠杠の配音台/AGENTS.md`](../杠杠の配音台/AGENTS.md)；本 wrapper 的额外规则见
+- 共享业务规则见 [`../杠杠の配音室/AGENTS.md`](../杠杠の配音室/AGENTS.md)；本 wrapper 的额外规则见
   [AGENTS.md](./AGENTS.md)。
 - 本 Edition 的用户可见变更见 [CHANGELOG.md](./CHANGELOG.md)。
 - 发布前必须使用生产 bundle，并在真实 8000 环境确认加载的是本 dist，而不是纯自定义制品。

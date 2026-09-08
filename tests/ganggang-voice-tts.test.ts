@@ -1,14 +1,14 @@
-import { createPlaybackSessionManager } from '../src/杠杠の配音台/tts/playback-session';
+import { createPlaybackSessionManager } from '../src/杠杠の配音室/tts/playback-session';
 import {
   buildDoubaoUpstreamRequest,
   DOUBAO_TTS_ENDPOINT,
   parseDoubaoNdjson,
-} from '../src/杠杠の配音台/tts/doubao-request';
+} from '../src/杠杠の配音室/tts/doubao-request';
 import {
   MINIMAX_ENDPOINTS,
   MINIMAX_VOICE_ENDPOINTS,
   XIAOMI_MIMO_ENDPOINT,
-} from '../src/杠杠の配音台/tts/cloud-request';
+} from '../src/杠杠の配音室/tts/cloud-request';
 import {
   createProviderRegistry,
   DOUBAO_BRIDGE_CAPABILITIES_ENDPOINT,
@@ -16,9 +16,9 @@ import {
   DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT,
   MAX_TTS_RESPONSE_BYTES,
   redactProviderSecrets,
-} from '../src/杠杠の配音台/tts/providers';
-import { extractContentText, parseSpokenSegments } from '../src/杠杠の配音台/tts/text';
-import type { SynthesisRequest, TtsProviderProfile } from '../src/杠杠の配音台/types';
+} from '../src/杠杠の配音室/tts/providers';
+import { extractContentText, parseSpokenSegments } from '../src/杠杠の配音室/tts/text';
+import type { SynthesisRequest, TtsProviderProfile } from '../src/杠杠の配音室/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -433,7 +433,7 @@ void (async () => {
   equal(revoked, ['blob:first'], '替换会话必须释放旧 object URL');
   assert(MAX_TTS_RESPONSE_BYTES > 0, 'provider 响应大小限制必须存在');
 
-  console.info('<杠杠の配音台/TTS> offline tests passed');
+  console.info('<杠杠の配音室/TTS> offline tests passed');
 })().catch(error => {
   console.error(error);
   throw error;

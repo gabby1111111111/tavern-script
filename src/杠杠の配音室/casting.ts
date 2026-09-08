@@ -104,7 +104,7 @@ function resolveRuntime(runtime?: Partial<CastingRuntime>): CastingRuntime {
   const generateRaw = runtime?.generateRaw ?? globalRuntime.generateRaw;
   const stopGenerationById = runtime?.stopGenerationById ?? globalRuntime.stopGenerationById;
   if (typeof generateRaw !== 'function' || typeof stopGenerationById !== 'function') {
-    throw new Error('杠杠の配音台需要 Tavern Helper 的 generateRaw/stopGenerationById 接口');
+    throw new Error('杠杠の配音室需要 Tavern Helper 的 generateRaw/stopGenerationById 接口');
   }
   return { generateRaw, stopGenerationById };
 }

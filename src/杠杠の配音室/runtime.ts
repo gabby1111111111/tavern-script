@@ -616,7 +616,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       return true;
     } catch (caught) {
       if (activeSoundGenerationId === generationId) {
-        console.warn('<杠杠の配音台> AI 音效标注失败', errorMessage(caught).slice(0, 300));
+        console.warn('<杠杠の配音室> AI 音效标注失败', errorMessage(caught).slice(0, 300));
       }
       return false;
     } finally {

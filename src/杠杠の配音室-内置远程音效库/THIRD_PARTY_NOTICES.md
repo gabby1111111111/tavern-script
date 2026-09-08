@@ -6,7 +6,7 @@
 - 原始上游：[Ellinav/ST-Audio-Assets](https://github.com/Ellinav/ST-Audio-Assets)
 - 本 Edition 固定 revision：`f800e5e4f23508b3336d63a7274f4108b84e30c1`
 
-“杠杠の配音台 · 内置远程音效库版”的 JavaScript 制品不复制或打包该仓库中的 OGG 音频。运行时只请求上述固定 revision 的目录元数据，并在用户实际试听或播放某个音效时请求对应 OGG。目录保留在当前页面内存，音频不会写入 Tavern
+“杠杠の配音室 · 内置远程音效库版”的 JavaScript 制品不复制或打包该仓库中的 OGG 音频。运行时只请求上述固定 revision 的目录元数据，并在用户实际试听或播放某个音效时请求对应 OGG。目录保留在当前页面内存，音频不会写入 Tavern
 Helper 设置。
 
 上游是公开可访问的音效数据库；本 fork 还加入了维护者自行补充的部分内容。维护者已明确同意本次 `0.1.0`

@@ -1,4 +1,4 @@
-import { beginVoiceAudit, setVoiceAuditBuild, voiceAudit } from '../src/杠杠の配音台/audit';
+import { beginVoiceAudit, setVoiceAuditBuild, voiceAudit } from '../src/杠杠の配音室/audit';
 import {
   CUSTOM_ONLY_VOICE_EDITION,
   VOICE_CONSOLE_VERSION,
@@ -7,10 +7,10 @@ import {
   loadEditionSoundCatalog,
   type BuiltinSoundCatalogCapability,
   type VoiceEdition,
-} from '../src/杠杠の配音台/edition';
-import { normalizeVoiceSettings } from '../src/杠杠の配音台/settings';
-import { planSoundCues } from '../src/杠杠の配音台/sound-casting';
-import type { SoundEffectEntry, SpokenSegment } from '../src/杠杠の配音台/types';
+} from '../src/杠杠の配音室/edition';
+import { normalizeVoiceSettings } from '../src/杠杠の配音室/settings';
+import { planSoundCues } from '../src/杠杠の配音室/sound-casting';
+import type { SoundEffectEntry, SpokenSegment } from '../src/杠杠の配音室/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);

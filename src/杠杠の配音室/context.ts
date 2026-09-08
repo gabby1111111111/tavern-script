@@ -122,7 +122,7 @@ function resolveContextRuntime(runtime?: Partial<ContextRuntime>): ContextRuntim
     typeof resolved.getLastMessageId !== 'function' ||
     typeof resolved.getChatMessages !== 'function'
   ) {
-    throw new Error('杠杠の配音台需要 Tavern Helper 的角色卡与聊天接口');
+    throw new Error('杠杠の配音室需要 Tavern Helper 的角色卡与聊天接口');
   }
   return resolved as ContextRuntime;
 }

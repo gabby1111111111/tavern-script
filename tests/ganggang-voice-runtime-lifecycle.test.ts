@@ -1,4 +1,4 @@
-import { bindVoiceLifecycleEvents, type VoiceLifecycleHandlers } from '../src/杠杠の配音台/lifecycle-events';
+import { bindVoiceLifecycleEvents, type VoiceLifecycleHandlers } from '../src/杠杠の配音室/lifecycle-events';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -85,4 +85,4 @@ assert(callbacks.messageDeleted, 'MESSAGE_DELETED listener 未注册');
 callbacks.messageDeleted(14);
 equal(trace.splice(0), ['stop:message-delete', 'clear-all'], '删除楼层必须先 Stop，再清空所有楼层派生状态');
 
-console.info('<杠杠の配音台> runtime lifecycle tests passed');
+console.info('<杠杠の配音室> runtime lifecycle tests passed');

@@ -1,4 +1,4 @@
-# 杠杠の配音台 · 纯自定义音效版
+# 杠杠の配音室 · 纯自定义音效版
 
 一个面向 Tavern
 Helper 的轻量配音脚本：配置多个 TTS 来源，让当前酒馆 AI 自动生成角色配音表，并从消息、单句、选中文字或最近语音直接播放。
@@ -18,15 +18,19 @@ Helper 的轻量配音脚本：配置多个 TTS 来源，让当前酒馆 AI 自�
 
 ## 安装与最短使用流程
 
-1. 在 Tavern Helper 中加载固定版本的 `dist/杠杠の配音台/index.js`。不要直接依赖持续变化的 `main` 分支。
-2. 打开面板，新增或选择 TTS Profile，填写服务配置。
-3. 点击检查并读取音色。
-4. 点击“一键 AI 配音表”。
+1. 确认 SillyTavern 已安装并启用 Tavern Helper。
+2. 新建一个 Tavern Helper 后台脚本，粘贴并启用下面的固定版本导入语句：
+
+```ts
+import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の配音室-v0.1.0/dist/杠杠の配音室/index.js';
+```
+
+3. 在扩展设置中打开“杠杠の配音室”，新增或选择 TTS Profile，填写服务配置。
+4. 点击检查并读取音色，再点击“一键 AI 配音表”。
 5. 选择朗读方式，朗读最新消息或使用消息旁按钮。
 6. 若要音效，在“自定义音效”中填写有权使用且浏览器可访问的音频 URL、名称、分类和说明，先试听，再点击“AI 配最新音效”。
 
-Tavern Helper loader 应固定到 `杠杠の配音台-v0.1.0`
-Tag 下的上述 dist 路径。切换 loader 前先备份自己的 Profile 与 Key；不要分享包含脚本变量的导出物。
+不要直接依赖持续变化的 `main` 分支。切换 loader 前先备份自己的 Profile 与 Key；不要分享包含脚本变量的导出物。
 
 ## Provider 与依赖
 
@@ -84,6 +88,6 @@ Tag 下的上述 dist 路径。切换 loader 前先备份自己的 Profile 与 K
 维护入口、事件路线和故障索引见 [AGENTS.md](./AGENTS.md)。用户可见变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
 开发态使用仓库现有 `pnpm watch`，并让带 CORS 的本地静态服务在 `http://localhost:5500`
-提供仓库目录；当前角色脚本 loader 从这里读取 `dist/杠杠の配音台/index.js`。只开 watch 不会自动提供 5500。
+提供仓库目录；当前角色脚本 loader 从这里读取 `dist/杠杠の配音室/index.js`。只开 watch 不会自动提供 5500。
 
 发布前必须使用生产构建或 CI bundle，并对最终制品重新完成 8000 实机验收。项目许可证以仓库最终确认的发布声明为准。

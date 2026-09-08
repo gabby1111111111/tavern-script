@@ -3,21 +3,21 @@ import {
   isStaleCastingInputError,
   parseCastingResult,
   stopCasting,
-} from '../src/杠杠の配音台/casting';
+} from '../src/杠杠の配音室/casting';
 import {
   buildCastingRequestPayload,
   createCastingInputSignature,
   deriveCharacterKey,
   readCurrentCastingContext,
   sanitizeVoiceOptions,
-} from '../src/杠杠の配音台/context';
+} from '../src/杠杠の配音室/context';
 import {
   loadVoiceSettings,
   normalizeVoiceSettings,
   saveCastingTable,
   SCRIPT_VARIABLE_OPTION,
   updateVoiceSettings,
-} from '../src/杠杠の配音台/settings';
+} from '../src/杠杠の配音室/settings';
 import {
   beginAiCastingAudit,
   beginVoiceAudit,
@@ -30,9 +30,9 @@ import {
   markProviderReady,
   markVoiceAuditError,
   voiceAudit,
-} from '../src/杠杠の配音台/audit';
-import type { VoiceOption } from '../src/杠杠の配音台/types';
-import type { ScriptVariables } from '../src/杠杠の配音台/settings';
+} from '../src/杠杠の配音室/audit';
+import type { VoiceOption } from '../src/杠杠の配音室/types';
+import type { ScriptVariables } from '../src/杠杠の配音室/settings';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -633,7 +633,7 @@ const runCastingTests = async (): Promise<void> => {
   });
   equal(voiceAudit.last_error, 'operation-failed', 'Audit 错误必须使用固定码，不能回显上游异常正文');
 
-  console.info('<杠杠の配音台> casting tests passed');
+  console.info('<杠杠の配音室> casting tests passed');
 };
 
 runCastingTests().then(undefined, error => {
