@@ -4,7 +4,7 @@ import { ref, watch } from 'vue';
 import { z } from 'zod';
 import { DEFAULT_NETEASE_PLAYLISTS } from './bgm-playlist';
 
-export const GANGGANG_STUDIO_VERSION = '0.3.0';
+export const GANGGANG_MIXER_VERSION = '0.3.0';
 
 export const DEFAULT_BGM_INJECTION_LOCATION = '需要 BGM 时，必须在正文内容之前单独输出一行 <杠杠-BGM=歌曲名-歌手> 标记。';
 

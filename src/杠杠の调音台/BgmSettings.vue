@@ -3,12 +3,12 @@
   <div class="ganggang-console-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の调音室 v{{ GANGGANG_STUDIO_VERSION }}</b>
+        <b>杠杠の调音台 v{{ GANGGANG_MIXER_VERSION }}</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
       <div class="inline-drawer-content">
-        <nav class="ganggang-console-settings__module-tabs" aria-label="调音室模块">
+        <nav class="ganggang-console-settings__module-tabs" aria-label="调音台模块">
           <button
             v-for="module in modules"
             :key="module.key"
@@ -391,7 +391,7 @@ import {
   createBgmPromptPreset,
   getCurrentBgmPromptPreset,
   areBgmPromptPresetsEqual,
-  GANGGANG_STUDIO_VERSION,
+  GANGGANG_MIXER_VERSION,
   type BgmPromptPreset,
   normalizeBgmPromptInterval,
   useBgmSettingsStore,
