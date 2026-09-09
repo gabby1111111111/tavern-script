@@ -30,17 +30,25 @@ import type {
   DrawingPreset,
   FloorTriggerDecision,
   ImageOutputPreset,
+  ImageReferenceKind,
   ImageRequestInput,
+  ResolvedReferenceSource,
 } from './pipeline-types';
-import { processDrawingPrompt } from './prompt-processor';
+import { applyDrawingPromptTemplate, processDrawingPrompt, resolveReferenceSources } from './prompt-processor';
+import { materializeReferenceSources } from './reference-resolution';
 import {
-  RecentImageCache,
-  type RecentGeneratedImage,
-  type RecentImageRemovalReason,
-} from './recent-image-cache';
+  createStoryContinuitySnapshot,
+  isStoryContinuitySnapshotValid,
+  releaseStoryContinuitySnapshot,
+  type StoryContinuitySnapshot,
+} from './story-continuity';
+import { RecentImageCache, type RecentGeneratedImage, type RecentImageRemovalReason } from './recent-image-cache';
 import {
+  buildPromptEditorReferenceCandidates,
   openImagePromptEditor,
+  selectPromptEditorReferenceSources,
   type PromptEditorAvatarReferenceStatus,
+  type PromptEditorReferenceSelection,
 } from './prompt-editor';
 import { openRegionRedrawEditor } from './region-redraw-editor';
 import {
@@ -73,12 +81,16 @@ type GenerationState = {
   type: 'normal' | 'swipe';
   messageId: number | null;
   chatId: string;
+  startChatLength: number;
+  startTailRef: object | null;
   nextFloorCount: number;
   decision: FloorTriggerDecision;
   preset: DrawingPreset;
   outputPreset: ImageOutputPreset;
   profile: ImageApiProfile;
   displayMode: DisplayMode;
+  continuity: StoryContinuitySnapshot | null;
+  avatarReferences: Promise<AvatarReferenceReadResult>;
 };
 
 type PendingSwipeTarget = {
@@ -90,6 +102,11 @@ type PendingSwipeTarget = {
 type PromptProcessingSnapshot = {
   outputPreset: ImageOutputPreset;
   avatarReferences: AvatarReferenceReadResult;
+  resolvedReferenceSources: ResolvedReferenceSource[];
+  referenceKinds?: ImageReferenceKind[];
+  profile: ImageApiProfile;
+  continuity?: StoryContinuitySnapshot;
+  continuityShotPrompt?: string;
 };
 
 type AuditTask = { status: string; message_id: number | null; swipe_id: number | null };
@@ -149,6 +166,15 @@ export type StoryImageAudit = {
     placement_count: number;
     prediction_status: 'disabled';
   };
+  continuity: {
+    active_snapshots: number;
+    status: 'idle' | 'locked' | 'empty' | 'released' | 'invalidated';
+    source: StoryContinuitySnapshot['source'];
+    drawing_preset_id: string | null;
+    output_preset_id: string | null;
+    reference_count: number;
+    reference_kinds: string[];
+  };
   last_error: string | null;
 };
 
@@ -194,6 +220,15 @@ export function createEmptyAudit(): StoryImageAudit {
       artifact_count: 0,
       placement_count: 0,
       prediction_status: 'disabled',
+    },
+    continuity: {
+      active_snapshots: 0,
+      status: 'idle',
+      source: null,
+      drawing_preset_id: null,
+      output_preset_id: null,
+      reference_count: 0,
+      reference_kinds: [],
     },
     last_error: null,
   };
@@ -282,6 +317,13 @@ export function buildRegionRedrawInput(
   return {
     prompt: buildRegionRedrawPrompt(description, region),
     referenceImages: [sourceImage, markedImage],
+  };
+}
+
+export function buildWholeImageRedrawInput(sourceImage: string, description: string): ImageRequestInput {
+  return {
+    prompt: description.trim(),
+    referenceImages: [sourceImage],
   };
 }
 
@@ -382,6 +424,24 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   const audit = createEmptyAudit();
   (globalThis as typeof globalThis & { __storyImageAudit?: StoryImageAudit }).__storyImageAudit = audit;
   const inlineTaskKeys = new Set<string>();
+  const continuityOwners = new Map<StoryContinuitySnapshot, Set<AbortController>>();
+  let auditedSnapshot: StoryContinuitySnapshot | null = null;
+  const releaseContinuity = (snapshot: StoryContinuitySnapshot | null | undefined, invalidated = false): void => {
+    if (!snapshot || snapshot.released) return;
+    if (invalidated) continuityOwners.get(snapshot)?.forEach(controller => controller.abort());
+    continuityOwners.delete(snapshot);
+    audit.continuity.active_snapshots = continuityOwners.size;
+    releaseStoryContinuitySnapshot(snapshot);
+    if (auditedSnapshot === snapshot) audit.continuity.status = invalidated ? 'invalidated' : 'released';
+  };
+  const invalidateContinuitySource = (placementId: string): void => {
+    for (const snapshot of continuityOwners.keys()) {
+      if (snapshot.source?.placementId === placementId) releaseContinuity(snapshot, true);
+    }
+  };
+  const clearContinuity = (): void => {
+    for (const snapshot of continuityOwners.keys()) releaseContinuity(snapshot, true);
+  };
   const retention = new ImageRetention();
   const cache = new ImageTaskCache({
     onRemove: task => {
@@ -413,6 +473,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   });
   const placementCache = new ImagePlacementCache(artifactId => recentCache.cloneResource(artifactId), {
     onRemove: placement => {
+      invalidateContinuitySource(placement.id);
       retention.forgetPlacement(placement.id);
       removeRenderedPlacementHost(placement.id);
       prunePlacementSelectionMemory();
@@ -442,6 +503,48 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   let promptEditorController: AbortController | null = null;
   let regionEditorController: AbortController | null = null;
   const stopListeners: Array<() => void> = [];
+
+  const captureContinuity = (
+    beforeMessageId: number,
+    drawingPresetId: string,
+    outputPresetId: string,
+    consume = true,
+  ): StoryContinuitySnapshot => {
+    const snapshot = createStoryContinuitySnapshot({
+      chatId: memoryChatId,
+      beforeMessageId,
+      drawingPresetId,
+      outputPresetId,
+      selectedPlacements: consume ? getSelectedImagePlacements(placementCache.placements.value) : [],
+      activeSwipeId: messageId => (rawMessageRef(messageId) ? currentSwipeId(messageId) : null),
+      cloneResource: placementId => placementCache.cloneResource(placementId),
+    });
+    continuityOwners.set(snapshot, new Set());
+    auditedSnapshot = snapshot;
+    audit.continuity = {
+      active_snapshots: continuityOwners.size,
+      status: snapshot.source ? 'locked' : 'empty',
+      source: snapshot.source ? { ...snapshot.source } : null,
+      drawing_preset_id: drawingPresetId.slice(0, 120),
+      output_preset_id: outputPresetId.slice(0, 120),
+      reference_count: 0,
+      reference_kinds: [],
+    };
+    return snapshot;
+  };
+  const validContinuity = (snapshot: StoryContinuitySnapshot | null | undefined): boolean => {
+    if (!snapshot) return true;
+    const valid = isStoryContinuitySnapshotValid(snapshot, {
+      chatId: SillyTavern.getCurrentChatId(),
+      getPlacement: id => placementCache.get(id),
+      activeSwipeId: messageId => (rawMessageRef(messageId) ? currentSwipeId(messageId) : null),
+    });
+    if (!valid) releaseContinuity(snapshot, true);
+    return valid;
+  };
+  const checkContinuity = (): void => {
+    for (const snapshot of continuityOwners.keys()) validContinuity(snapshot);
+  };
 
   const abortRegionEditor = (): void => {
     regionEditorController?.abort();
@@ -497,9 +600,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
 
   const abortManualRevisionsForSwipeDeletion = (messageId: number, deletedSwipeId: number): void => {
     placementCache.placements.value
-      .filter(
-        placement => placement.target.messageId === messageId && placement.target.swipeId >= deletedSwipeId,
-      )
+      .filter(placement => placement.target.messageId === messageId && placement.target.swipeId >= deletedSwipeId)
       .forEach(placement => abortManualRevisionsForPlacement(placement.id));
   };
 
@@ -535,7 +636,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     recentCache.artifacts.value
       .filter(artifact => {
         if (artifact.purpose !== 'current' || artifact.chatId !== scope.chatId) return false;
-        if (artifact.target.messageId !== scope.messageId || artifact.target.imageIndex !== scope.imageIndex) return false;
+        if (artifact.target.messageId !== scope.messageId || artifact.target.imageIndex !== scope.imageIndex)
+          return false;
         return swipeId === undefined || artifact.target.swipeId === swipeId;
       })
       .filter(artifact => artifact.id !== retainedArtifactId)
@@ -580,7 +682,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     placementCache.placements.value
       .filter(placement => isSameScope(placementScope(placement), scope) && placement.id !== retainedId)
       .forEach(placement => removePlacementAndArtifact(placement, false));
-    const retainedArtifactId = retainedId ? placementCache.get(retainedId)?.artifactId ?? null : null;
+    const retainedArtifactId = retainedId ? (placementCache.get(retainedId)?.artifactId ?? null) : null;
     removeTargetedCurrentArtifacts(scope, retainedArtifactId, scope.swipeId);
     retention.forgetScope(scope);
     prunePlacementSelectionMemory();
@@ -611,7 +713,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     placements
       .filter(placement => placement.id !== retainedId)
       .forEach(placement => removePlacementAndArtifact(placement, false));
-    const retainedArtifactId = retainedId ? placementCache.get(retainedId)?.artifactId ?? null : null;
+    const retainedArtifactId = retainedId ? (placementCache.get(retainedId)?.artifactId ?? null) : null;
     removeTargetedCurrentArtifacts(scope, retainedArtifactId);
     scopes.forEach(candidateScope => {
       if (!keepTask || !isSameScope(candidateScope, taskScope(keepTask))) retention.forgetScope(candidateScope);
@@ -767,12 +869,12 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     const messageRef = rawMessageRef(placement.target.messageId);
     return Boolean(
       currentSettings?.enabled === true &&
-        prompt.trim() &&
-        messageRef &&
-        !stopped &&
-        memoryChatId === SillyTavern.getCurrentChatId() &&
-        currentSwipeId(placement.target.messageId) === placement.target.swipeId &&
-        placementCache.get(placement.id) === placement,
+      prompt.trim() &&
+      messageRef &&
+      !stopped &&
+      memoryChatId === SillyTavern.getCurrentChatId() &&
+      currentSwipeId(placement.target.messageId) === placement.target.swipeId &&
+      placementCache.get(placement.id) === placement,
     );
   };
 
@@ -789,32 +891,122 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       promptEditorController = controller;
       const currentSettings = settings;
       const outputPreset = currentSettings ? { ...getCurrentOutputPreset(currentSettings) } : null;
-      const avatarReferences = outputPreset?.useAvatarReferences
-        ? await readAvatarReferencesForPromptEditor()
-        : emptyAvatarReferenceReadResult();
-      if (controller.signal.aborted || !outputPreset) {
-        if (promptEditorController === controller) promptEditorController = null;
-        return;
-      }
-      const editorResult = await openImagePromptEditor({
-        prompt: placement.prompt,
-        outputPreset,
-        avatarReferences: promptEditorAvatarReferenceStatus(outputPreset.useAvatarReferences, avatarReferences),
-        signal: controller.signal,
-      }).finally(
-        () => {
-          if (promptEditorController === controller) promptEditorController = null;
-        },
+      if (!outputPreset || !currentSettings) return;
+      const profile = forceSingleImageCount(cloneProfile(getActiveApiProfile(currentSettings)));
+      const combination = placement.continuity;
+      const recordedReferenceKinds = placement.referenceKinds;
+      const referenceSelection: PromptEditorReferenceSelection = {
+        known: recordedReferenceKinds !== undefined,
+        useAvatarReferences:
+          recordedReferenceKinds?.some(kind => kind === 'user-avatar' || kind === 'character-avatar') ?? false,
+        usePreviousStoryImage: recordedReferenceKinds?.includes('previous-story-image') ?? false,
+      };
+      const continuity = captureContinuity(
+        placement.target.messageId,
+        combination?.drawingPresetId ?? getCurrentDrawingPreset(currentSettings).id,
+        combination?.outputPresetId ?? outputPreset.id,
+        true,
       );
-      const normalizedPrompt = editorResult?.prompt.trim() ?? '';
-      if (!editorResult || controller.signal.aborted || !canBeginManualRevision(placement, normalizedPrompt)) return;
-      onSubmitted?.();
-      await regeneratePlacement(placement, normalizedPrompt, undefined, {
-        outputPreset: { ...editorResult.outputPreset },
-        avatarReferences: editorResult.outputPreset.useAvatarReferences
-          ? avatarReferences
-          : emptyAvatarReferenceReadResult(),
-      });
+      try {
+        const referenceAvailability = {
+          // Availability is resolved only when the user has selected avatars;
+          // opening a text editor must not wait for avatar/image GETs.
+          avatarReferences: true,
+          previousStoryImage: Boolean(continuity.resource?.url?.trim()),
+        };
+        const referenceCandidates = buildPromptEditorReferenceCandidates(recordedReferenceKinds, referenceAvailability);
+        const editorResult = await openImagePromptEditor({
+          prompt: placement.prompt,
+          finalPrompt: placement.finalPrompt,
+          outputPreset,
+          avatarReferences: promptEditorAvatarReferenceStatus(
+            outputPreset.useAvatarReferences,
+            emptyAvatarReferenceReadResult(),
+          ),
+          previousShotPrompt: continuity.shotPrompt,
+          referenceSources: referenceCandidates,
+          referenceSelection,
+          referenceAvailability,
+          prepareReferenceSources: async (selection, signal) => {
+            if (selection.usePreviousStoryImage) {
+              continuityOwners.get(continuity)?.add(controller);
+            } else {
+              continuityOwners.get(continuity)?.delete(controller);
+            }
+            try {
+              const avatarReferences = selection.useAvatarReferences
+                ? await readAvatarReferencesForPromptEditor()
+                : emptyAvatarReferenceReadResult();
+              if (signal.aborted) throw new DOMException('图片请求已取消', 'AbortError');
+              // A previous source may have been removed before this option was
+              // selected. Treat it as unavailable instead of cancelling a
+              // text-only redraw or pretending that an empty candidate was sent.
+              if (selection.usePreviousStoryImage && !validContinuity(continuity)) return [];
+              return await materializeReferenceSources(
+                resolveReferenceSources(
+                  avatarReferences,
+                  selection.usePreviousStoryImage ? continuity.resource?.url : undefined,
+                ),
+                profile,
+                signal,
+              );
+            } finally {
+              // Once materialization has finished, the request owns the
+              // resolved bytes/URLs. Removing the old placement must not
+              // cancel an editor that no longer depends on that source.
+              continuityOwners.get(continuity)?.delete(controller);
+            }
+          },
+          signal: controller.signal,
+        });
+        const finalPrompt = editorResult?.prompt ?? '';
+        const normalizedPrompt = finalPrompt.trim();
+        if (!editorResult || controller.signal.aborted || !canBeginManualRevision(placement, normalizedPrompt)) return;
+        const selectedReferenceSources = (
+          editorResult.referenceSources ?? selectPromptEditorReferenceSources(referenceCandidates, referenceSelection)
+        ).filter(source => source.value.trim());
+        const usesPreviousStoryImage = selectedReferenceSources.some(source => source.kind === 'previous-story-image');
+        // The editor already owns the materialized reference list. Keep the
+        // continuity lock only while a previous-image source is still being
+        // prepared; a text/avatar-only redraw must survive removal of an
+        // unused previous placement.
+        const revisionContinuity = usesPreviousStoryImage && validContinuity(continuity) ? continuity : undefined;
+        if (auditedSnapshot === continuity) {
+          audit.continuity.reference_count = selectedReferenceSources.length;
+          audit.continuity.reference_kinds = selectedReferenceSources.map(source => source.kind);
+        }
+        const storedScenePrompt = editorResult.scenePrompt?.trim() || normalizedPrompt;
+        onSubmitted?.();
+        await regeneratePlacement(
+          placement,
+          storedScenePrompt,
+          {
+            // The editor's final text is already expanded and user-editable;
+            // passing it directly prevents a second template expansion.
+            prompt: finalPrompt,
+            ...(selectedReferenceSources.length > 0
+              ? { referenceImages: selectedReferenceSources.map(source => source.value) }
+              : {}),
+          },
+          {
+            outputPreset: { ...editorResult.outputPreset },
+            avatarReferences: emptyAvatarReferenceReadResult(),
+            continuity: revisionContinuity,
+            resolvedReferenceSources: selectedReferenceSources,
+            referenceKinds: selectedReferenceSources.map(source => source.kind),
+            continuityShotPrompt: storedScenePrompt,
+            profile,
+          },
+        );
+      } catch (error) {
+        if (!controller.signal.aborted && !(error instanceof Error && error.name === 'AbortError')) {
+          setError(new Error('参考图准备失败，请稍后再试。'));
+          toastr.error('参考图准备失败，请稍后再试。');
+        }
+      } finally {
+        if (promptEditorController === controller) promptEditorController = null;
+        releaseContinuity(continuity);
+      }
     },
     onRegionRedraw: async (placement: ImagePlacement, onSubmitted?: () => void) => {
       abortRegionEditor();
@@ -826,6 +1018,18 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         },
       );
       if (!selection) return;
+      if (selection.wholeImage) {
+        const wholeImagePrompt = selection.prompt.trim();
+        if (controller.signal.aborted || !canBeginManualRevision(placement, wholeImagePrompt)) return;
+        onSubmitted?.();
+        await regeneratePlacement(
+          placement,
+          wholeImagePrompt,
+          buildWholeImageRedrawInput(placement.url, wholeImagePrompt),
+        );
+        return;
+      }
+      if (!selection.region) return;
       const revision = buildRegionRedrawRevision(
         placement.url,
         selection.markedImage,
@@ -937,9 +1141,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         groupPlacements.map(placement => ({ id: placement.id, scope: placementScope(placement) })),
       );
       const currentSwipe = currentSwipeId(groupScope.messageId);
-      const currentSelected = selectedByScope.get(
-        imageRetentionScopeKey({ ...groupScope, swipeId: currentSwipe }),
-      );
+      const currentSelected = selectedByScope.get(imageRetentionScopeKey({ ...groupScope, swipeId: currentSwipe }));
       const retained = manualSelection
         ? groupPlacements.find(placement => placement.id === manualSelection.placementId)
         : currentSelected;
@@ -951,13 +1153,15 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         return;
       }
 
-      const currentTask = cache.values().find(
-        task =>
-          isInlineTask(task) &&
-          isSameImagePosition(taskScope(task), groupScope) &&
-          task.swipeId === currentSwipe &&
-          (task.status === 'pending' || task.status === 'running'),
-      );
+      const currentTask = cache
+        .values()
+        .find(
+          task =>
+            isInlineTask(task) &&
+            isSameImagePosition(taskScope(task), groupScope) &&
+            task.swipeId === currentSwipe &&
+            (task.status === 'pending' || task.status === 'running'),
+        );
       pruneImagePosition({ ...groupScope, swipeId: currentSwipe }, null, currentTask);
       if (currentTask) {
         const currentTaskScope = taskScope(currentTask);
@@ -1005,21 +1209,33 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     const generationId = `story-image-revision-${Date.now()}-${audit.run_id}`;
     const errorRevisionAtStart = errorRevision;
     trackManualRevision(placement.id, controller, generationId);
+    if (promptSnapshot?.continuity) continuityOwners.get(promptSnapshot.continuity)?.add(controller);
     audit.generation = { id: generationId, status: 'running' };
     status.value = 'generating';
     try {
       const outputPreset = promptSnapshot?.outputPreset ?? getCurrentOutputPreset(currentSettings);
+      const profile =
+        promptSnapshot?.profile ?? forceSingleImageCount(cloneProfile(getActiveApiProfile(currentSettings)));
       const input =
         directInput ??
         (await processDrawingPrompt(
           { ...outputPreset },
           normalizedPrompt,
           promptSnapshot
-            ? { readReferences: async () => cloneAvatarReferenceReadResult(promptSnapshot.avatarReferences) }
+            ? {
+                readReferences: async () => cloneAvatarReferenceReadResult(promptSnapshot.avatarReferences),
+                previousShotPrompt: promptSnapshot.continuity?.shotPrompt,
+                previousStoryImage: promptSnapshot.continuity?.resource?.url,
+                resolvedReferenceSources: promptSnapshot.resolvedReferenceSources,
+                referenceContext: { profile, signal: controller.signal },
+              }
             : undefined,
         ));
-      const profile = forceSingleImageCount(cloneProfile(getActiveApiProfile(currentSettings)));
-      if (!isCurrentManualRevision(placement, chatId, messageRef, controller, revisionRetentionToken)) return;
+      if (
+        !validContinuity(promptSnapshot?.continuity) ||
+        !isCurrentManualRevision(placement, chatId, messageRef, controller, revisionRetentionToken)
+      )
+        return;
       const resources = await requestImages(profile, input, controller.signal);
       try {
         const resource = resources[0];
@@ -1028,6 +1244,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         const nextMessageId = SillyTavern.chat.indexOf(messageRef as SillyTavern.ChatMessage);
         if (
           nextMessageId < 0 ||
+          !validContinuity(promptSnapshot?.continuity) ||
           !isCurrentManualRevision(placement, chatId, messageRef, controller, revisionRetentionToken)
         )
           return;
@@ -1062,15 +1279,32 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           variantIndex: placement.variantIndex,
           revisionIndex,
           prompt: normalizedPrompt,
+          finalPrompt: directInput?.prompt ?? normalizedPrompt,
+          continuity: placement.continuity
+            ? {
+                ...placement.continuity,
+                shotPrompt:
+                  promptSnapshot?.continuityShotPrompt ??
+                  (directInput ? placement.continuity.shotPrompt : normalizedPrompt),
+              }
+            : undefined,
+          // Direct redraw inputs (currently the region editor) contain only
+          // their explicit image input, so they are known to use no avatar or
+          // previous-story source. Keep old placements without metadata
+          // distinguishable by leaving the non-direct path undefined.
+          referenceKinds: promptSnapshot?.referenceKinds ?? (directInput ? [] : undefined),
         });
         if (!presentation) throw new Error('重绘图片无法加入页面内存缓存');
-        settleManualRevisionAudit(
-          audit,
-          generationId,
-          'success',
-          errorRevisionAtStart,
-          errorRevision,
-        );
+        if (
+          !validContinuity(promptSnapshot?.continuity) ||
+          !isCurrentManualRevision(placement, chatId, messageRef, controller, revisionRetentionToken)
+        ) {
+          if (presentation.placement) removePlacementAndArtifact(presentation.placement);
+          else recentCache.remove(presentation.artifact.id);
+          syncCacheAudit();
+          return;
+        }
+        settleManualRevisionAudit(audit, generationId, 'success', errorRevisionAtStart, errorRevision);
         syncCacheAudit();
         renderPlacementsForMessage(nextMessageId);
       } finally {
@@ -1086,6 +1320,10 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         }
       } else settleManualRevisionAudit(audit, generationId, 'cancelled', errorRevisionAtStart, errorRevision);
     } finally {
+      if (audit.generation.status === 'running') {
+        settleManualRevisionAudit(audit, generationId, 'cancelled', errorRevisionAtStart, errorRevision);
+      }
+      if (promptSnapshot?.continuity) continuityOwners.get(promptSnapshot.continuity)?.delete(controller);
       untrackManualRevision(placement.id, controller);
       syncRuntimeStatus();
     }
@@ -1110,9 +1348,18 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     outputPreset: ImageOutputPreset,
     profile: ImageApiProfile,
     displayMode: DisplayMode,
+    continuity: StoryContinuitySnapshot | null,
+    avatarReferences: Promise<AvatarReferenceReadResult>,
   ): Promise<void> {
     const errorRevisionAtStart = errorRevision;
-    if (!isStoredTask(task)) {
+    if (continuity) continuityOwners.get(continuity)?.add(task.abortController);
+    const currentTask = (): boolean => {
+      if (!isStoredTask(task)) return false;
+      if (validContinuity(continuity) && !task.abortController.signal.aborted) return true;
+      task.status = 'cancelled';
+      return false;
+    };
+    if (!currentTask()) {
       removeRenderedTaskHost(task);
       return;
     }
@@ -1123,8 +1370,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     if (displayMode === 'gift') audit.gift.status = 'running';
     updateGenerationStatus(task.generationId, task.messageId);
     try {
-      const input = await processDrawingPrompt(outputPreset, task.intent.prompt);
-      if (!isStoredTask(task)) {
+      const input = await processDrawingPrompt(outputPreset, task.intent.prompt, {
+        referenceContext: { profile, signal: task.abortController.signal },
+        readReferences: () => avatarReferences,
+        previousShotPrompt: continuity?.shotPrompt,
+        previousStoryImage: continuity?.resource?.url,
+      });
+      if (auditedSnapshot === continuity) {
+        audit.continuity.reference_count = input.referenceImages?.length ?? 0;
+        audit.continuity.reference_kinds = input.referenceSources?.map(source => source.kind) ?? [];
+      }
+      if (!currentTask()) {
         removeRenderedTaskHost(task);
         return;
       }
@@ -1132,7 +1388,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       const deferredScope = taskScope(task);
       let presentations: NonNullable<ReturnType<ImagePresenter['present']>>[] = [];
       try {
-        if (!isStoredTask(task)) {
+        if (!currentTask()) {
           removeRenderedTaskHost(task);
           return;
         }
@@ -1163,6 +1419,16 @@ export function createStoryImageRuntime(): StoryImageRuntime {
               variantIndex,
               revisionIndex: 0,
               prompt: task.intent.prompt,
+              finalPrompt: input.prompt,
+              continuity: continuity
+                ? {
+                    chatId: task.chatId,
+                    drawingPresetId: continuity.drawingPresetId,
+                    outputPresetId: continuity.outputPresetId,
+                    shotPrompt: task.intent.prompt,
+                  }
+                : undefined,
+              referenceKinds: input.referenceSources?.map(source => source.kind) ?? [],
             }),
           )
           .filter(presentation => presentation !== null);
@@ -1171,6 +1437,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         // results are temporary owners and must not duplicate page-memory use.
         resources.forEach(resource => resource.revoke?.());
         task.image = null;
+      }
+      // Presenting can evict the locked source at the bounded placement limit.
+      // Roll back this round if synchronous cache cleanup invalidated its snapshot.
+      if (!currentTask()) {
+        removeRenderedTaskHost(task);
+        presentations.forEach(presentation => {
+          if (presentation.placement) removePlacementAndArtifact(presentation.placement);
+          else recentCache.remove(presentation.artifact.id);
+        });
+        syncCacheAudit();
+        return;
       }
       const retainedPresentation = presentations.find(presentation =>
         recentCache.getArtifact(presentation.artifact.id),
@@ -1214,7 +1491,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       });
     } catch (error) {
       removeRenderedTaskHost(task);
-      if (!isStoredTask(task)) return;
+      if (!currentTask()) return;
       if (task.abortController.signal.aborted) task.status = 'cancelled';
       else {
         task.status = 'failed';
@@ -1223,6 +1500,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         setError(error);
       }
     } finally {
+      if (continuity) continuityOwners.get(continuity)?.delete(task.abortController);
       if (cache.get(imageTaskKey(task)) === task) updateGenerationStatus(task.generationId, task.messageId);
       syncRuntimeStatus();
     }
@@ -1246,7 +1524,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     audit.markers = { count: scan.totalValid, valid_count: scan.markers.length, truncated: scan.truncated };
     if (scan.truncated) console.warn(LOG_PREFIX, '回复中的生图标记超过两条，只处理前两条');
     const swipeId = currentSwipeId(messageId);
-    scan.markers.forEach((marker: InlineImagePrompt) => {
+    const pending = scan.markers.map((marker: InlineImagePrompt) => {
       const task = createImageTask(marker, {
         chatId: generation.chatId,
         messageId,
@@ -1259,7 +1537,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         inlineTaskKeys.add(imageTaskKey(task));
         renderImageTask(task, taskRenderHandlers, swipeId);
       }
-      void runTask(task, generation.outputPreset, generation.profile, generation.displayMode);
+      return runTask(
+        task,
+        generation.outputPreset,
+        generation.profile,
+        generation.displayMode,
+        generation.continuity,
+        generation.avatarReferences,
+      );
+    });
+    void Promise.allSettled(pending).finally(() => {
+      releaseContinuity(generation.continuity);
     });
     updateTaskAudit(messageId, swipeId);
     updateGenerationStatus(generation.id, messageId);
@@ -1267,14 +1555,14 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   };
 
   const prepareGeneration = (type: string, _option: unknown, dryRun: boolean): void => {
+    releaseContinuity(activeGeneration?.continuity, true);
     messageAdvance.onGenerationStarted(type, dryRun, SillyTavern.chat);
     const currentSettings = settings;
     const groupId = SillyTavern.groupId;
     const isSwipe = isSwipeGeneration(type, dryRun);
     const pendingSwipe = pendingSwipeTarget;
     pendingSwipeTarget = null;
-    const pendingSwipeMessage =
-      isSwipe && pendingSwipe ? getChatMessages(-1, { include_swipes: true })[0] : undefined;
+    const pendingSwipeMessage = isSwipe && pendingSwipe ? getChatMessages(-1, { include_swipes: true })[0] : undefined;
     const pendingSwipeMessageId =
       isSwipe &&
       pendingSwipe &&
@@ -1285,7 +1573,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       pendingSwipeMessage.role === 'assistant'
         ? pendingSwipe.messageId
         : null;
-    const swipeMessageId = isSwipe ? pendingSwipeMessageId ?? getLastMessageId() : null;
+    const swipeMessageId = isSwipe ? (pendingSwipeMessageId ?? getLastMessageId()) : null;
     const swipeDecision = swipeMessageId === null ? undefined : floorDecisions.get(rawMessageRef(swipeMessageId));
     const generateOnSwipe = currentSettings?.displaySettings.generateOnSwipe !== false;
     if (isSwipe) {
@@ -1316,7 +1604,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           ? 'group-chat'
           : isSwipe && swipeDecision && !swipeDecision.shouldTrigger
             ? 'skipped-by-frequency'
-          : 'non-normal-generation';
+            : 'non-normal-generation';
       return;
     }
 
@@ -1337,13 +1625,33 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       type: isSwipe ? 'swipe' : 'normal',
       messageId: isSwipe ? swipeMessageId : null,
       chatId: memoryChatId,
+      startChatLength: SillyTavern.chat.length,
+      startTailRef: (() => {
+        const tailId = getLastMessageId();
+        return tailId >= 0 ? rawMessageRef(tailId) : null;
+      })(),
       nextFloorCount,
       decision,
       preset: { ...getCurrentDrawingPreset(currentSettings) },
       outputPreset: { ...getCurrentOutputPreset(currentSettings) },
       profile: cloneProfile(getActiveApiProfile(currentSettings)),
       displayMode: currentSettings.displaySettings.displayMode,
+      continuity: null,
+      avatarReferences:
+        decision.shouldTrigger && getCurrentOutputPreset(currentSettings).useAvatarReferences
+          ? readAvatarReferencesForPromptEditor()
+          : Promise.resolve(emptyAvatarReferenceReadResult()),
     };
+    if (decision.shouldTrigger && generation.displayMode === 'inline') {
+      generation.continuity = captureContinuity(
+        isSwipe ? swipeMessageId! : SillyTavern.chat.length,
+        generation.preset.id,
+        generation.outputPreset.id,
+        generation.preset.instructionText.includes('{{xx_pic}}') ||
+          generation.outputPreset.templateText.includes('{{xx_pic}}') ||
+          generation.outputPreset.usePreviousStoryImage === true,
+      );
+    }
     activeGeneration = generation;
     audit.generation = { id: generation.id, status: 'running' };
     audit.gift = {
@@ -1361,7 +1669,38 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     ];
     audit.last_error = null;
     if (isSwipe) audit.swipe.skipped = false;
-    installPrompt(decision.shouldTrigger ? generation.preset.instructionText : null);
+    installPrompt(
+      decision.shouldTrigger
+        ? applyDrawingPromptTemplate(generation.preset.instructionText, generation.continuity?.shotPrompt)
+        : null,
+    );
+  };
+
+  const generationEndedMessageId = (generation: GenerationState, eventMessageId: number): number | null => {
+    const candidates = [
+      eventMessageId,
+      generation.type === 'swipe' ? generation.messageId : null,
+      generation.type === 'normal' ? getLastMessageId() : null,
+      generation.type === 'normal' ? SillyTavern.chat.length - 1 : null,
+    ];
+    const seen = new Set<number>();
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0 || seen.has(candidate))
+        continue;
+      seen.add(candidate);
+      if (generation.type === 'normal' && candidate < generation.startChatLength) continue;
+      const rawMessage = rawMessageRef(candidate);
+      const message = getChatMessages(candidate)[0];
+      if (
+        message?.role !== 'assistant' ||
+        !rawMessage ||
+        (generation.type === 'normal' && rawMessage === generation.startTailRef)
+      )
+        continue;
+      if (generation.type === 'swipe' && generation.messageId !== null && candidate !== generation.messageId) continue;
+      return candidate;
+    }
+    return null;
   };
 
   const onMessageReceived = (messageId: number, type: string): void => {
@@ -1395,11 +1734,19 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       syncRuntimeStatus();
       return;
     }
+    if (!validContinuity(generation.continuity)) {
+      persistCleanedMessage(messageId, currentSwipeId(messageId), message.message);
+      releaseContinuity(generation.continuity, true);
+      audit.generation.status = 'success';
+      syncRuntimeStatus();
+      return;
+    }
     audit.gift.last_trigger_message_id = messageId;
     startMarkerTasks(generation, messageId, message.message);
   };
 
   const resetMemory = (): void => {
+    clearContinuity();
     abortPromptEditor();
     abortRegionEditor();
     abortManualRevisions();
@@ -1480,6 +1827,9 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       clearRenderedHosts();
       listen(tavern_events.GENERATION_STARTED, prepareGeneration);
       listen(tavern_events.GENERATION_STOPPED, () => {
+        releaseContinuity(activeGeneration?.continuity, true);
+        activeGeneration = null;
+        installPrompt(null);
         messageAdvance.onGenerationEnded();
       });
       listen(tavern_events.STREAM_TOKEN_RECEIVED, _text => {
@@ -1497,6 +1847,18 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         onMessageReceived(messageId, type);
       });
       listen(tavern_events.GENERATION_ENDED, messageId => {
+        const generation = activeGeneration;
+        if (generation) {
+          const endedMessageId = generationEndedMessageId(generation, messageId);
+          if (endedMessageId !== null) onMessageReceived(endedMessageId, generation.type);
+          if (activeGeneration === generation) {
+            releaseContinuity(generation.continuity);
+            activeGeneration = null;
+            installPrompt(null);
+          }
+        } else {
+          installPrompt(null);
+        }
         messageAdvance.onGenerationEnded();
         if (Number.isInteger(messageId)) {
           renderInlineTasksForMessage(messageId);
@@ -1511,9 +1873,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       listen(tavern_events.MESSAGE_SWIPED, messageId => {
         const messageRef = rawMessageRef(messageId);
         pendingSwipeTarget =
-          Number.isInteger(messageId) && messageRef
-            ? { chatId: memoryChatId, messageId, messageRef }
-            : null;
+          Number.isInteger(messageId) && messageRef ? { chatId: memoryChatId, messageId, messageRef } : null;
         abortPromptEditor();
         abortRegionEditor();
         const swipeId = currentSwipeId(messageId);
@@ -1556,6 +1916,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           taskRetentionToken.set(task, retention.token(taskScope(task)));
         });
         placementCache.shiftSwipeIdsAfterDeletion(eventData.messageId, eventData.swipeId);
+        checkContinuity();
         recentCache.reconcileDeletedSwipe(memoryChatId, eventData.messageId, eventData.swipeId);
         recentCache.artifacts.value
           .filter(
@@ -1615,14 +1976,13 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         abortRegionEditor();
         abortManualRevisions();
         clearPrompt();
+        clearContinuity();
         activeGeneration = null;
         recentCache.reconcileMessageIndexes(memoryChatId, SillyTavern.chat);
         recentCache.artifacts.value
           .filter(
             artifact =>
-              artifact.purpose === 'current' &&
-              artifact.chatId === memoryChatId &&
-              artifact.target.messageId === null,
+              artifact.purpose === 'current' && artifact.chatId === memoryChatId && artifact.target.messageId === null,
           )
           .forEach(artifact => recentCache.remove(artifact.id));
         cache.clear();
@@ -1679,6 +2039,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       audit.gift.skip_floors = nextSettings.displaySettings.skipFloors;
       audit.swipe.enabled = nextSettings.displaySettings.generateOnSwipe;
       if (!nextSettings.enabled) {
+        clearContinuity();
         abortPromptEditor();
         abortRegionEditor();
         abortManualRevisions();

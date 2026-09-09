@@ -31,6 +31,7 @@ equal(
     name: '未命名出图预设',
     templateText: '{{xx}}',
     useAvatarReferences: false,
+    usePreviousStoryImage: false,
   },
   '出图预设 schema 默认值应完整',
 );
@@ -67,7 +68,7 @@ const protectedLast = deleteOutputPreset([first], 'first', 'first');
 assert(!protectedLast.deleted && protectedLast.presets.length === 1, '最后一个出图预设不得删除');
 
 const normalized = normalizeOutputPresets([
-  { id: 'duplicate', name: 'A', templateText: '{{xx}}', useAvatarReferences: false },
+  { id: 'duplicate', name: 'A', templateText: '{{xx}}', useAvatarReferences: false, usePreviousStoryImage: false },
   { id: 'duplicate', name: 'B', templateText: 'B {{xx}}', useAvatarReferences: true },
   null,
 ]);
@@ -80,7 +81,13 @@ assert(normalized[1].useAvatarReferences, '归一化不得丢失头像参考开�
 const malformed = normalizeOutputPreset({ id: 'malformed', templateText: 123, useAvatarReferences: 'yes' });
 equal(
   malformed,
-  { id: 'malformed', name: '未命名出图预设', templateText: '{{xx}}', useAvatarReferences: false },
+  {
+    id: 'malformed',
+    name: '未命名出图预设',
+    templateText: '{{xx}}',
+    useAvatarReferences: false,
+    usePreviousStoryImage: false,
+  },
   '非法出图字段应回退到安全默认值',
 );
 

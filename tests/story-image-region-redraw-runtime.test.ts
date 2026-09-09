@@ -1,6 +1,7 @@
 import {
   buildRegionRedrawInput,
   buildRegionRedrawRevision,
+  buildWholeImageRedrawInput,
   commitManualRevisionFailure,
   createEmptyAudit,
   forceSingleImageCount,
@@ -22,6 +23,11 @@ assert(input.prompt.includes('change detail'), '提示词应包含本次临时�
 assert(input.prompt.includes('洋红高亮仅用于指示修改位置'), '提示词必须说明洋红标记不是输出内容');
 assert(input.prompt.includes('重新生成一张完整新图'), '提示词必须诚实说明这是整图重新生成');
 assert(!input.prompt.includes('仅重绘') && !input.prompt.includes('必须保持'), '不得伪装为像素锁定的真实 inpainting');
+
+const wholeImageInput = buildWholeImageRedrawInput('source-image', '  change the whole image  ');
+assert(wholeImageInput.prompt === 'change the whole image', '无需画笔模式应只提交当前修改提示词');
+assert(wholeImageInput.referenceImages?.length === 1, '无需画笔模式必须只发送当前生成图');
+assert(wholeImageInput.referenceImages[0] === 'source-image', '无需画笔模式的唯一参考图必须是当前生成图');
 
 const revision = buildRegionRedrawRevision(
   'source-image',

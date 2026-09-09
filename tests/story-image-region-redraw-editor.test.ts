@@ -18,6 +18,7 @@ assert(region.x === 0.1 && region.y === 0.2, 'region origin should be normalized
 assert(region.width === 0.85 && region.height === 0.55, 'region size should include brush radius');
 assert(normalizeRegionBounds(null, 100, 100) === null, 'empty strokes must not produce a region');
 assert(!canConfirmRegionRedraw('prompt', null), 'empty selection must block confirmation');
+assert(canConfirmRegionRedraw('prompt', null, true), 'whole-image mode should not require a brush selection');
 assert(!canConfirmRegionRedraw('   ', bounds), 'blank one-shot prompt must block confirmation');
 assert(canConfirmRegionRedraw('replace the flower', bounds), 'selection and prompt should allow confirmation');
 
@@ -72,7 +73,10 @@ async function testEditorLifecycle(): Promise<void> {
   const endSecond = beginRegionEditorSession(undefined, () => {
     secondOpen = false;
   });
-  assert((await oldResult) === null && !firstOpen && secondOpen, 'opening a second editor should settle only the old one');
+  assert(
+    (await oldResult) === null && !firstOpen && secondOpen,
+    'opening a second editor should settle only the old one',
+  );
   endSecond();
 }
 

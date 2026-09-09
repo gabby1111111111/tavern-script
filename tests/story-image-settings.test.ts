@@ -91,7 +91,11 @@ const profileWithEmptyTimeout = parseStoryImageSettings({
   ],
 });
 equal(profileWithEmptyTimeout.apiProfiles.length, 1, '空 timeout 不得丢弃整个 API 档案');
-equal(profileWithEmptyTimeout.apiProfiles[0].serviceUrl, 'http://fixture.invalid/v1/images/generations', '空 timeout 时必须保留 API 地址');
+equal(
+  profileWithEmptyTimeout.apiProfiles[0].serviceUrl,
+  'http://fixture.invalid/v1/images/generations',
+  '空 timeout 时必须保留 API 地址',
+);
 assert(profileWithEmptyTimeout.apiProfiles[0].apiKey === 'fixture-key', '空 timeout 时必须保留 API key');
 equal(profileWithEmptyTimeout.apiProfiles[0].model, 'fixture-model', '空 timeout 时必须保留模型');
 equal(profileWithEmptyTimeout.apiProfiles[0].timeoutMs, 120_000, '空 timeout 应回退到默认超时');
@@ -107,7 +111,9 @@ for (const [label, invalidTimeout] of [
   ['zero', 0],
   ['fraction', 1_000.5],
 ] as const) {
-  const repaired = parseStoryImageSettings({ apiProfiles: [{ ...profile(`timeout-${label}`), timeoutMs: invalidTimeout }] });
+  const repaired = parseStoryImageSettings({
+    apiProfiles: [{ ...profile(`timeout-${label}`), timeoutMs: invalidTimeout }],
+  });
   equal(repaired.apiProfiles[0].id, `timeout-${label}`, `${label} timeout 时必须保留档案`);
   equal(repaired.apiProfiles[0].timeoutMs, 120_000, `${label} timeout 应回退到默认超时`);
 }
@@ -145,7 +151,10 @@ try {
   }
 }
 const persistedProfile = (persistedVariables.apiProfiles as Array<Record<string, unknown>>)[0];
-assert(persistedProfile?.serviceUrl === 'http://fixture.invalid/v1/images/generations', '设置 store 立即写回不得丢失 API 地址');
+assert(
+  persistedProfile?.serviceUrl === 'http://fixture.invalid/v1/images/generations',
+  '设置 store 立即写回不得丢失 API 地址',
+);
 assert(persistedProfile?.apiKey === 'writeback-fixture-key', '设置 store 立即写回不得丢失 API key');
 assert(persistedProfile?.model === 'writeback-fixture-model', '设置 store 立即写回不得丢失模型');
 equal(persistedProfile?.timeoutMs, 120_000, '设置 store 立即写回应保存修复后的默认超时');
@@ -185,7 +194,11 @@ const explicitOutput = parseStoryImageSettings({
   currentOutputPresetId: 'output-b',
   apiProfiles: profiles,
 });
-equal(explicitOutput.outputPresets, explicitOutputPresets, '已有出图预设不得被默认值覆盖');
+equal(
+  explicitOutput.outputPresets,
+  explicitOutputPresets.map(preset => ({ ...preset, usePreviousStoryImage: false })),
+  '已有出图预设应保留内容，上一图引用默认关闭',
+);
 equal(explicitOutput.currentOutputPresetId, 'output-b', '已有当前出图预设 ID 应保留');
 assert(getCurrentOutputPreset(explicitOutput).useAvatarReferences, '当前出图预设头像开关应传递');
 

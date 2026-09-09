@@ -1,6 +1,8 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import type { ImageResource } from './image-api';
 import type { ImagePlacementTarget } from './image-system';
+import type { ImageReferenceKind } from './pipeline-types';
+import { normalizeStoryContinuityMetadata, type StoryContinuityMetadata } from './story-continuity';
 
 // Keep the inline projection large enough to mirror the configurable recent
 // image cache. Each generated variant/revision owns one placement.
@@ -14,17 +16,25 @@ export type ImagePlacement = Readonly<{
   caption: string;
   variantIndex: number;
   revisionIndex: number;
+  /** Exact final prompt sent for this variant/revision, kept in page memory. */
+  finalPrompt?: string;
   prompt: string;
   url: string;
   createdAt: number;
+  continuity?: StoryContinuityMetadata;
+  /** Known reference provenance for this exact variant/revision. */
+  referenceKinds?: ReadonlyArray<ImageReferenceKind>;
 }>;
 
 export type ImagePlacementInput = Pick<ImagePlacement, 'artifactId' | 'target'> & {
   caption?: string;
   variantIndex?: number;
   revisionIndex?: number;
+  finalPrompt?: string;
   prompt?: string;
   messageRef?: object | null;
+  continuity?: StoryContinuityMetadata;
+  referenceKinds?: ReadonlyArray<ImageReferenceKind>;
 };
 export type ImagePlacementCloneProvider = (artifactId: string) => ImageResource | null;
 export type ImagePlacementCacheOptions = {
@@ -33,6 +43,13 @@ export type ImagePlacementCacheOptions = {
 
 function normalizeCaption(caption = ''): string {
   return caption.trim().slice(0, MAX_IMAGE_PLACEMENT_CAPTION_LENGTH);
+}
+
+function normalizeReferenceKinds(
+  kinds?: ReadonlyArray<ImageReferenceKind>,
+): ReadonlyArray<ImageReferenceKind> | undefined {
+  if (!kinds) return undefined;
+  return Object.freeze([...new Set(kinds)]);
 }
 
 export class ImagePlacementCache {
@@ -62,8 +79,11 @@ export class ImagePlacementCache {
       variantIndex: Math.max(0, Math.trunc(input.variantIndex ?? 0)),
       revisionIndex: Math.max(0, Math.trunc(input.revisionIndex ?? 0)),
       prompt: (input.prompt ?? '').trim(),
+      ...(input.finalPrompt?.trim() ? { finalPrompt: input.finalPrompt } : {}),
       url: resource.url,
       createdAt: Date.now(),
+      ...(input.continuity ? { continuity: normalizeStoryContinuityMetadata(input.continuity) } : {}),
+      ...(input.referenceKinds ? { referenceKinds: normalizeReferenceKinds(input.referenceKinds) } : {}),
     });
     const ownerKey = `image-placement-owner-${sequence}`;
     this.resources.set(ownerKey, resource);
@@ -86,6 +106,16 @@ export class ImagePlacementCache {
 
   get(id: string): ImagePlacement | undefined {
     return this.items.value.find(item => item.id === id);
+  }
+
+  /** A request owns its clone independently from the displayed placement. */
+  cloneResource(id: string): ImageResource | null {
+    const ownerKey = this.ownerKeys.get(id);
+    const resource = ownerKey ? this.resources.get(ownerKey) : undefined;
+    if (!resource) return null;
+    if (resource.clone) return resource.clone();
+    // An object URL without cloning cannot outlive its current owner safely.
+    return resource.kind === 'remote-url' ? { url: resource.url, kind: resource.kind } : null;
   }
 
   removeSwipe(messageId: number, swipeId: number): number {

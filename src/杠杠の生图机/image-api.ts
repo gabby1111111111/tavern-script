@@ -47,12 +47,14 @@ export function resolveMultipartImageField(
 export class ImageApiError extends Error {
   readonly retryable: boolean;
   readonly status: number | null;
+  readonly timedOut: boolean;
 
-  constructor(message: string, options: { retryable?: boolean; status?: number | null } = {}) {
+  constructor(message: string, options: { retryable?: boolean; status?: number | null; timedOut?: boolean } = {}) {
     super(message);
     this.name = 'ImageApiError';
     this.retryable = options.retryable ?? false;
     this.status = options.status ?? null;
+    this.timedOut = options.timedOut ?? false;
   }
 }
 
@@ -94,11 +96,12 @@ async function fetchWithTimeout<T>(
     // finish after the request signal has already been aborted. Do not let a
     // late consumer result turn an expired or cancelled request into success.
     if (parentSignal.aborted) throw makeAbortError('图片请求已取消');
-    if (timedOut) throw new ImageApiError(`图片 API 请求超时（${timeoutMs}ms）`);
+    if (timedOut) throw new ImageApiError(`图片 API 请求超时（${timeoutMs}ms）`, { timedOut: true });
     return result;
   } catch (error) {
     if (parentSignal.aborted) throw makeAbortError('图片请求已取消');
-    if (timedOut || isAbortError(error)) throw new ImageApiError(`图片 API 请求超时（${timeoutMs}ms）`);
+    if (timedOut || isAbortError(error))
+      throw new ImageApiError(`图片 API 请求超时（${timeoutMs}ms）`, { timedOut: true });
     throw error;
   } finally {
     window.clearTimeout(timer);
@@ -605,4 +608,27 @@ export async function requestImage(
   const [first, ...overflow] = resources;
   overflow.forEach(resource => resource.revoke?.());
   return first;
+}
+
+/** Materialize optional prompt references before numbering/preview, without altering hard edit inputs. */
+export async function materializeReferenceImage(
+  value: string,
+  profile: ImageApiProfileWithMode,
+  signal: AbortSignal,
+): Promise<string> {
+  if (signal.aborted) throw makeAbortError('图片请求已取消');
+  const normalized = value.trim();
+  if (!normalized) throw new ImageApiError('参考图地址为空');
+  if (isDataImageUrl(normalized)) {
+    dataUrlToBlob(normalized); // Validate now so invalid optional bytes cannot fail after preview.
+    return normalized;
+  }
+  const mode = resolveImageRequestMode(profile.serviceUrl, profileRequestMode(profile));
+  const timeoutMs = Number.isFinite(profile.timeoutMs) ? Math.max(1000, profile.timeoutMs) : 120000;
+  if (mode !== 'multipart-edit') return resolveJsonReference(normalized, timeoutMs, signal);
+  const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, window.location.href).toString() : normalized;
+  return fetchWithTimeout(sourceUrl, { method: 'GET' }, timeoutMs, signal, async response => {
+    if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
+    return blobToDataUrl(await response.blob());
+  });
 }

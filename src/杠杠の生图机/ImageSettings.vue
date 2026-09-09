@@ -3,7 +3,7 @@
   <section class="story-image-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の生图机 V0.3.1</b>
+        <b>杠杠の生图机 V0.4.0</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
@@ -214,8 +214,26 @@
               />
               <span>使用当前 User 和角色头像</span>
             </label>
+            <label class="story-image-settings__enable-row" for="story-image-output-previous-reference">
+              <input
+                id="story-image-output-previous-reference"
+                v-model="activeOutputPreset.usePreviousStoryImage"
+                type="checkbox"
+              />
+              <span>使用当前预设组合的上一镜头图（正文插图）</span>
+            </label>
+            <p class="story-image-settings__description">
+              <code v-text="'{{xx}}'"></code> 是本次镜头文字；<code v-text="'{{xx_pic}}'"></code>
+              是上一镜头文字（画图预设也可用）。文字引用与图片开关独立。
+              <code v-text="'{{reference_sources}}'"></code>
+              在出图模板中展开实际图号和来源说明。没有上一图时使用空文字并跳过该图。
+            </p>
+            <button class="menu_button" type="button" @click="addContinuousStoryExamples">添加连续剧情示例预设</button>
+            <p class="story-image-settings__description">
+              添加一对示例供手动选择，不改变当前选择。连续线按画图与出图预设组合区分，使用前楼当前显示的图片；礼物图不参与。
+            </p>
             <p class="story-image-settings__description story-image-settings__avatar-reference-note">
-              开启后固定参考图顺序：User = 图1，当前角色 = 图2。关闭时不附加头像参考图。
+              参考图依次为 User 头像、角色头像、上一镜头图；缺失来源会跳过，编号按实际图片顺序排列。
             </p>
           </div>
         </div>
@@ -479,10 +497,20 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
 import { computed, onBeforeUnmount, ref, type Ref, watch } from 'vue';
-import { createDrawingPreset, deleteDrawingPreset, updateDrawingPreset } from './drawing-preset';
+import {
+  CONTINUOUS_STORY_DRAWING_EXAMPLE,
+  createDrawingPreset,
+  deleteDrawingPreset,
+  updateDrawingPreset,
+} from './drawing-preset';
 import { fetchModelList, ModelListApiError } from './model-api';
 import type { RecentGeneratedImage } from './recent-image-cache';
-import { createOutputPreset, deleteOutputPreset, updateOutputPreset } from './output-preset';
+import {
+  CONTINUOUS_STORY_OUTPUT_EXAMPLE,
+  createOutputPreset,
+  deleteOutputPreset,
+  updateOutputPreset,
+} from './output-preset';
 import type { ImageApiProfile } from './settings';
 import {
   getCurrentDrawingPreset,
@@ -550,6 +578,12 @@ function selectTab(tab: TabValue): void {
   activeTab.value = tab;
 }
 
+function addContinuousStoryExamples(): void {
+  settings.value.drawingPresets.push(createDrawingPreset(CONTINUOUS_STORY_DRAWING_EXAMPLE));
+  settings.value.outputPresets.push(createOutputPreset(CONTINUOUS_STORY_OUTPUT_EXAMPLE));
+  toastr.success('已添加连续剧情画图与出图示例，请在两处手动选择。');
+}
+
 function createPreset(): void {
   const preset = createDrawingPreset({
     name: `新预设 ${settings.value.drawingPresets.length + 1}`,
@@ -587,6 +621,7 @@ function createOutputPresetEntry(): void {
     name: `新预设 ${settings.value.outputPresets.length + 1}`,
     templateText: activeOutputPreset.value.templateText,
     useAvatarReferences: activeOutputPreset.value.useAvatarReferences,
+    usePreviousStoryImage: activeOutputPreset.value.usePreviousStoryImage ?? false,
   });
   settings.value.outputPresets = [...settings.value.outputPresets, preset];
   settings.value.currentOutputPresetId = preset.id;
@@ -599,6 +634,7 @@ function saveOutputPresetEntry(): void {
     name: activeOutputPreset.value.name.trim() || '未命名出图预设',
     templateText: activeOutputPreset.value.templateText,
     useAvatarReferences: activeOutputPreset.value.useAvatarReferences,
+    usePreviousStoryImage: activeOutputPreset.value.usePreviousStoryImage ?? false,
   }).filter(preset => preset.id === settings.value.currentOutputPresetId);
   if (!saved) return;
   settings.value.outputPresets.splice(index, 1, saved);

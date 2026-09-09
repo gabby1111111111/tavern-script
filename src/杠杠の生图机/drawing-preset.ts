@@ -118,3 +118,8 @@ export function deleteDrawingPreset(presets: DrawingPreset[], id: string, curren
   const nextCurrentId = id === currentId ? next[0].id : currentId;
   return { presets: next, currentId: nextCurrentId, deleted: true };
 }
+
+export const CONTINUOUS_STORY_DRAWING_EXAMPLE = {
+  name: '连续剧情',
+  instructionText: `${DEFAULT_DRAWING_PRESET.instructionText}\n\n上一镜头的画面提示词：\n{{xx_pic}}\n\n请结合当前剧情判断哪些视觉元素继续保持，哪些已经改变，并在本次回复中输出新的、完整的 <pic> 画面提示词。没有上一镜头时按首次配图处理。`,
+};

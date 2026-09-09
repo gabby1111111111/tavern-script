@@ -9,6 +9,7 @@ export type ImageOutputPreset = {
   name: string;
   templateText: string;
   useAvatarReferences: boolean;
+  usePreviousStoryImage?: boolean;
 };
 
 export type DisplayMode = 'inline' | 'gift';
@@ -30,7 +31,20 @@ export type ImageRequestInput = {
   referenceImages?: string[];
 };
 
+export type ResolvedReferenceSource = {
+  kind: 'user-avatar' | 'character-avatar' | 'previous-story-image';
+  label: string;
+  value: string;
+};
+
+/**
+ * Lightweight page-memory provenance for a generated placement.  It carries
+ * only the kind of reference that was attached, never the image bytes or URL.
+ */
+export type ImageReferenceKind = ResolvedReferenceSource['kind'];
+
 export type PromptProcessingResult = {
+  referenceSources?: ResolvedReferenceSource[];
   prompt: string;
   referenceImages?: string[];
   processing: 'bypassed' | 'processed';

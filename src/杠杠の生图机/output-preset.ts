@@ -13,6 +13,7 @@ export const DEFAULT_OUTPUT_PRESET: ImageOutputPreset = {
   name: '默认出图格式',
   templateText: DEFAULT_OUTPUT_TEMPLATE,
   useAvatarReferences: false,
+  usePreviousStoryImage: false,
 };
 
 export const ImageOutputPresetSchema = z.object({
@@ -20,6 +21,7 @@ export const ImageOutputPresetSchema = z.object({
   name: z.string().trim().default('未命名出图预设'),
   templateText: z.string().default(DEFAULT_OUTPUT_TEMPLATE),
   useAvatarReferences: z.boolean().default(false),
+  usePreviousStoryImage: z.boolean().default(false),
 });
 
 export type { ImageOutputPreset } from './pipeline-types';
@@ -52,6 +54,7 @@ export function normalizeOutputPreset(raw: unknown, index = 0): ImageOutputPrese
     id: rawId || fallbackId(index),
     name: rawName || '未命名出图预设',
     templateText: typeof record.templateText === 'string' ? record.templateText : DEFAULT_OUTPUT_TEMPLATE,
+    usePreviousStoryImage: typeof record.usePreviousStoryImage === 'boolean' ? record.usePreviousStoryImage : false,
     useAvatarReferences: typeof record.useAvatarReferences === 'boolean' ? record.useAvatarReferences : false,
   });
   return parsed.success ? parsed.data : null;
@@ -75,6 +78,7 @@ export function createOutputPreset(
     name: input.name?.trim() || '新建出图预设',
     templateText: input.templateText ?? DEFAULT_OUTPUT_TEMPLATE,
     useAvatarReferences: input.useAvatarReferences ?? false,
+    usePreviousStoryImage: input.usePreviousStoryImage ?? false,
   };
   return ImageOutputPresetSchema.parse(candidate);
 }
@@ -125,3 +129,12 @@ export const createImageOutputPreset = createOutputPreset;
 export const getCurrentImageOutputPreset = getCurrentOutputPreset;
 export const updateImageOutputPreset = updateOutputPreset;
 export const deleteImageOutputPreset = deleteOutputPreset;
+
+/** Explicitly added by the user; never replaces the selected preset on load. */
+export const CONTINUOUS_STORY_OUTPUT_EXAMPLE = {
+  name: '连续剧情',
+  templateText:
+    '实际参考图：\n{{reference_sources}}\n\n上一镜头的文字背景：\n{{xx_pic}}\n\n当前镜头：\n{{xx}}\n\n延续未被当前剧情改变的视觉细节，按当前剧情更新动作与场景。头像用于人物身份，上一镜头图用于服装、道具、环境与画风。若提供上一镜头图，旧文字与该图的局部细节不一致时，以图为准；当前剧情明确要求的新变化优先。',
+  useAvatarReferences: true,
+  usePreviousStoryImage: true,
+};

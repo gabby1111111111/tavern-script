@@ -556,7 +556,7 @@ const StoryImageSettingsSchema = z
     enabled: z.boolean().default(false),
     drawingPresets: z.array(DrawingPresetSchema).min(1).default(DEFAULT_DRAWING_PRESETS),
     currentDrawingPresetId: z.string().default(DEFAULT_DRAWING_PRESET_ID),
-    outputPresets: z.array(ImageOutputPresetSchema).min(1).default(DEFAULT_OUTPUT_PRESETS),
+    outputPresets: z.array(ImageOutputPresetSchema).min(1).prefault(DEFAULT_OUTPUT_PRESETS),
     currentOutputPresetId: z.string().default(DEFAULT_OUTPUT_PRESET_ID),
     recentImageLimit: RecentImageLimitSchema,
     displaySettings: DisplaySettingsSchema.prefault({}),

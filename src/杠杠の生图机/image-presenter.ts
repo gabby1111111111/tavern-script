@@ -1,4 +1,5 @@
-import type { DisplayMode } from './pipeline-types';
+import type { DisplayMode, ImageReferenceKind } from './pipeline-types';
+import type { StoryContinuityMetadata } from './story-continuity';
 import type { ImageResource } from './image-api';
 import { ImagePlacementCache, type ImagePlacement } from './image-placement';
 import { RecentImageCache, type RecentGeneratedImage } from './recent-image-cache';
@@ -21,7 +22,12 @@ export type ImagePresentationInput = {
   revisionIndex?: number;
   /** Page-memory source prompt used by manual redraw/edit actions. */
   prompt?: string;
+  /** Exact final prompt sent to the image API for this variant/revision. */
+  finalPrompt?: string;
   caption?: string;
+  continuity?: StoryContinuityMetadata;
+  /** Lightweight provenance for the exact references sent with this image. */
+  referenceKinds?: ReadonlyArray<ImageReferenceKind>;
 };
 
 export type ImagePresentation = {
@@ -80,7 +86,10 @@ export function presentGeneratedImage(
       variantIndex: input.variantIndex,
       revisionIndex: input.revisionIndex,
       prompt: input.prompt,
+      finalPrompt: input.finalPrompt,
       messageRef: input.messageRef,
+      continuity: input.continuity,
+      referenceKinds: input.referenceKinds,
     });
     if (!placement) {
       // An artifact without a renderable inline owner is not useful and would

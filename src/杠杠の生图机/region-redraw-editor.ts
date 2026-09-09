@@ -1,7 +1,9 @@
 export type RegionRedrawSelection = {
   prompt: string;
   markedImage: string;
-  region: { x: number; y: number; width: number; height: number };
+  region: { x: number; y: number; width: number; height: number } | null;
+  /** When true, submit the original image and prompt without a brush mask. */
+  wholeImage?: boolean;
 };
 
 export type RegionBounds = Readonly<{ minX: number; minY: number; maxX: number; maxY: number }>;
@@ -41,8 +43,8 @@ export function normalizeRegionBounds(
   };
 }
 
-export function canConfirmRegionRedraw(prompt: string, bounds: RegionBounds | null): boolean {
-  return prompt.trim().length > 0 && bounds !== null;
+export function canConfirmRegionRedraw(prompt: string, bounds: RegionBounds | null, wholeImage = false): boolean {
+  return prompt.trim().length > 0 && (wholeImage || bounds !== null);
 }
 
 type Stroke = Readonly<{ points: ReadonlyArray<Readonly<{ x: number; y: number }>>; radius: number }>;
@@ -147,6 +149,14 @@ export async function openRegionRedrawEditor(input: {
     clear.type = 'button';
     clear.disabled = true;
     controls.append(brushLabel, undo, clear);
+    const modeLabel = create('label', 'story-image-region-editor__mode-label');
+    const wholeImageToggle = create('input', 'story-image-region-editor__mode-toggle');
+    wholeImageToggle.type = 'checkbox';
+    wholeImageToggle.checked = true;
+    wholeImageToggle.setAttribute('aria-label', '无需画笔');
+    const modeText = create('span', '', '无需画笔');
+    const modeHint = create('span', 'story-image-region-editor__mode-hint', '整图按提示词修改');
+    modeLabel.append(wholeImageToggle, modeText, modeHint);
     const promptLabel = create('label', 'story-image-region-editor__prompt-label', '这个区域要改成什么？');
     const prompt = create('textarea', 'story-image-region-editor__prompt');
     prompt.rows = 3;
@@ -158,11 +168,15 @@ export async function openRegionRedrawEditor(input: {
     const actions = create('div', 'story-image-region-editor__footer');
     const cancel = create('button', 'story-image-region-editor__button', '取消');
     cancel.type = 'button';
-    const confirm = create('button', 'story-image-region-editor__button story-image-region-editor__button--primary', '确认重绘');
+    const confirm = create(
+      'button',
+      'story-image-region-editor__button story-image-region-editor__button--primary',
+      '确认重绘',
+    );
     confirm.type = 'button';
     confirm.disabled = true;
     actions.append(cancel, confirm);
-    dialog.append(title, hint, stage, controls, promptLabel, error, actions);
+    dialog.append(title, hint, stage, controls, modeLabel, promptLabel, error, actions);
     overlay.append(dialog);
     mountTarget.append(overlay);
 
@@ -183,7 +197,16 @@ export async function openRegionRedrawEditor(input: {
         null,
       );
     const updateConfirm = (): void => {
-      confirm.disabled = !loaded || !canConfirmRegionRedraw(prompt.value, bounds());
+      confirm.disabled = !loaded || !canConfirmRegionRedraw(prompt.value, bounds(), wholeImageToggle.checked);
+    };
+    const updateWholeImageMode = (): void => {
+      const wholeImage = wholeImageToggle.checked;
+      controls.hidden = wholeImage;
+      canvas.style.pointerEvents = wholeImage ? 'none' : '';
+      canvas.tabIndex = wholeImage ? -1 : 0;
+      canvas.setAttribute('aria-disabled', String(wholeImage));
+      updateConfirm();
+      if (!wholeImage) canvas.focus();
     };
     const draw = (): void => {
       if (!loaded) return;
@@ -241,7 +264,7 @@ export async function openRegionRedrawEditor(input: {
     canvas.addEventListener(
       'pointerdown',
       event => {
-        if (!loaded || activePointerId !== null) return;
+        if (!loaded || wholeImageToggle.checked || activePointerId !== null) return;
         event.preventDefault();
         activePointerId = event.pointerId;
         canvas.setPointerCapture(event.pointerId);
@@ -266,6 +289,7 @@ export async function openRegionRedrawEditor(input: {
     canvas.addEventListener('pointerup', endStroke, { signal });
     canvas.addEventListener('pointercancel', endStroke, { signal });
     prompt.addEventListener('input', updateConfirm, { signal });
+    wholeImageToggle.addEventListener('change', updateWholeImageMode, { signal });
     undo.addEventListener(
       'click',
       () => {
@@ -295,9 +319,14 @@ export async function openRegionRedrawEditor(input: {
       'click',
       () => {
         const region = normalizeRegionBounds(bounds(), canvas.width, canvas.height);
-        if (!loaded || !region || !prompt.value.trim()) return;
+        if (!loaded || !canConfirmRegionRedraw(prompt.value, bounds(), wholeImageToggle.checked)) return;
         try {
-          finish({ prompt: prompt.value.trim(), markedImage: canvas.toDataURL('image/png'), region });
+          finish({
+            prompt: prompt.value.trim(),
+            markedImage: wholeImageToggle.checked ? '' : canvas.toDataURL('image/png'),
+            region: wholeImageToggle.checked ? null : region,
+            wholeImage: wholeImageToggle.checked,
+          });
         } catch {
           error.textContent = '无法导出标记图，请检查原图访问权限后重试。';
         }
@@ -316,7 +345,7 @@ export async function openRegionRedrawEditor(input: {
         canvas.height = result.image.naturalHeight;
         canvas.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
         draw();
-        canvas.focus();
+        updateWholeImageMode();
       })
       .catch(loadError => {
         if (settled) return;

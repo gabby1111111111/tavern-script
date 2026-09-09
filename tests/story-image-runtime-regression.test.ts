@@ -1,6 +1,7 @@
 import * as messageRenderer from '../src/杠杠の生图机/message-renderer';
 import * as promptEditor from '../src/杠杠の生图机/prompt-editor';
 import * as promptProcessor from '../src/杠杠の生图机/prompt-processor';
+import * as referenceResolution from '../src/杠杠の生图机/reference-resolution';
 import {
   buildPromptEditorFinalPrompt,
   describePromptEditorAvatarReferences,
@@ -70,7 +71,7 @@ function submitPromptEdit(
   return onEditPrompt(placement, onSubmitted);
 }
 
-function installRuntimeMocks() {
+function installRuntimeMocks(trackPendingHosts = false) {
   const globals = globalThis as unknown as TestGlobals;
   const previous = new Map<string, unknown>();
   const keys = [
@@ -109,7 +110,12 @@ function installRuntimeMocks() {
   };
   const chat = [message];
   const renderCalls: RenderCall[] = [];
+  const pendingHosts = new Set<string>();
+  const injections: Array<Array<{ content: string }>> = [];
   let requestCount = 0;
+  let failPersonaReference = false;
+  let referenceReadCount = 0;
+  const imagePosts: Array<{ url: string; init: RequestInit }> = [];
   let holdNextRequest = false;
   let releaseResponse: (() => void) | null = null;
   let lastRequestSignal: AbortSignal | null = null;
@@ -121,7 +127,30 @@ function installRuntimeMocks() {
   let releasePromptProcessing: (() => void) | null = null;
   let lastPromptEditorInput: Parameters<typeof promptEditor.openImagePromptEditor>[0] | null = null;
 
-  const renderer = messageRenderer as unknown as { renderMessagePlacements: RenderMessagePlacements };
+  const renderer = messageRenderer as unknown as {
+    renderMessagePlacements: RenderMessagePlacements;
+    renderImageTask: typeof messageRenderer.renderImageTask;
+    removeRenderedTaskHost: typeof messageRenderer.removeRenderedTaskHost;
+    clearRenderedHosts: typeof messageRenderer.clearRenderedHosts;
+  };
+  const originalRenderTask = renderer.renderImageTask;
+  const originalRemoveTask = renderer.removeRenderedTaskHost;
+  const originalClearHosts = renderer.clearRenderedHosts;
+  if (trackPendingHosts) {
+    const taskKey = (task: Parameters<typeof messageRenderer.renderImageTask>[0]): string =>
+      `${task.chatId}:${task.messageId}:${task.swipeId}:${task.imageIndex}`;
+    renderer.renderImageTask = task => {
+      pendingHosts.add(taskKey(task));
+      return true;
+    };
+    renderer.removeRenderedTaskHost = task => {
+      pendingHosts.delete(taskKey(task));
+    };
+    renderer.clearRenderedHosts = () => {
+      pendingHosts.clear();
+      originalClearHosts();
+    };
+  }
   const previousRenderMessagePlacements = renderer.renderMessagePlacements;
   const promptEditorModule = promptEditor as unknown as {
     openImagePromptEditor: typeof promptEditor.openImagePromptEditor;
@@ -139,10 +168,31 @@ function installRuntimeMocks() {
   promptEditorModule.openImagePromptEditor = input => {
     lastPromptEditorInput = input;
     lastPromptEditorSignal = input.signal ?? null;
-    const result = { prompt: '  revised\nprompt  ', outputPreset: { ...input.outputPreset } };
-    if (!holdPromptEditor) return Promise.resolve(result);
-    return new Promise<typeof result | null>(resolve => {
-      releasePromptEditor = () => resolve(result);
+    const resultPromise = (async () => {
+      const selection = input.referenceSelection;
+      const shouldPrepare = Boolean(
+        input.prepareReferenceSources &&
+        selection &&
+        (selection.useAvatarReferences || selection.usePreviousStoryImage),
+      );
+      const preparedSources = shouldPrepare
+        ? await input.prepareReferenceSources!(selection!, input.signal ?? new AbortController().signal)
+        : input.referenceSources
+          ? promptEditor.selectPromptEditorReferenceSources(input.referenceSources, input.referenceSelection)
+          : undefined;
+      if (preparedSources && input.referenceSources) input.referenceSources = preparedSources;
+      return {
+        prompt: 'final expanded\nprompt',
+        scenePrompt: '  revised\nprompt  ',
+        referenceSources: preparedSources,
+        outputPreset: { ...input.outputPreset },
+      };
+    })();
+    if (!holdPromptEditor) return resultPromise;
+    return new Promise<Awaited<typeof resultPromise> | null>((resolve, reject) => {
+      releasePromptEditor = () => {
+        void resultPromise.then(resolve, reject);
+      };
     });
   };
   promptProcessorModule.processDrawingPrompt = (...args) => {
@@ -166,8 +216,8 @@ function installRuntimeMocks() {
         ],
       }),
       {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
       },
     );
 
@@ -186,9 +236,7 @@ function installRuntimeMocks() {
   globals.getPersonaAvatarPath = () => '/avatars/user.png';
   globals.getCharacter = async () => ({ avatar: 'character.png' });
   globals.getLastMessageId = () => {
-    const chat = (
-      globals.SillyTavern as { chat?: Array<{ swipes?: unknown[]; swipe_id?: number }> }
-    ).chat ?? [];
+    const chat = (globals.SillyTavern as { chat?: Array<{ swipes?: unknown[]; swipe_id?: number }> }).chat ?? [];
     for (let index = chat.length - 1; index >= 0; index -= 1) {
       const candidate = chat[index];
       if (
@@ -202,7 +250,10 @@ function installRuntimeMocks() {
     }
     return -1;
   };
-  globals.injectPrompts = () => ({ uninject: () => undefined });
+  globals.injectPrompts = (prompts: Array<{ content: string }>) => {
+    injections.push(prompts);
+    return { uninject: () => undefined };
+  };
   globals.uninjectPrompts = () => undefined;
   globals.setChatMessages = () => Promise.resolve();
   globals.toastr = { error: () => undefined, info: () => undefined, warning: () => undefined };
@@ -217,6 +268,14 @@ function installRuntimeMocks() {
     };
   };
   globals.fetch = (_input: unknown, init?: unknown) => {
+    const request = init as RequestInit | undefined;
+    if (request?.method === 'GET') {
+      referenceReadCount += 1;
+      if (failPersonaReference && String(_input).includes('/avatars/user.png'))
+        return Promise.resolve(new Response('', { status: 404 }));
+      return Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } }));
+    }
+    imagePosts.push({ url: String(_input), init: request ?? {} });
     requestCount += 1;
     lastRequestSignal = (init as RequestInit | undefined)?.signal ?? null;
     if (!holdNextRequest) return Promise.resolve(response());
@@ -234,6 +293,9 @@ function installRuntimeMocks() {
 
   const restore = (): void => {
     renderer.renderMessagePlacements = previousRenderMessagePlacements;
+    renderer.renderImageTask = originalRenderTask;
+    renderer.removeRenderedTaskHost = originalRemoveTask;
+    renderer.clearRenderedHosts = originalClearHosts;
     promptEditorModule.openImagePromptEditor = previousOpenImagePromptEditor;
     promptProcessorModule.processDrawingPrompt = previousProcessDrawingPrompt;
     previous.forEach((value, key) => {
@@ -247,6 +309,15 @@ function installRuntimeMocks() {
     chat,
     emit,
     renderCalls,
+    pendingHosts,
+    imagePosts,
+    failPersonaReference: () => {
+      failPersonaReference = true;
+    },
+    get referenceReadCount() {
+      return referenceReadCount;
+    },
+    injections,
     holdNextRequest: () => {
       holdNextRequest = true;
     },
@@ -354,7 +425,9 @@ async function startRuntimeWithInitialPlacement(
     () => mocks.renderCalls.some(call => call.messageId === 0 && call.placements.length === 1),
     '正常生成应通过真实 runtime 链路建立初始 placement',
   );
-  const renderCall = [...mocks.renderCalls].reverse().find(call => call.messageId === 0 && call.placements.length === 1);
+  const renderCall = [...mocks.renderCalls]
+    .reverse()
+    .find(call => call.messageId === 0 && call.placements.length === 1);
   const placement = renderCall?.placements[0];
   const handlers = renderCall?.handlers;
   assert(placement && handlers, '初始 placement 必须携带真实重绘 handlers');
@@ -420,28 +493,60 @@ async function testPromptEditorUsesPresetAndAvatarSnapshot(): Promise<void> {
     const initialRequestCount = mocks.requestCount;
     const redraw = Promise.resolve(submitPromptEdit(handlers, placement, () => undefined));
     await waitFor(() => mocks.lastPromptEditorInput !== null, '头像读取后应打开提示词弹窗');
-    await waitFor(() => mocks.processedPromptInputs.length === 2, '确认后应加工一次重绘场景描述');
     await waitFor(() => runtime.recentImages.value.length === 2, '确认后应沿同一快照请求图片');
     await redraw;
     assert(mocks.requestCount > initialRequestCount, '确认重绘后应发起图片请求');
 
     const editorInput = mocks.lastPromptEditorInput;
     assert(editorInput?.outputPreset.name === 'output', '弹窗应显示当前出图预设名称');
-    assert(editorInput?.outputPreset.templateText === '{{xx}}', '弹窗应显示当前出图模板');
+    assert(editorInput?.outputPreset.templateText === '{{xx}}', '提交快照仍保留当前模板配置');
     assert(editorInput?.avatarReferences.enabled === true, '弹窗头像状态应遵循当前出图预设配置');
+    assert(editorInput?.referenceSelection?.known === true, '弹窗参考默认值应来自当前图片的实际记录');
+    assert(editorInput?.referenceSelection?.useAvatarReferences === true, '当前图片使用头像时默认勾选头像参考');
     assert(
-      editorInput?.avatarReferences.availableSources.join(',') === 'persona,character',
-      '弹窗头像状态应区分并显示当前用户和角色头像',
+      editorInput?.referenceSources?.map(source => source.kind).join(',') === 'user-avatar,character-avatar',
+      '弹窗应保留当前图片实际使用的头像来源候选',
     );
 
-    const processed = mocks.processedPromptInputs.at(-1);
-    assert(processed?.[0].useAvatarReferences === true, '请求应复用弹窗确认时的头像配置');
-    assert(processed?.[1] === 'revised\nprompt', '请求应接收原始场景描述而不是最终模板文本');
-    const references = await processed?.[2]?.readReferences?.();
-    assert(references?.references.length === 2, '请求应复用弹窗读取到的两个头像快照');
+    const posted = mocks.imagePosts.at(-1);
+    assert(posted, '确认后应发起一次实际图片请求');
+    const postedPrompt =
+      posted.init.body instanceof FormData
+        ? String(posted.init.body.get('prompt'))
+        : JSON.parse(String(posted.init.body)).prompt;
+    assert(postedPrompt === 'final expanded\nprompt', '请求应发送用户确认的最终提示词原文');
+    assert(mocks.processedPromptInputs.length === 1, '最终提示词已展开后，确认重绘不得再次加工或套用出图模板');
     assert(settings.outputPresets[0].templateText === '{{xx}}', '临时重绘配置不得修改全局出图预设');
     runtime.stop();
   } finally {
+    mocks.restore();
+  }
+}
+
+async function testPlacementKeepsFinalPromptOnReopen(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement, handlers } = await startRuntimeWithInitialPlacement(mocks, testSettings(true));
+    await submitPromptEdit(handlers, placement, () => undefined);
+    assert(mocks.referenceReadCount === 0, '未选参考图时打开纯文本编辑不得读取头像或图片');
+    const revisedRender = [...mocks.renderCalls]
+      .reverse()
+      .find(call => call.placements.some(item => item.target.messageId === 0 && item.revisionIndex === 1));
+    const revised = revisedRender?.placements.find(item => item.revisionIndex === 1);
+    assert(revised, '手动重绘应创建新的 revision placement');
+    assert(revised.prompt === 'revised\nprompt', '场景提示词应单独保留为镜头文字');
+    assert(revised.finalPrompt === 'final expanded\nprompt', 'revision 应保留最终 API 提示词');
+    mocks.holdPromptEditor();
+    const reopening = submitPromptEdit(revisedRender!.handlers!, revised, () => undefined);
+    await waitFor(
+      () => mocks.lastPromptEditorInput?.finalPrompt === 'final expanded\nprompt',
+      '再次打开编辑器应优先显示保存的最终 API 提示词',
+    );
+    mocks.releasePromptEditor();
+    await reopening;
+    runtime.stop();
+  } finally {
+    mocks.releasePromptEditor();
     mocks.restore();
   }
 }
@@ -478,9 +583,9 @@ async function testSwipeTaskSurvivesDisplaySwitches(): Promise<void> {
     await waitFor(() => runtime.recentImages.value.length === 2, '切走期间完成的结果应进入最近生成');
     assert(mocks.requestCount === initialRequestCount + 1, '切换 Swipe 不得重试或新增图片请求');
 
-    const completedRender = [...mocks.renderCalls].reverse().find(call =>
-      call.placements.some(item => item.target.messageId === 0 && item.target.swipeId === 1),
-    );
+    const completedRender = [...mocks.renderCalls]
+      .reverse()
+      .find(call => call.placements.some(item => item.target.messageId === 0 && item.target.swipeId === 1));
     assert(completedRender, '完成结果必须保留原 Swipe target placement');
 
     await new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -544,8 +649,7 @@ async function testDeferredTaskSwipeDeletionMigratesRetentionScope(): Promise<vo
     await mocks.emit(eventNames.GENERATION_STARTED, 'swipe', null, false);
     await mocks.emit(eventNames.MESSAGE_RECEIVED, 0, 'swipe');
     await waitFor(
-      () =>
-        runtime.recentImages.value.filter(image => image.messageId === 0 && image.swipeId === 1).length === 2,
+      () => runtime.recentImages.value.filter(image => image.messageId === 0 && image.swipeId === 1).length === 2,
       '旧 deferred 状态不得截断重新生成的 Swipe1 结果',
     );
     runtime.stop();
@@ -663,9 +767,7 @@ async function testPinPrunesOnlyItsImagePositionAndBlocksLateRedraw(): Promise<v
     const revisedRender = [...mocks.renderCalls]
       .reverse()
       .find(call => call.placements.some(item => item.target.imageIndex === 0 && item.revisionIndex === 1));
-    const revised = revisedRender?.placements.find(
-      item => item.target.imageIndex === 0 && item.revisionIndex === 1,
-    );
+    const revised = revisedRender?.placements.find(item => item.target.imageIndex === 0 && item.revisionIndex === 1);
     assert(revised, '固定测试需要选择第一个位置的新 revision');
 
     await Promise.resolve(handlers.onPin?.(revised));
@@ -786,10 +888,7 @@ async function testNonFloorAssistantEventTypesDoNotAdvanceCleanup(): Promise<voi
       swipe_id: 0,
     });
     await mocks.emit(eventNames.MESSAGE_RECEIVED, 1, 'swipe');
-    assert(
-      runtime.recentImages.value.length === 2,
-      'MESSAGE_RECEIVED 的 swipe 类型不得被当作新正文楼层清理上一楼版本',
-    );
+    assert(runtime.recentImages.value.length === 2, 'MESSAGE_RECEIVED 的 swipe 类型不得被当作新正文楼层清理上一楼版本');
 
     mocks.chat.push({
       message_id: 2,
@@ -879,9 +978,9 @@ async function testLatestManualPinWinsAcrossSwipesOnAdvance(): Promise<void> {
     await mocks.emit(eventNames.MESSAGE_RECEIVED, 0, 'swipe');
     await waitFor(() => runtime.recentImages.value.length === 2, 'Swipe 1 图片应先完成');
 
-    const swipeOneRender = [...mocks.renderCalls].reverse().find(call =>
-      call.placements.some(item => item.target.swipeId === 1),
-    );
+    const swipeOneRender = [...mocks.renderCalls]
+      .reverse()
+      .find(call => call.placements.some(item => item.target.swipeId === 1));
     const swipeOne = swipeOneRender?.placements.find(item => item.target.swipeId === 1);
     assert(swipeOneRender && swipeOne && swipeOneRender.handlers, '跨 Swipe 固定需要 Swipe 1 placement');
     await Promise.resolve(swipeOneRender.handlers.onPin?.(swipeOne));
@@ -939,9 +1038,9 @@ async function testMessageDeletionReconcilesByRawIdentity(): Promise<void> {
     await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
     await mocks.emit(eventNames.MESSAGE_RECEIVED, 2, 'normal');
     await waitFor(() => runtime.recentImages.value.length === 2, '最后楼层图片应先完成');
-    const lastRender = [...mocks.renderCalls].reverse().find(call =>
-      call.placements.some(item => item.target.messageId === 2),
-    );
+    const lastRender = [...mocks.renderCalls]
+      .reverse()
+      .find(call => call.placements.some(item => item.target.messageId === 2));
     const lastPlacement = lastRender?.placements.find(item => item.target.messageId === 2);
     assert(lastRender && lastPlacement && lastRender.handlers, '删除中间楼回归需要固定最后楼层图片');
     await Promise.resolve(lastRender.handlers.onPin?.(lastPlacement));
@@ -986,27 +1085,25 @@ async function testNewTailDoesNotCancelGiftTask(): Promise<void> {
   }
 }
 
-async function testDisabledDuringPromptProcessingSkipsRequest(): Promise<void> {
+async function testDisabledDuringManualRequestSkipsLateResult(): Promise<void> {
   const mocks = installRuntimeMocks();
   try {
     const { runtime, placement, handlers } = await startRuntimeWithInitialPlacement(mocks);
     assert(handlers.onEditPrompt, '真实 placement 必须提供提示词重绘入口');
-    mocks.holdNextPromptProcessing();
+    mocks.holdNextRequest();
     let submitted = false;
     const redraw = Promise.resolve(submitPromptEdit(handlers, placement, () => (submitted = true)));
-    await waitFor(
-      () => submitted && mocks.processingStarted,
-      '手动重绘应先确认提交并进入提示词加工等待',
-    );
+    await waitFor(() => submitted && mocks.requestCount === 2, '手动重绘应先确认提交并进入图片请求等待');
     runtime.updateSettings(testSettings(false));
-    mocks.releasePromptProcessing();
+    assert(mocks.lastRequestSignal?.aborted === true, '关闭开关应取消进行中的手动图片请求');
+    mocks.releaseResponse();
     await redraw;
 
-    assert(mocks.requestCount === 1, '关闭开关后，等待中的提示词加工不得进入图片 API');
+    assert(mocks.requestCount === 2, '关闭开关后不得补发或重试图片 API');
     assert(runtime.recentImages.value.length === 1, '关闭开关不得清除已经存在的旧图片版本');
     runtime.stop();
   } finally {
-    mocks.releasePromptProcessing();
+    mocks.releaseResponse();
     mocks.restore();
   }
 }
@@ -1060,7 +1157,545 @@ async function testSwipeAbortsUnconfirmedPromptEditor(): Promise<void> {
   }
 }
 
+function continuitySettings(id = 'A', enabled = true): StoryImageSettings {
+  const settings = testSettings(true);
+  settings.drawingPresets = [{ id, name: id, instructionText: enabled ? '上一镜头 {{xx_pic}}' : '普通配图' }];
+  settings.currentDrawingPresetId = id;
+  settings.outputPresets[0].templateText = enabled ? '上一镜头 {{xx_pic}}；当前 {{xx}}' : '{{xx}}';
+  settings.outputPresets[0].usePreviousStoryImage = enabled;
+  settings.apiProfiles[0].requestMode = 'json-reference';
+  settings.recentImageLimit = 50;
+  return settings;
+}
+
+async function appendContinuityMessage(mocks: ReturnType<typeof installRuntimeMocks>, text: string): Promise<number> {
+  const messageId = mocks.chat.length;
+  await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+  mocks.chat.push({ message_id: messageId, role: 'assistant', swipe_id: 0, message: text });
+  await mocks.emit(eventNames.MESSAGE_RECEIVED, messageId, 'normal');
+  return messageId;
+}
+
+async function testContinuityCombinationAndSharedSnapshot(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    assert(placement.continuity?.drawingPresetId === 'A', '初始图片记录生成开始的组合');
+    runtime.updateSettings(continuitySettings('B'));
+    await appendContinuityMessage(mocks, '<pic prompt="B1">');
+    await waitFor(() => runtime.audit.generation.status === 'success', 'B1 完成');
+    assert(mocks.processedPromptInputs.at(-1)?.[2]?.previousShotPrompt === '', 'B1 不得引用 A1');
+    await appendContinuityMessage(mocks, '<pic prompt="B2">');
+    await waitFor(() => runtime.audit.generation.status === 'success', 'B2 完成');
+    assert(mocks.processedPromptInputs.at(-1)?.[2]?.previousShotPrompt === 'B1', 'B2 必须延续 B1');
+    runtime.updateSettings(continuitySettings('A'));
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    assert(mocks.injections.at(-1)?.[0].content.includes('initial prompt'), '正文注入引用 A1 镜头');
+    const lockedSource = runtime.audit.continuity.source?.placementId;
+    runtime.updateSettings(continuitySettings('C'));
+    const messageId = mocks.chat.length;
+    mocks.chat.push({
+      message_id: messageId,
+      role: 'assistant',
+      swipe_id: 0,
+      message: '<pic prompt="A2 first">\n<pic prompt="A2 second">',
+    });
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, messageId, 'normal');
+    await waitFor(() => runtime.audit.generation.status === 'success', 'A2 双图完成');
+    const pair = mocks.processedPromptInputs.slice(-2);
+    assert(
+      pair.every(input => input[2]?.previousShotPrompt === 'initial prompt'),
+      '同楼两任务共用 A1 镜头快照',
+    );
+    assert(pair[0][2]?.previousStoryImage === pair[1][2]?.previousStoryImage, '同楼两任务共用同一参考图');
+    const latest = mocks.renderCalls.at(-1)?.placements.filter(item => item.target.messageId === messageId) ?? [];
+    assert(
+      latest.length === 2 && latest.every(item => item.continuity?.drawingPresetId === 'A'),
+      '生成中切预设不改变图片组合',
+    );
+    assert(lockedSource === placement.id && mocks.requestCount === 5, 'A2 回到 A1，且没有额外模型调用');
+    assert(
+      runtime.audit.continuity.reference_count === 1 &&
+        runtime.audit.continuity.reference_kinds[0] === 'previous-story-image',
+      '审计只记录实际引用种类和数量',
+    );
+    await waitFor(() => runtime.audit.continuity.status === 'released', '双任务结束释放快照');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testContinuityDeletionDuringRequest(enabled: boolean): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement, handlers } = await startRuntimeWithInitialPlacement(
+      mocks,
+      continuitySettings('A', enabled),
+    );
+    mocks.holdNextRequest();
+    await appendContinuityMessage(mocks, '<pic prompt="next">');
+    await waitFor(() => mocks.requestCount === 2, '下一楼请求已经发出');
+    const signal = mocks.lastRequestSignal;
+    await handlers.onDelete?.(placement);
+    assert(signal?.aborted === enabled, '只有实际消费连续性时源删除才取消请求');
+    mocks.releaseResponse();
+    await waitFor(() => runtime.status.value !== 'generating', '迟到响应结算');
+    const latest = mocks.renderCalls.at(-1)?.placements.filter(item => item.target.messageId === 1) ?? [];
+    assert(enabled ? latest.length === 0 : latest.length === 1, '失效快照丢弃迟到结果，普通生图不受影响');
+    assert(mocks.requestCount === 2, '删除不得补跑或自动重试');
+    runtime.stop();
+  } finally {
+    mocks.releaseResponse();
+    mocks.restore();
+  }
+}
+
+async function testContinuityManualPromptKeepsCombo(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    await appendContinuityMessage(mocks, '<pic prompt="second scene">');
+    await waitFor(() => runtime.audit.generation.status === 'success', '第二楼完成');
+    const latest = mocks.renderCalls.at(-1);
+    const placement = latest?.placements.find(item => item.target.messageId === 1);
+    assert(placement && latest?.handlers, '第二楼有编辑入口');
+    runtime.updateSettings(continuitySettings('B'));
+    await submitPromptEdit(latest.handlers, placement, () => undefined);
+    const edited = mocks.renderCalls
+      .at(-1)
+      ?.placements.find(item => item.target.messageId === 1 && item.revisionIndex === 1);
+    assert(edited?.continuity?.drawingPresetId === 'A', '手动改提示词保留原图组合');
+    assert(edited?.continuity?.shotPrompt === 'revised\nprompt', '手动改提示词更新镜头描述');
+    assert(mocks.lastPromptEditorInput?.previousShotPrompt === 'initial prompt', '编辑器预览使用原图组合前镜头');
+    assert(
+      mocks.lastPromptEditorInput?.referenceSelection?.known === true &&
+        mocks.lastPromptEditorInput.referenceSelection.useAvatarReferences === false &&
+        mocks.lastPromptEditorInput.referenceSelection.usePreviousStoryImage === true,
+      '编辑器参考默认值应来自当前版本实际使用的上一镜头图',
+    );
+    const postedBody = JSON.parse(String(mocks.imagePosts.at(-1)?.init.body));
+    const previewSources = mocks.lastPromptEditorInput?.referenceSources ?? [];
+    const previewValues = promptEditor
+      .selectPromptEditorReferenceSources(previewSources, mocks.lastPromptEditorInput?.referenceSelection)
+      .map(source => source.value);
+    const postedValues = Array.isArray(postedBody.images) ? postedBody.images : [];
+    assert(JSON.stringify(postedValues) === JSON.stringify(previewValues), '编辑器预览和执行使用同一参考快照');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testGenerationEndedBeforeMessageReceivedUsesOneReply(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const runtime = createStoryImageRuntime();
+    runtime.updateSettings(testSettings(true));
+    runtime.start();
+
+    mocks.chat.push({ message_id: 1, role: 'user', message: 'scene', swipe_id: 0 });
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    mocks.chat.push({
+      message_id: 2,
+      role: 'assistant',
+      message: '<content>正文\n<pic prompt="ended first">\n</content>',
+      swipe_id: 0,
+    });
+
+    // SillyTavern emits GENERATION_ENDED with chat.length before MESSAGE_RECEIVED.
+    await mocks.emit(eventNames.GENERATION_ENDED, 3);
+    await waitFor(() => mocks.requestCount === 1, '结束事件先到时仍应消费最终助手消息并只请求一次');
+    await waitFor(() => runtime.audit.generation.status === 'success', '结束事件先到时应收束 generation 审计');
+
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, 2, 'normal');
+    assert(mocks.requestCount === 1, '后续 MESSAGE_RECEIVED 不得重复启动图片任务');
+    assert(runtime.audit.markers.valid_count === 1, '结束事件兜底应记录原始正文标记');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testContinuityLifecycleRelease(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    await waitFor(() => runtime.audit.continuity.active_snapshots === 0, '初始任务释放快照');
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    assert(runtime.audit.continuity.active_snapshots === 1, '正文开始同步持有快照');
+    await mocks.emit(eventNames.GENERATION_ENDED, 0);
+    assert(Number(runtime.audit.continuity.active_snapshots) === 0, '无 MESSAGE_RECEIVED 的结束也必须释放');
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    await mocks.emit(eventNames.GENERATION_STOPPED);
+    assert(Number(runtime.audit.continuity.active_snapshots) === 0, '停止正文释放快照');
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    mocks.message.message = '没有生图标记';
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, 0, 'normal');
+    await waitFor(() => runtime.audit.continuity.active_snapshots === 0, '无标记正常结束释放快照');
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    runtime.updateSettings({ ...continuitySettings(), enabled: false });
+    assert(Number(runtime.audit.continuity.active_snapshots) === 0, '关闭脚本释放快照');
+    runtime.updateSettings(continuitySettings());
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    await mocks.emit(eventNames.CHAT_CHANGED, 'another-chat');
+    assert(Number(runtime.audit.continuity.active_snapshots) === 0, '切聊天释放快照');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testContinuityGiftAndPendingFallback(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    const giftSettings = continuitySettings();
+    giftSettings.displaySettings.displayMode = 'gift';
+    runtime.updateSettings(giftSettings);
+    await appendContinuityMessage(mocks, '<pic prompt="gift scene">');
+    await waitFor(() => runtime.audit.generation.status === 'success', '礼物完成');
+    assert(mocks.processedPromptInputs.at(-1)?.[2]?.previousShotPrompt === undefined, '礼物不消费镜头文字');
+    assert(mocks.processedPromptInputs.at(-1)?.[2]?.previousStoryImage === undefined, '礼物不消费连续图');
+    runtime.updateSettings(continuitySettings());
+    mocks.holdNextRequest();
+    await appendContinuityMessage(mocks, '<pic prompt="slow inline">');
+    await waitFor(() => mocks.requestCount === 3, '中间楼仍请求中');
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    assert(runtime.audit.continuity.source?.placementId === placement.id, '礼物和未完成图片不抢占已有前镜头');
+    const messageId = mocks.chat.length;
+    mocks.chat.push({
+      message_id: messageId,
+      role: 'assistant',
+      swipe_id: 0,
+      message: '<pic prompt="without waiting">',
+    });
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, messageId, 'normal');
+    await waitFor(() => mocks.requestCount === 4, '新楼不等待上一楼图片');
+    assert(mocks.processedPromptInputs.at(-1)?.[2]?.previousShotPrompt === 'initial prompt', '新楼沿用更早有效镜头');
+    mocks.releaseResponse();
+    await waitFor(() => runtime.audit.continuity.active_snapshots === 0, '两楼完成都释放');
+    assert(mocks.requestCount === 4, '迟到图不补跑新楼');
+    runtime.stop();
+  } finally {
+    mocks.releaseResponse();
+    mocks.restore();
+  }
+}
+
+async function testContinuitySelectedSwipeAndMiddleRevision(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  const renderer = messageRenderer as unknown as {
+    getSelectedImagePlacements: typeof messageRenderer.getSelectedImagePlacements;
+  };
+  const originalSelect = renderer.getSelectedImagePlacements;
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    mocks.message.swipes = ['original'];
+    mocks.message.swipe_id = 1;
+    mocks.message.message = '<pic prompt="swipe one">';
+    await mocks.emit(eventNames.MESSAGE_SWIPED, 0);
+    await mocks.emit(eventNames.GENERATION_STARTED, 'swipe', null, false);
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, 0, 'swipe');
+    await waitFor(() => runtime.audit.generation.status === 'success', 'Swipe 1 完成');
+    const first = mocks.renderCalls.at(-1)?.placements.find(item => item.target.swipeId === 1);
+    const handlers = mocks.renderCalls.at(-1)?.handlers;
+    assert(first && handlers, 'Swipe 1 重绘入口');
+    await submitPromptEdit(handlers, first, () => undefined);
+    await submitPromptEdit(handlers, first, () => undefined);
+    const middle = mocks.renderCalls
+      .at(-1)
+      ?.placements.find(item => item.target.swipeId === 1 && item.revisionIndex === 1);
+    assert(middle, '两次重绘提供中间版本');
+    // Renderer contract: this is the exact currently displayed selected revision.
+    renderer.getSelectedImagePlacements = placements =>
+      originalSelect(placements).map(item =>
+        item.target.messageId === 0 && item.target.swipeId === 1
+          ? (placements.find(candidate => candidate.id === middle.id) ?? item)
+          : item,
+      );
+    mocks.holdNextRequest();
+    await appendContinuityMessage(mocks, '<pic prompt="next shot">');
+    await waitFor(() => mocks.requestCount === 5, '下一楼 API 已启动');
+    assert(runtime.audit.continuity.source?.placementId === middle.id, '选择当前 Swipe 中间版本而非最新重绘');
+    mocks.message.swipe_id = 0;
+    await mocks.emit(eventNames.MESSAGE_SWIPED, 0);
+    assert(mocks.lastRequestSignal?.aborted === false, '启动后仅切换显示不改变快照');
+    mocks.releaseResponse();
+    await waitFor(() => runtime.audit.generation.status === 'success', '锁定版本成功完成');
+    assert(
+      mocks.processedPromptInputs.at(-1)?.[2]?.previousShotPrompt === middle.continuity?.shotPrompt,
+      '执行镜头文字与中间版本一致',
+    );
+    runtime.stop();
+  } finally {
+    renderer.getSelectedImagePlacements = originalSelect;
+    mocks.releaseResponse();
+    mocks.restore();
+  }
+}
+
+async function testContinuityRetentionInvalidatesLockedSource(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement, handlers } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    await handlers.onPin?.(placement);
+    mocks.message.swipes = ['pinned'];
+    mocks.message.swipe_id = 1;
+    mocks.message.message = '<pic prompt="active swipe">';
+    await mocks.emit(eventNames.MESSAGE_SWIPED, 0);
+    await mocks.emit(eventNames.GENERATION_STARTED, 'swipe', null, false);
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, 0, 'swipe');
+    await waitFor(() => runtime.audit.generation.status === 'success', '当前 Swipe 图完成');
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    assert(runtime.audit.continuity.source?.swipeId === 1, '锁定当前有效 Swipe，不引用其他分支固定图');
+    mocks.chat.push({ message_id: 1, role: 'assistant', swipe_id: 0, message: '<pic prompt="new shot">' });
+    await mocks.emit(eventNames.MESSAGE_RECEIVED, 1, 'normal');
+    assert(runtime.audit.continuity.status === 'invalidated', '新楼清理删掉源时必须明确作废快照');
+    assert(
+      runtime.audit.continuity.active_snapshots === 0 && mocks.requestCount === 2,
+      '作废后释放资源，不切换参考也不补跑',
+    );
+    const retained = mocks.renderCalls.at(-1)?.placements ?? [];
+    assert(
+      retained.some(item => item.id === placement.id),
+      '保持 v0.3.1 的跨 Swipe 固定保留语义',
+    );
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testContinuityCapacityEvictionRollsBackPresentation(manual: boolean): Promise<void> {
+  const mocks = installRuntimeMocks(true);
+  try {
+    // Seed the existing tail before startup so this fixture tests capacity eviction,
+    // independently of new-tail retention cleanup.
+    mocks.chat.push({ message_id: 1, role: 'assistant', swipe_id: 0, message: '' });
+    const { runtime, placement: source } = await startRuntimeWithInitialPlacement(
+      mocks,
+      continuitySettings('A', false),
+    );
+    for (let index = 0; index < 49; index += 1) {
+      mocks.chat[1].message = `<pic prompt="capacity filler ${index}">`;
+      await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+      await mocks.emit(eventNames.MESSAGE_RECEIVED, 1, 'normal');
+      await waitFor(() => runtime.audit.generation.status === 'success', '容量填充任务完成');
+    }
+    assert(runtime.recentImages.value.length === 50, '前镜头与 49 个版本恰好达到缓存上限');
+    const beforeIds = new Set(runtime.recentImages.value.map(image => image.id));
+    runtime.updateSettings(continuitySettings());
+    if (manual) {
+      const lastRender = mocks.renderCalls.at(-1);
+      const target = lastRender?.placements.find(item => item.target.messageId === 1);
+      assert(target && lastRender?.handlers, '容量测试手动编辑入口');
+      await submitPromptEdit(lastRender.handlers, target, () => undefined);
+    } else {
+      mocks.chat[1].message = '<pic prompt="must roll back">';
+      await mocks.emit(eventNames.GENERATION_STARTED, 'swipe', null, false);
+      assert(runtime.audit.continuity.source?.placementId === source.id, 'Swipe 锁定前楼最旧来源');
+      await mocks.emit(eventNames.MESSAGE_RECEIVED, 1, 'swipe');
+    }
+    await waitFor(() => runtime.audit.continuity.active_snapshots === 0, '同步淘汰来源后释放快照');
+    assert(runtime.audit.continuity.source?.placementId === source.id, '普通与手动请求均使用被淘汰前镜头');
+    assert(runtime.audit.continuity.status === 'invalidated', 'present 插入第 51 张时源淘汰明确作废');
+    const expectedRetainedCount = manual ? 50 : 49;
+    assert(
+      Number(runtime.recentImages.value.length) === expectedRetainedCount,
+      manual ? '纯文本手动重绘不应因未使用的上一图被取消' : '源与本轮新结果都被移除',
+    );
+    assert(
+      runtime.audit.cache.artifact_count === expectedRetainedCount &&
+        runtime.audit.cache.placement_count === expectedRetainedCount,
+      '容量处理后缓存审计必须同步实际数量',
+    );
+    if (manual) {
+      assert(
+        runtime.recentImages.value.some(image => !beforeIds.has(image.id)),
+        '纯文本手动重绘应保留本轮新 artifact',
+      );
+    } else {
+      assert(
+        runtime.recentImages.value.every(image => beforeIds.has(image.id)),
+        '自动任务不得保留作废请求的新 artifact',
+      );
+    }
+    assert(mocks.pendingHosts.size === 0, '回滚结束即清除等待占位，不依赖其他 MESSAGE_UPDATED 重绘');
+    assert(runtime.audit.generation.status !== 'running', '容量作废的自动与手动任务均结算 generation 审计');
+    await mocks.emit(eventNames.MESSAGE_UPDATED, 1);
+    const remaining = mocks.renderCalls.at(-1)?.placements ?? [];
+    assert(remaining.length === expectedRetainedCount, '容量处理后的聊天渲染数量应与缓存一致');
+    if (manual) {
+      assert(
+        remaining.some(item => !beforeIds.has(item.artifactId)),
+        '纯文本手动重绘的 placement 应继续显示',
+      );
+    } else {
+      assert(
+        remaining.every(item => beforeIds.has(item.artifactId)),
+        '自动任务渲染不能保留作废请求的新 placement',
+      );
+    }
+    assert(mocks.requestCount === 51, '容量作废不得重试或重新选择来源');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testCancelledManualRevisionSettlesAudit(preserveNewer: boolean): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement: source } = await startRuntimeWithInitialPlacement(mocks, continuitySettings());
+    await appendContinuityMessage(mocks, '<pic prompt="second scene">');
+    await waitFor(() => runtime.audit.generation.status === 'success', '第二楼完成');
+    const rendered = mocks.renderCalls.at(-1);
+    const target = rendered?.placements.find(placement => placement.target.messageId === 1);
+    assert(target && rendered?.handlers, '第二楼编辑入口');
+    mocks.holdNextRequest();
+    const pending = submitPromptEdit(rendered.handlers, target, () => undefined);
+    await waitFor(() => mocks.requestCount === 3, '手动编辑停在图片请求');
+    runtime.removeRecentImage(source.artifactId);
+    let nextGeneration: string | null = null;
+    if (preserveNewer) {
+      await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+      nextGeneration = runtime.audit.generation.id;
+      // A newer generation's error must not be cleared by the old cancellation.
+      runtime.audit.last_error = 'newer synthetic error';
+    }
+    mocks.releaseResponse();
+    await pending;
+    assert(mocks.requestCount === 3, '手动引用失效后不得重试或新增请求');
+    if (preserveNewer) {
+      assert(
+        runtime.audit.generation.id === nextGeneration && runtime.audit.generation.status === 'running',
+        '旧任务取消不能覆盖新 generation',
+      );
+      assert(runtime.audit.last_error === 'newer synthetic error', '旧任务取消不能清理新错误');
+    } else {
+      assert(
+        runtime.audit.generation.status === 'pending' && runtime.audit.generation.id === null,
+        '手动早退必须结算为 cancelled 的 pending 审计',
+      );
+      assert(
+        runtime.audit.continuity.status === 'invalidated' && runtime.audit.continuity.active_snapshots === 0,
+        '失效引用释放并保留审计证据',
+      );
+    }
+    runtime.stop();
+  } finally {
+    mocks.releaseResponse();
+    mocks.restore();
+  }
+}
+
+async function testReferenceFallbackAndEditorFrozenProfile(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const initialSettings = continuitySettings();
+    initialSettings.outputPresets[0].useAvatarReferences = true;
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, initialSettings);
+    const settings = continuitySettings();
+    settings.outputPresets[0].useAvatarReferences = true;
+    settings.outputPresets[0].templateText = '{{reference_sources}}\n{{xx}}';
+    runtime.updateSettings(settings);
+    mocks.failPersonaReference();
+    await appendContinuityMessage(mocks, '<pic prompt="with remaining references">');
+    await waitFor(() => runtime.audit.generation.status === 'success', '头像缺失仍使用可用引用完成');
+    const automaticBody = JSON.parse(String(mocks.imagePosts.at(-1)?.init.body));
+    assert(mocks.requestCount === 2 && automaticBody.images.length === 2, '404 用户头像不阻止唯一图片请求');
+    assert(
+      automaticBody.prompt.includes('图1：角色头像') && automaticBody.prompt.includes('图2：上一镜头参考图'),
+      '实际请求按剩余来源重新编号',
+    );
+    assert(runtime.audit.continuity.reference_count === 2, '审计记录实际引用数');
+    const lastRender = mocks.renderCalls.at(-1);
+    const target = lastRender?.placements.find(item => item.target.messageId === 1);
+    assert(target && lastRender?.handlers, '可编辑第二楼');
+    mocks.holdPromptEditor();
+    const pending = submitPromptEdit(lastRender.handlers, target, () => undefined);
+    await waitFor(
+      () => (mocks.lastPromptEditorInput?.referenceSources?.length ?? 0) === 2,
+      '参考开关确认后应完成实际引用准备',
+    );
+    const readsAtPreview = mocks.referenceReadCount;
+    const previewSources = mocks.lastPromptEditorInput?.referenceSources;
+    assert(
+      previewSources?.map(source => source.kind).join(',') === 'character-avatar,previous-story-image',
+      '编辑器不显示不可用头像',
+    );
+    const changedSettings = continuitySettings();
+    changedSettings.apiProfiles[0].serviceUrl = 'https://changed.test/images/edits';
+    changedSettings.apiProfiles[0].requestMode = 'multipart-edit';
+    runtime.updateSettings(changedSettings);
+    mocks.releasePromptEditor();
+    await pending;
+    assert(
+      runtime.audit.continuity.reference_count === 2 &&
+        runtime.audit.continuity.reference_kinds.join(',') === 'character-avatar,previous-story-image',
+      '手动预览审计记录实际可用来源',
+    );
+    const posted = mocks.imagePosts.at(-1);
+    const postedBody = JSON.parse(String(posted?.init.body));
+    assert(posted?.url === settings.apiProfiles[0].serviceUrl, '编辑确认使用打开时锁定 API 配置');
+    assert(mocks.referenceReadCount === readsAtPreview, '确认后不重读预览来源');
+    assert(
+      JSON.stringify(postedBody.images) === JSON.stringify(previewSources.map(source => source.value)),
+      '预览与实际请求引用完全相同',
+    );
+    assert(Number(mocks.requestCount) === 3, '编辑确认只请求一次生图 API');
+    runtime.stop();
+  } finally {
+    mocks.releasePromptEditor();
+    mocks.restore();
+  }
+}
+
+async function testPromptEditorReferencePreparationErrorIsReported(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  const resolver = referenceResolution as unknown as {
+    materializeReferenceSources: typeof referenceResolution.materializeReferenceSources;
+  };
+  const original = resolver.materializeReferenceSources;
+  try {
+    const settings = continuitySettings();
+    settings.outputPresets[0].useAvatarReferences = true;
+    const { runtime, placement, handlers } = await startRuntimeWithInitialPlacement(mocks, settings);
+    resolver.materializeReferenceSources = async () => {
+      throw new Error('timeout https://private.test/path synthetic-key');
+    };
+    await submitPromptEdit(handlers, placement, () => undefined);
+    assert(mocks.lastPromptEditorInput !== null && mocks.requestCount === 1, '编辑器应先打开且不发起生图请求');
+    assert(
+      runtime.audit.last_error === '参考图准备失败，请稍后再试。' && runtime.status.value === 'error',
+      '预览前失败必须提供有界错误提示',
+    );
+    assert(runtime.audit.continuity.active_snapshots === 0, '预览失败释放快照');
+    runtime.stop();
+  } finally {
+    resolver.materializeReferenceSources = original;
+    mocks.restore();
+  }
+}
+
 void (async () => {
+  await testPromptEditorReferencePreparationErrorIsReported();
+  await testReferenceFallbackAndEditorFrozenProfile();
+  await testPlacementKeepsFinalPromptOnReopen();
+  await testCancelledManualRevisionSettlesAudit(false);
+  await testCancelledManualRevisionSettlesAudit(true);
+  await testContinuityCapacityEvictionRollsBackPresentation(false);
+  await testContinuityCapacityEvictionRollsBackPresentation(true);
+  await testContinuityRetentionInvalidatesLockedSource();
+  await testContinuitySelectedSwipeAndMiddleRevision();
+  await testGenerationEndedBeforeMessageReceivedUsesOneReply();
+  await testContinuityLifecycleRelease();
+  await testContinuityGiftAndPendingFallback();
+  await testContinuityCombinationAndSharedSnapshot();
+  await testContinuityDeletionDuringRequest(true);
+  await testContinuityDeletionDuringRequest(false);
+  await testContinuityManualPromptKeepsCombo();
   await testSwipeGenerationUsesMessageSwipedTarget();
   await testPromptEditorUsesPresetAndAvatarSnapshot();
   await testSwipeTaskSurvivesDisplaySwitches();
@@ -1075,7 +1710,7 @@ void (async () => {
   await testLatestManualPinWinsAcrossSwipesOnAdvance();
   await testMessageDeletionReconcilesByRawIdentity();
   await testNewTailDoesNotCancelGiftTask();
-  await testDisabledDuringPromptProcessingSkipsRequest();
+  await testDisabledDuringManualRequestSkipsLateResult();
   await testDisabledWhilePromptEditorOpenSkipsRequest();
   await testSwipeAbortsUnconfirmedPromptEditor();
   console.info('<杠杠の生图机> runtime regression tests passed');

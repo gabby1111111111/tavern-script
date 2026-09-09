@@ -112,6 +112,10 @@ const testProcessingWithReferences = async (): Promise<void> => {
       prompt: '角色约束：场景 prompt',
       processing: 'processed',
       referenceImages: ['/user/images/persona.png', '/characters/character.png'],
+      referenceSources: [
+        { kind: 'user-avatar', label: 'User 头像', value: '/user/images/persona.png' },
+        { kind: 'character-avatar', label: '角色头像', value: '/characters/character.png' },
+      ],
     },
     '启用头像引用时应按 persona(User)=图1、character=图2 的顺序传递',
   );

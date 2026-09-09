@@ -564,7 +564,8 @@
 }
 
 .story-image-prompt-editor__label,
-.story-image-prompt-editor__scene-label {
+.story-image-prompt-editor__scene-label,
+.story-image-prompt-editor__final-label {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -572,31 +573,53 @@
 }
 
 .story-image-prompt-editor__preset,
-.story-image-prompt-editor__references,
-.story-image-prompt-editor__warning {
+.story-image-prompt-editor__references {
   margin: 0;
   overflow-wrap: anywhere;
 }
 
-.story-image-prompt-editor__template-text {
-  min-height: 13.75rem;
+.story-image-prompt-editor__references {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.story-image-prompt-editor__references-title,
+.story-image-prompt-editor__reference-status {
+  margin: 0;
+}
+
+.story-image-prompt-editor__reference-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1rem;
+}
+
+.story-image-prompt-editor__reference-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.story-image-prompt-editor__reference-status {
   color: var(--SmartThemeEmColor, #aaa);
+  font-size: 0.88em;
 }
 
-.story-image-prompt-editor__preview {
-  min-width: 0;
-
-  summary {
-    cursor: pointer;
-  }
+.story-image-prompt-editor__final-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
 }
 
-.story-image-prompt-editor__preview-text {
-  max-height: 16rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: inherit;
+.story-image-prompt-editor__final-textarea {
+  min-height: 16rem;
+}
+
+.story-image-prompt-editor__clear-final {
+  align-self: flex-end;
 }
 
 .story-image-prompt-editor__warning {
@@ -693,6 +716,19 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
+}
+
+.story-image-region-editor__mode-label {
+  display: inline-flex;
+  align-items: baseline;
+  align-self: flex-start;
+  gap: 0.4rem;
+  cursor: pointer;
+}
+
+.story-image-region-editor__mode-hint {
+  color: var(--SmartThemeEmColor, #aaa);
+  font-size: 0.88em;
 }
 
 .story-image-region-editor__brush-label,
