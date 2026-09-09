@@ -15,6 +15,10 @@ export function describeReferenceSources(sources: readonly ResolvedReferenceSour
   return sources.map((source, index) => `图${index + 1}：${source.label}`).join('\n');
 }
 
+function asPromptTemplateValue(value: string): string {
+  return value.trim() ? value : 'null';
+}
+
 /** Literal one-pass substitution: inserted shot text is never evaluated as a template. */
 export function applyOutputPromptTemplate(
   templateText: string,
@@ -22,15 +26,18 @@ export function applyOutputPromptTemplate(
   previousShotPrompt = '',
   referenceSources: readonly ResolvedReferenceSource[] = [],
 ): string {
+  const values = {
+    xx: asPromptTemplateValue(prompt),
+    xx_pic: asPromptTemplateValue(previousShotPrompt),
+    reference_sources: asPromptTemplateValue(describeReferenceSources(referenceSources)),
+  };
   return templateText.replace(/\{\{(xx|xx_pic|reference_sources)\}\}/g, (_match, key: string) => {
-    if (key === 'xx') return prompt;
-    if (key === 'xx_pic') return previousShotPrompt;
-    return describeReferenceSources(referenceSources);
+    return values[key as keyof typeof values];
   });
 }
 
 export function applyDrawingPromptTemplate(templateText: string, previousShotPrompt = ''): string {
-  return templateText.replace(/\{\{xx_pic\}\}/g, () => previousShotPrompt);
+  return templateText.replace(/\{\{xx_pic\}\}/g, () => asPromptTemplateValue(previousShotPrompt));
 }
 
 /** Sources are resolved in request order; absent images never reserve an image number. */

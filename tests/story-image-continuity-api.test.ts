@@ -72,7 +72,7 @@ async function verify(mode: ImageRequestMode, avatars: boolean, prior: boolean, 
     ...(prior ? ['上一镜头参考图'] : []),
   ];
   const expectedPrompt =
-    `${labels.map((label, index) => `图${index + 1}：${label}`).join('\n')}\nPrevious: previous scene\nCurrent: new scene`.trim();
+    `${labels.map((label, index) => `图${index + 1}：${label}`).join('\n') || 'null'}\nPrevious: previous scene\nCurrent: new scene`.trim();
   const resources = await requestImages({ ...profile, requestMode: mode }, processed, new AbortController().signal);
   assert.equal(resources.length, 1);
   assert.equal(avatarReads, avatars ? 1 : 0);
@@ -156,7 +156,7 @@ async function verifyReadFailure(mode: ImageRequestMode, allMissing = false): Pr
     preview.referenceSources?.map(source => source.kind) ?? [],
     allMissing ? [] : ['character-avatar', 'previous-story-image'],
   );
-  assert.equal(preview.prompt, allMissing ? '\nscene' : '图1：角色头像\n图2：上一镜头参考图\nscene');
+  assert.equal(preview.prompt, allMissing ? 'null\nscene' : '图1：角色头像\n图2：上一镜头参考图\nscene');
   const submitted = await processDrawingPrompt(preset, 'scene', {
     readReferences: async () => {
       throw new Error('must not reread avatars');
@@ -173,7 +173,7 @@ async function verifyReadFailure(mode: ImageRequestMode, allMissing = false): Pr
   assert.equal(posts.length, 1);
   if (allMissing && mode !== 'chat-multimodal') {
     const body = JSON.parse(posts[0].body as string);
-    assert.equal(body.prompt, 'scene');
+    assert.equal(body.prompt, 'null\nscene');
     assert.equal(body.images, undefined);
     assert.equal(posts[0].body instanceof FormData, false, 'all failed optional refs use ordinary generation body');
   }

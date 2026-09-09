@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   applyDrawingPromptTemplate,
   applyOutputPromptTemplate,
+  describeReferenceSources,
   processDrawingPrompt,
 } from '../src/杠杠の生图机/prompt-processor';
 import {
@@ -64,7 +65,24 @@ async function run(): Promise<void> {
   assert.equal(applyOutputPromptTemplate('{{xx}}|{{xx_pic}}', '{{xx_pic}}$&', '{{xx}}$&'), '{{xx_pic}}$&|{{xx}}$&');
   assert.equal(applyDrawingPromptTemplate('{{xx_pic}}|{{xx}}', '{{xx_pic}}'), '{{xx_pic}}|{{xx}}');
   assert.equal(applyOutputPromptTemplate('fixed', 'shot', 'old'), 'fixed');
-  assert.equal(applyOutputPromptTemplate('{{xx_pic}}', 'shot'), '');
+  assert.equal(applyOutputPromptTemplate('{{xx_pic}}', 'shot'), 'null');
+  assert.equal(
+    applyOutputPromptTemplate('{{xx}}|{{xx_pic}}|{{reference_sources}}', ' \n', '\t', []),
+    'null|null|null',
+  );
+  assert.equal(
+    applyOutputPromptTemplate(
+      '{{xx}}|{{xx_pic}}|{{reference_sources}}',
+      '  shot  ',
+      '  previous  ',
+      [{ kind: 'user-avatar', label: 'User 头像', value: 'user' }],
+    ),
+    '  shot  |  previous  |图1：User 头像',
+  );
+  assert.equal(applyOutputPromptTemplate('{{xx}}', 'nested {{xx_pic}}'), 'nested {{xx_pic}}');
+  assert.equal(applyDrawingPromptTemplate('{{xx_pic}}|{{xx}}', ''), 'null|{{xx}}');
+  assert.equal(applyDrawingPromptTemplate('{{xx_pic}}', '  previous  '), '  previous  ');
+  assert.equal(describeReferenceSources([]), '', '空来源的描述仍保持 UI 原语义');
   assert.equal(normalizeOutputPreset({ id: 'old' })?.usePreviousStoryImage, false);
   for (const avatars of [false, true])
     for (const previous of [false, true]) {
