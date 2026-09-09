@@ -169,7 +169,7 @@ function normalizeCastEntry(value: unknown, index: number): CastEntry | null {
   if (!isRecord(value)) return null;
   const voice = normalizeVoiceRef(value.voice);
   if (!voice) return null;
-  const role = enumValue(value.role, ['narrator', 'character', 'fallback'] as const, 'character');
+  const role = enumValue(value.role, ['narrator', 'user', 'character', 'fallback'] as const, 'character');
   const displayName = stringValue(value.displayName).trim();
   if (!displayName) return null;
   const aliases = Array.isArray(value.aliases)

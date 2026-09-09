@@ -134,7 +134,7 @@ const runCastingTests = async (): Promise<void> => {
   assert(!('chatSnapshot' in variables), '集中 updater 必须清理不在持久化契约中的字段');
   assert(!('recentAudio' in variables), '集中 updater 不能写入最近音频');
 
-  const context = readCurrentCastingContext(3, {
+  const context = await readCurrentCastingContext(3, {
     getCharData: () => ({
       name: '小葵',
       avatar: 'aoi-avatar.png',

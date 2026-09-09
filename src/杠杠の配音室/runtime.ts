@@ -22,7 +22,7 @@ import {
   setVoiceAuditBuild,
 } from './audit';
 import { createCastingGenerationId, generateCastingTable, isStaleCastingInputError, stopCasting } from './casting';
-import { createCastingInputSignature, readCurrentCastingContext } from './context';
+import { createCastingInputSignature, readCurrentCastingContext, readCurrentCastingContextSync } from './context';
 import {
   CUSTOM_ONLY_VOICE_EDITION,
   getBuiltinSoundCatalog,
@@ -156,7 +156,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   function refreshCharacter(): void {
     if (stopped) return;
     try {
-      const context = readCurrentCastingContext(1);
+      const context = readCurrentCastingContextSync(1);
       currentCharacterKey.value = context.characterKey;
       currentCharacterName.value = context.characterName;
     } catch (caught) {
@@ -281,9 +281,9 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     const auditRunId = beginAiCastingAudit(generationId);
     activeCastingGenerationId = generationId;
     try {
-      const captureInput = () => {
+      const captureInput = async () => {
         const recentMessageCount = settings.value.readingDefaults.recentMessageCount;
-        const context = readCurrentCastingContext(recentMessageCount);
+        const context = await readCurrentCastingContext(recentMessageCount);
         const enabledProfiles = settings.value.profiles
           .filter(profile => profile.enabled)
           .map(profile => ({ id: profile.id, type: profile.type }));
@@ -292,17 +292,48 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         return {
           context,
           castingVoices,
-          signature: createCastingInputSignature(context, castingVoices, recentMessageCount, enabledProfiles),
+          // The sync validator capture cannot await the lore adapter. Keep
+          // adapter output out of the staleness signature so a valid async
+          // capture is not rejected merely because the sync split is empty.
+          signature: createCastingInputSignature(
+            { ...context, personaWorldbook: [], characterWorldbook: [] },
+            castingVoices,
+            recentMessageCount,
+            enabledProfiles,
+          ),
         };
       };
-      const input = captureInput();
+      const input = await captureInput();
       currentCharacterKey.value = input.context.characterKey;
       currentCharacterName.value = input.context.characterName;
       const table = await generateCastingTable({
         context: input.context,
         voices: input.castingVoices,
         generationId,
-        isInputCurrent: () => captureInput().signature === input.signature,
+        // casting.ts validates this callback synchronously. Use the matching
+        // sync compatibility capture here; the initial request still awaits
+        // the full async capture (including the optional lore adapter).
+        isInputCurrent: () => {
+          try {
+            const recentMessageCount = settings.value.readingDefaults.recentMessageCount;
+            const context = readCurrentCastingContextSync(recentMessageCount);
+            const enabledProfiles = settings.value.profiles
+              .filter(profile => profile.enabled)
+              .map(profile => ({ id: profile.id, type: profile.type }));
+            const enabledIds = new Set(enabledProfiles.map(profile => profile.id));
+            const castingVoices = voices.value.filter(voice => enabledIds.has(voice.providerProfileId));
+            return (
+              createCastingInputSignature(
+                { ...context, personaWorldbook: [], characterWorldbook: [] },
+                castingVoices,
+                recentMessageCount,
+                enabledProfiles,
+              ) === input.signature
+            );
+          } catch {
+            return false;
+          }
+        },
       });
       if (activeCastingGenerationId !== generationId) return;
       settings.value.castingByCharacter = { ...settings.value.castingByCharacter, [table.characterKey]: table };

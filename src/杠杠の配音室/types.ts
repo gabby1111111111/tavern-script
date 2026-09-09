@@ -41,7 +41,7 @@ export type VoiceRef = {
   emotion?: string;
 };
 
-export type CastRole = 'narrator' | 'character' | 'fallback';
+export type CastRole = 'narrator' | 'user' | 'character' | 'fallback';
 
 export type CastEntry = {
   id: string;
@@ -95,12 +95,26 @@ export type ContextMessage = {
   message: string;
 };
 
+export type CastingPersona = {
+  name: string;
+  title: string;
+  description: string;
+};
+
 export type CastingContext = {
   characterKey: string;
   characterName: string;
   characterDescription: string;
   characterPersonality: string;
   scenario: string;
+  /** Safe, text-only card samples; raw card data and extensions stay local. */
+  characterFirstMessage?: string;
+  characterExampleDialog?: string;
+  /** Current persona without avatar/id/connection metadata. */
+  persona?: CastingPersona | null;
+  /** Activated content only; worldbook names, keys and metadata stay local. */
+  personaWorldbook?: string[];
+  characterWorldbook?: string[];
   recentMessages: ContextMessage[];
 };
 

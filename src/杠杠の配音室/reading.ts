@@ -12,6 +12,44 @@ function normalizedName(value: string | null | undefined): string {
   return (value ?? '').trim().toLocaleLowerCase();
 }
 
+const GENERIC_USER_IDENTITIES = new Set([
+  'user',
+  'the user',
+  'you',
+  'me',
+  'i',
+  'myself',
+  'persona',
+  'player',
+  '用户',
+  '使用者',
+  '本人',
+  '我',
+  '你',
+  '自己',
+  '玩家',
+  '访客',
+]);
+
+function entryRole(entry: CastingTable['entries'][number]): string {
+  return String(entry.role).trim().toLocaleLowerCase();
+}
+
+function isGenericUserIdentity(value: string): boolean {
+  return GENERIC_USER_IDENTITIES.has(normalizedName(value));
+}
+
+function matchesCastIdentity(entry: CastingTable['entries'][number], characterName: string): boolean {
+  const role = entryRole(entry);
+  if (role !== 'character' && role !== 'user') return false;
+  const target = normalizedName(characterName);
+  if (!target || (role === 'user' && isGenericUserIdentity(target))) return false;
+  return [entry.displayName, ...entry.aliases]
+    .map(normalizedName)
+    .filter(identity => identity && (role !== 'user' || !isGenericUserIdentity(identity)))
+    .includes(target);
+}
+
 function sameCharacter(candidate: string | null, expected: string): boolean {
   return normalizedName(candidate) === normalizedName(expected);
 }
@@ -20,11 +58,12 @@ function castForSegment(segment: SpokenSegment, casting: CastingTable | null) {
   if (!casting) return undefined;
   if (segment.kind === 'narration') return casting.entries.find(entry => entry.role === 'narrator');
 
-  const characterName = normalizedName(segment.characterName);
-  return casting.entries.find(
-    entry =>
-      entry.role === 'character' &&
-      [entry.displayName, ...entry.aliases].some(alias => normalizedName(alias) === characterName),
+  const characterName = segment.characterName ?? '';
+  // Prefer an explicit User identity when a chat segment carries the Persona
+  // name/alias. Generic labels such as “我” or “User” must never select it.
+  return (
+    casting.entries.find(entry => entryRole(entry) === 'user' && matchesCastIdentity(entry, characterName)) ??
+    casting.entries.find(entry => entryRole(entry) === 'character' && matchesCastIdentity(entry, characterName))
   );
 }
 
