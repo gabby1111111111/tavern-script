@@ -1,5 +1,8 @@
 import { ref, type Ref } from 'vue';
+import { ShotWorkflow, groupWorkbenchPlacements } from './shot-workflow';
+import type { WorkbenchShot } from './workbench-types';
 import { readCurrentAvatarReferences, type AvatarReferenceReadResult } from './avatar-references';
+import { GenerationEligibilityLedger, type GenerationEligibilityPlan } from './generation-eligibility';
 import { decideFloorTrigger } from './display-policy';
 import { saveImageResourceToCharacterGallery } from './gallery-storage';
 import { requestImages, type ImageResource } from './image-api';
@@ -10,6 +13,7 @@ import {
   clearRenderedHosts,
   getSelectedImagePlacements,
   pruneImagePlacementSelections,
+  selectImagePlacement,
   removeRenderedPlacementHost,
   removeRenderedTaskHost,
   renderImageTask,
@@ -18,7 +22,6 @@ import {
 } from './message-renderer';
 import {
   ImageRetention,
-  imageRetentionMessageImageKey,
   imageRetentionScopeForPlacement,
   imageRetentionScopeKey,
   type ImageRetentionScope,
@@ -55,7 +58,6 @@ import {
   isMatchingAssistantReply,
   isSingleCharacterChat,
   isSwipeGeneration,
-  MessageIdentityStore,
   shouldArmStoryImageGeneration,
 } from './runtime-policy';
 import {
@@ -78,7 +80,8 @@ export type RuntimeStatus = 'idle' | 'generating' | 'ready' | 'error' | 'stopped
 
 type GenerationState = {
   id: string;
-  type: 'normal' | 'swipe';
+  type: 'normal' | 'swipe' | 'regenerate';
+  eligibility: GenerationEligibilityPlan<FloorTriggerDecision>;
   messageId: number | null;
   chatId: string;
   startChatLength: number;
@@ -156,7 +159,7 @@ export type StoryImageAudit = {
     assistant_reply_count: number;
     last_trigger_message_id: number | null;
     skip_floors: number;
-    last_skip_reason: FloorTriggerDecision['reason'] | 'no-markers' | null;
+    last_skip_reason: FloorTriggerDecision['reason'] | 'no-markers' | 'stale-reply' | null;
   };
   arrival_notice: GiftArrivalNoticeAudit;
   cache: {
@@ -175,6 +178,7 @@ export type StoryImageAudit = {
     reference_count: number;
     reference_kinds: string[];
   };
+  workflow: { confirmed_count: number; unconfirmed_count: number; pending_count: number };
   last_error: string | null;
 };
 
@@ -182,6 +186,13 @@ export type StoryImageRuntime = {
   status: Readonly<Ref<RuntimeStatus>>;
   audit: StoryImageAudit;
   recentImages: Readonly<Ref<RecentGeneratedImage[]>>;
+  workbenchShots: Readonly<Ref<WorkbenchShot[]>>;
+  confirmWorkbenchImage: (placementId: string) => void;
+  abandonWorkbenchShot: (shotId: string) => void;
+  editWorkbenchImage: (placementId: string) => Promise<void>;
+  redrawWorkbenchImage: (placementId: string) => Promise<void>;
+  removeWorkbenchImage: (placementId: string) => void;
+  jumpToWorkbenchShot: (shotId: string) => void;
   removeRecentImage: (id: string) => boolean;
   saveRecentImageToGallery: (artifactId: string) => Promise<void>;
   start: () => void;
@@ -230,6 +241,7 @@ export function createEmptyAudit(): StoryImageAudit {
       reference_count: 0,
       reference_kinds: [],
     },
+    workflow: { confirmed_count: 0, unconfirmed_count: 0, pending_count: 0 },
     last_error: null,
   };
 }
@@ -426,6 +438,10 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   const inlineTaskKeys = new Set<string>();
   const continuityOwners = new Map<StoryContinuitySnapshot, Set<AbortController>>();
   let auditedSnapshot: StoryContinuitySnapshot | null = null;
+  const retiringSources = new Set<string>();
+  const retiredSnapshots = new WeakSet<StoryContinuitySnapshot>();
+  const snapshotMessageRefs = new WeakMap<StoryContinuitySnapshot, object>();
+  const snapshotSwipeIds = new WeakMap<StoryContinuitySnapshot, number>();
   const releaseContinuity = (snapshot: StoryContinuitySnapshot | null | undefined, invalidated = false): void => {
     if (!snapshot || snapshot.released) return;
     if (invalidated) continuityOwners.get(snapshot)?.forEach(controller => controller.abort());
@@ -436,13 +452,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   };
   const invalidateContinuitySource = (placementId: string): void => {
     for (const snapshot of continuityOwners.keys()) {
-      if (snapshot.source?.placementId === placementId) releaseContinuity(snapshot, true);
+      if (snapshot.source?.placementId !== placementId) continue;
+      if (retiringSources.has(placementId)) retiredSnapshots.add(snapshot);
+      else releaseContinuity(snapshot, true);
     }
   };
   const clearContinuity = (): void => {
     for (const snapshot of continuityOwners.keys()) releaseContinuity(snapshot, true);
   };
   const retention = new ImageRetention();
+  const workflow = new ShotWorkflow();
+  const workbenchShots = ref<WorkbenchShot[]>([]);
   const cache = new ImageTaskCache({
     onRemove: task => {
       retention.forgetScope({
@@ -475,6 +495,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     onRemove: placement => {
       invalidateContinuitySource(placement.id);
       retention.forgetPlacement(placement.id);
+      workflow.forget(placement.id);
       removeRenderedPlacementHost(placement.id);
       prunePlacementSelectionMemory();
     },
@@ -488,7 +509,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   messageAdvance.seed(SillyTavern.chat);
   let pendingSwipeTarget: PendingSwipeTarget | null = null;
   let normalAssistantFloorCount = 0;
-  const floorDecisions = new MessageIdentityStore<FloorTriggerDecision>();
+  const floorDecisions = new GenerationEligibilityLedger<FloorTriggerDecision>();
+  floorDecisions.sync(SillyTavern.chat);
   let errorRevision = 0;
   let started = false;
   let stopped = false;
@@ -500,6 +522,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   const manualRevisionControllerByPlacement = new Map<string, Set<AbortController>>();
   const manualRevisionGenerationByController = new Map<AbortController, string>();
   const taskRetentionToken = new WeakMap<ImageTask, number>();
+  const taskMessageRefs = new WeakMap<ImageTask, object>();
   let promptEditorController: AbortController | null = null;
   let regionEditorController: AbortController | null = null;
   const stopListeners: Array<() => void> = [];
@@ -515,11 +538,16 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       beforeMessageId,
       drawingPresetId,
       outputPresetId,
-      selectedPlacements: consume ? getSelectedImagePlacements(placementCache.placements.value) : [],
+      selectedPlacements: consume
+        ? placementCache.placements.value.filter(placement => workflow.isConfirmed(placement.id))
+        : [],
       activeSwipeId: messageId => (rawMessageRef(messageId) ? currentSwipeId(messageId) : null),
       cloneResource: placementId => placementCache.cloneResource(placementId),
     });
     continuityOwners.set(snapshot, new Set());
+    const sourceMessage = snapshot.source ? rawMessageRef(snapshot.source.messageId) : null;
+    if (sourceMessage) snapshotMessageRefs.set(snapshot, sourceMessage);
+    if (snapshot.source) snapshotSwipeIds.set(snapshot, snapshot.source.swipeId);
     auditedSnapshot = snapshot;
     audit.continuity = {
       active_snapshots: continuityOwners.size,
@@ -534,11 +562,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
   };
   const validContinuity = (snapshot: StoryContinuitySnapshot | null | undefined): boolean => {
     if (!snapshot) return true;
-    const valid = isStoryContinuitySnapshotValid(snapshot, {
-      chatId: SillyTavern.getCurrentChatId(),
-      getPlacement: id => placementCache.get(id),
-      activeSwipeId: messageId => (rawMessageRef(messageId) ? currentSwipeId(messageId) : null),
-    });
+    const retiredRef = snapshotMessageRefs.get(snapshot);
+    const valid = retiredSnapshots.has(snapshot)
+      ? !snapshot.released &&
+        snapshot.chatId === SillyTavern.getCurrentChatId() &&
+        !!retiredRef &&
+        SillyTavern.chat.includes(retiredRef as SillyTavern.ChatMessage)
+      : isStoryContinuitySnapshotValid(snapshot, {
+          chatId: SillyTavern.getCurrentChatId(),
+          getPlacement: id => placementCache.get(id),
+          activeSwipeId: messageId => (rawMessageRef(messageId) ? currentSwipeId(messageId) : null),
+        });
     if (!valid) releaseContinuity(snapshot, true);
     return valid;
   };
@@ -600,7 +634,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
 
   const abortManualRevisionsForSwipeDeletion = (messageId: number, deletedSwipeId: number): void => {
     placementCache.placements.value
-      .filter(placement => placement.target.messageId === messageId && placement.target.swipeId >= deletedSwipeId)
+      .filter(placement => placement.target.messageId === messageId && placement.target.swipeId === deletedSwipeId)
       .forEach(placement => abortManualRevisionsForPlacement(placement.id));
   };
 
@@ -658,13 +692,6 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     cache.remove(imageTaskKey(task));
   };
 
-  const removeImagePositionTasks = (scope: ImageRetentionScope, keepTask?: ImageTask): void => {
-    cache
-      .values()
-      .filter(task => isInlineTask(task) && isSameImagePosition(taskScope(task), scope) && task !== keepTask)
-      .forEach(removeTask);
-  };
-
   const removeExactScopeTasks = (scope: ImageRetentionScope, keepTask?: ImageTask): void => {
     cache
       .values()
@@ -676,70 +703,36 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     retention.token(scope) === token;
 
   const pruneExactScope = (scope: ImageRetentionScope, retainedId: string | null): void => {
+    if (retainedId === null) {
+      const messageRef = rawMessageRef(scope.messageId);
+      for (const snapshot of continuityOwners.keys()) {
+        if (
+          messageRef &&
+          snapshotMessageRefs.get(snapshot) === messageRef &&
+          snapshotSwipeIds.get(snapshot) === scope.swipeId &&
+          snapshot.source?.imageIndex === scope.imageIndex
+        ) {
+          releaseContinuity(snapshot, true);
+        }
+      }
+    }
     retention.invalidate(scope);
     abortManualRevisionsForScope(scope);
     removeExactScopeTasks(scope);
     placementCache.placements.value
       .filter(placement => isSameScope(placementScope(placement), scope) && placement.id !== retainedId)
-      .forEach(placement => removePlacementAndArtifact(placement, false));
+      .forEach(placement => {
+        if (retainedId) retiringSources.add(placement.id);
+        try {
+          removePlacementAndArtifact(placement, false);
+        } finally {
+          retiringSources.delete(placement.id);
+        }
+      });
     const retainedArtifactId = retainedId ? (placementCache.get(retainedId)?.artifactId ?? null) : null;
     removeTargetedCurrentArtifacts(scope, retainedArtifactId, scope.swipeId);
     retention.forgetScope(scope);
     prunePlacementSelectionMemory();
-  };
-
-  const pruneImagePosition = (scope: ImageRetentionScope, retainedId: string | null, keepTask?: ImageTask): void => {
-    const placements = placementCache.placements.value.filter(placement =>
-      isSameImagePosition(placementScope(placement), scope),
-    );
-    const scopes = new Map<string, ImageRetentionScope>();
-    placements.forEach(placement => {
-      const candidateScope = placementScope(placement);
-      scopes.set(imageRetentionScopeKey(candidateScope), candidateScope);
-    });
-    cache
-      .values()
-      .filter(task => isInlineTask(task) && isSameImagePosition(taskScope(task), scope))
-      .forEach(task => {
-        const candidateScope = taskScope(task);
-        scopes.set(imageRetentionScopeKey(candidateScope), candidateScope);
-      });
-    scopes.forEach(candidateScope => {
-      if (keepTask && isSameScope(candidateScope, taskScope(keepTask))) return;
-      retention.invalidate(candidateScope);
-      abortManualRevisionsForScope(candidateScope);
-    });
-    removeImagePositionTasks(scope, keepTask);
-    placements
-      .filter(placement => placement.id !== retainedId)
-      .forEach(placement => removePlacementAndArtifact(placement, false));
-    const retainedArtifactId = retainedId ? (placementCache.get(retainedId)?.artifactId ?? null) : null;
-    removeTargetedCurrentArtifacts(scope, retainedArtifactId);
-    scopes.forEach(candidateScope => {
-      if (!keepTask || !isSameScope(candidateScope, taskScope(keepTask))) retention.forgetScope(candidateScope);
-    });
-    prunePlacementSelectionMemory();
-  };
-
-  const rememberAutoPlacement = (
-    placement: ImagePlacement,
-    task: ImageTask | undefined,
-    deferredScope: ImageRetentionScope,
-  ): boolean => {
-    const scope = placementScope(placement);
-    const livePlacements = placementCache.placements.value.map(item => ({
-      id: item.id,
-      scope: placementScope(item),
-    }));
-    const manualSelection = retention.latestManualSelection(scope, livePlacements);
-    if (manualSelection && manualSelection.placementId !== placement.id) {
-      removePlacementAndArtifact(placement);
-      return false;
-    }
-    retention.rememberAuto(scope, placement.id);
-    pruneImagePosition(scope, placement.id, task);
-    retention.consumeDeferred(deferredScope);
-    return placementCache.get(placement.id) === placement;
   };
 
   const isCurrentManualRevision = (
@@ -750,25 +743,103 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     retentionToken?: number,
   ): boolean => {
     const currentSettings = settings;
-    const scope = placementScope(placement);
+    // Swipe deletion remaps an immutable placement object. Resolve its live
+    // location by stable image identity instead of rejecting that new object.
+    const currentPlacement = placementCache.get(placement.id);
     return (
+      !!currentPlacement &&
+      currentPlacement.artifactId === placement.artifactId &&
+      currentPlacement.variantIndex === placement.variantIndex &&
+      currentPlacement.revisionIndex === placement.revisionIndex &&
+      currentPlacement.target.imageIndex === placement.target.imageIndex &&
+      placementCache.messageRef(placement.id) === messageRef &&
       currentSettings?.enabled === true &&
       !stopped &&
       !controller?.signal.aborted &&
       memoryChatId === chatId &&
       SillyTavern.getCurrentChatId() === chatId &&
-      rawMessageRef(placement.target.messageId) === messageRef &&
-      placementCache.get(placement.id) === placement &&
-      (retentionToken === undefined || isCurrentRetentionToken(scope, retentionToken))
+      rawMessageRef(currentPlacement.target.messageId) === messageRef &&
+      (retentionToken === undefined || isCurrentRetentionToken(placementScope(currentPlacement), retentionToken))
     );
   };
 
+  const syncWorkbench = (): void => {
+    const groups = groupWorkbenchPlacements(memoryChatId, placementCache.placements.value);
+    const shots = new Map<string, WorkbenchShot>();
+    groups.forEach((placements, id) => {
+      const base = workflow.base(placements);
+      if (
+        !base ||
+        !rawMessageRef(base.target.messageId) ||
+        currentSwipeId(base.target.messageId) !== base.target.swipeId
+      )
+        return;
+      const confirmed = placements.find(placement => workflow.isConfirmed(placement.id));
+      shots.set(id, {
+        id,
+        chatId: memoryChatId,
+        ...base.target,
+        basePlacementId: base.id,
+        confirmedPlacementId: confirmed?.id ?? null,
+        shotPrompt: base.continuity?.shotPrompt ?? base.prompt,
+        images: [...placements]
+          .sort((a, b) => a.variantIndex - b.variantIndex || a.revisionIndex - b.revisionIndex)
+          .map(placement => ({
+            id: placement.id,
+            url: placement.url,
+            prompt: placement.continuity?.shotPrompt ?? placement.prompt,
+            variantIndex: placement.variantIndex,
+            revisionIndex: placement.revisionIndex,
+            referenceSource: placement.referenceSource,
+          })),
+        pendingCount: placements.reduce(
+          (count, placement) => count + (manualRevisionControllerByPlacement.get(placement.id)?.size ?? 0),
+          0,
+        ),
+        status: confirmed ? 'confirmed' : 'unconfirmed',
+      });
+    });
+    cache
+      .values()
+      .filter(
+        task => isInlineTask(task) && rawMessageRef(task.messageId) && currentSwipeId(task.messageId) === task.swipeId,
+      )
+      .forEach(task => {
+        const id = imageRetentionScopeKey(taskScope(task));
+        let shot = shots.get(id);
+        if (!shot) {
+          shot = {
+            id,
+            ...taskScope(task),
+            basePlacementId: null,
+            confirmedPlacementId: null,
+            shotPrompt: task.intent.prompt,
+            images: [],
+            pendingCount: 0,
+            status: task.status === 'failed' ? 'failed' : 'pending',
+          };
+          shots.set(id, shot);
+        }
+        if (task.status === 'pending' || task.status === 'running') shot.pendingCount += 1;
+      });
+    audit.workflow = {
+      confirmed_count: [...shots.values()].filter(shot => shot.confirmedPlacementId !== null).length,
+      unconfirmed_count: [...shots.values()].filter(
+        shot => shot.confirmedPlacementId === null && shot.images.length > 0,
+      ).length,
+      pending_count: [...shots.values()].reduce((count, shot) => count + shot.pendingCount, 0),
+    };
+    workbenchShots.value = [...shots.values()].sort((a, b) => a.messageId - b.messageId || a.imageIndex - b.imageIndex);
+  };
+
   const syncCacheAudit = (): void => {
+    syncWorkbench();
     audit.cache.artifact_count = recentCache.artifacts.value.length;
     audit.cache.placement_count = placementCache.placements.value.length;
   };
 
   const syncRuntimeStatus = (): void => {
+    syncWorkbench();
     const tasks = cache.values();
     status.value = deriveRuntimeStatusState({
       stopped,
@@ -1044,6 +1115,9 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     onPin: placement => {
       if (placementCache.get(placement.id) !== placement) return;
       const scope = placementScope(placement);
+      const siblings = placementCache.placements.value.filter(item => isSameScope(placementScope(item), scope));
+      workflow.confirm(placement, siblings);
+      selectImagePlacement(placement);
       retention.pin(scope, placement.id);
       pruneExactScope(scope, placement.id);
       prunePlacementSelectionMemory();
@@ -1051,7 +1125,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       syncRuntimeStatus();
       renderPlacementsForMessage(placement.target.messageId);
     },
-    isPinned: placement => retention.isPinned(placement.id),
+    isPinned: placement => workflow.isConfirmed(placement.id),
     onDelete: placement => {
       abortPromptEditor();
       removePlacementAndArtifact(placement);
@@ -1085,89 +1159,41 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     }).length;
   };
 
-  const renderPlacementsForMessage = (messageId: number, swipeIdOverride?: number): number =>
-    renderMessagePlacements(placementCache.placements.value, messageId, placementRenderHandlers, swipeIdOverride);
+  const renderPlacementsForMessage = (messageId: number, swipeIdOverride?: number): number => {
+    groupWorkbenchPlacements(
+      memoryChatId,
+      placementCache.placements.value.filter(placement => placement.target.messageId === messageId),
+    ).forEach(placements => {
+      const base = workflow.base(placements);
+      if (base) selectImagePlacement(base, true);
+    });
+    return renderMessagePlacements(
+      placementCache.placements.value,
+      messageId,
+      placementRenderHandlers,
+      swipeIdOverride,
+    );
+  };
 
   const pruneImageMemoryAfterNewTail = (messageId: number): void => {
-    const placementsSnapshot = placementCache.placements.value.filter(
-      placement => placement.target.messageId === messageId && memoryChatId === SillyTavern.getCurrentChatId(),
+    const messageRef = rawMessageRef(messageId);
+    if (!messageRef || !workflow.advance(messageRef)) return;
+    const groups = groupWorkbenchPlacements(
+      memoryChatId,
+      placementCache.placements.value.filter(placement => placement.target.messageId === messageId),
     );
-    const selectedSnapshot = getSelectedImagePlacements(placementsSnapshot);
-    const selectedByScope = new Map<string, ImagePlacement>();
-    selectedSnapshot.forEach(placement => {
-      selectedByScope.set(imageRetentionScopeKey(placementScope(placement)), placement);
-    });
-
-    const groups = new Map<string, ImageRetentionScope>();
-    placementsSnapshot.forEach(placement => {
-      const scope = placementScope(placement);
-      groups.set(imageRetentionMessageImageKey(scope), scope);
-    });
-    recentCache.artifacts.value.forEach(artifact => {
-      if (
-        artifact.purpose !== 'current' ||
-        artifact.chatId !== memoryChatId ||
-        artifact.target.messageId !== messageId ||
-        artifact.target.messageId === null ||
-        artifact.target.imageIndex === null
-      )
-        return;
-      groups.set(
-        imageRetentionMessageImageKey({
-          chatId: artifact.chatId,
-          messageId: artifact.target.messageId,
-          swipeId: artifact.target.swipeId ?? 0,
-          imageIndex: artifact.target.imageIndex,
-        }),
-        {
-          chatId: artifact.chatId,
-          messageId: artifact.target.messageId,
-          swipeId: artifact.target.swipeId ?? 0,
-          imageIndex: artifact.target.imageIndex,
-        },
-      );
-    });
-    cache.values().forEach(task => {
-      if (!isInlineTask(task) || task.chatId !== memoryChatId || task.messageId !== messageId) return;
-      groups.set(imageRetentionMessageImageKey(taskScope(task)), taskScope(task));
-    });
-
-    groups.forEach(groupScope => {
-      const groupPlacements = placementsSnapshot.filter(placement =>
-        isSameImagePosition(placementScope(placement), groupScope),
-      );
-      const manualSelection = retention.latestManualSelection(
-        groupScope,
-        groupPlacements.map(placement => ({ id: placement.id, scope: placementScope(placement) })),
-      );
-      const currentSwipe = currentSwipeId(groupScope.messageId);
-      const currentSelected = selectedByScope.get(imageRetentionScopeKey({ ...groupScope, swipeId: currentSwipe }));
-      const retained = manualSelection
-        ? groupPlacements.find(placement => placement.id === manualSelection.placementId)
-        : currentSelected;
-
-      if (retained) {
-        const retainedScope = placementScope(retained);
-        if (!manualSelection) retention.rememberAuto(retainedScope, retained.id);
-        pruneImagePosition(groupScope, retained.id);
-        return;
-      }
-
-      const currentTask = cache
-        .values()
-        .find(
-          task =>
-            isInlineTask(task) &&
-            isSameImagePosition(taskScope(task), groupScope) &&
-            task.swipeId === currentSwipe &&
-            (task.status === 'pending' || task.status === 'running'),
-        );
-      pruneImagePosition({ ...groupScope, swipeId: currentSwipe }, null, currentTask);
-      if (currentTask) {
-        const currentTaskScope = taskScope(currentTask);
-        retention.defer(currentTaskScope);
-        taskRetentionToken.set(currentTask, retention.token(currentTaskScope));
-      }
+    groups.forEach(placements => {
+      // Viewing a candidate does not confirm it, but it may be kept as the working base.
+      const selected =
+        placements.find(placement => workflow.isConfirmed(placement.id)) ??
+        getSelectedImagePlacements(placements)[0] ??
+        workflow.base(placements);
+      if (!selected) return;
+      workflow.keepBase(selected, placements);
+      // A source of an in-flight redraw must survive this first housekeeping pass.
+      placements
+        .filter(placement => placement.id !== selected.id && !manualRevisionControllerByPlacement.has(placement.id))
+        .forEach(placement => removePlacementAndArtifact(placement));
     });
     prunePlacementSelectionMemory();
     syncCacheAudit();
@@ -1212,6 +1238,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     if (promptSnapshot?.continuity) continuityOwners.get(promptSnapshot.continuity)?.add(controller);
     audit.generation = { id: generationId, status: 'running' };
     status.value = 'generating';
+    syncWorkbench();
     try {
       const outputPreset = promptSnapshot?.outputPreset ?? getCurrentOutputPreset(currentSettings);
       const profile =
@@ -1242,7 +1269,9 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         if (!resource) throw new Error('图片 API 响应中没有可显示的图片');
 
         const nextMessageId = SillyTavern.chat.indexOf(messageRef as SillyTavern.ChatMessage);
+        const currentPlacement = placementCache.get(placement.id);
         if (
+          !currentPlacement ||
           nextMessageId < 0 ||
           !validContinuity(promptSnapshot?.continuity) ||
           !isCurrentManualRevision(placement, chatId, messageRef, controller, revisionRetentionToken)
@@ -1255,37 +1284,43 @@ export function createStoryImageRuntime(): StoryImageRuntime {
               .filter(
                 item =>
                   item.target.messageId === nextMessageId &&
-                  item.target.swipeId === placement.target.swipeId &&
-                  item.target.imageIndex === placement.target.imageIndex &&
-                  item.variantIndex === placement.variantIndex,
+                  item.target.swipeId === currentPlacement.target.swipeId &&
+                  item.target.imageIndex === currentPlacement.target.imageIndex &&
+                  item.variantIndex === currentPlacement.variantIndex,
               )
               .map(item => item.revisionIndex),
           ) + 1;
+        const siblingsBeforeRevision = placementCache.placements.value.filter(item =>
+          isSameScope(placementScope(item), placementScope(currentPlacement)),
+        );
+        const workingBase = workflow.base(siblingsBeforeRevision) ?? currentPlacement;
+        workflow.keepBase(workingBase, siblingsBeforeRevision);
+        selectImagePlacement(workingBase);
         const presentation = presenter.present({
           resource,
           chatId,
           sourceIntentId: null,
           displayMode: 'inline',
           placementTarget: {
-            ...placement.target,
+            ...currentPlacement.target,
             messageId: nextMessageId,
           },
           artifactTarget: {
             messageId: nextMessageId,
-            swipeId: placement.target.swipeId,
-            imageIndex: placement.target.imageIndex,
+            swipeId: currentPlacement.target.swipeId,
+            imageIndex: currentPlacement.target.imageIndex,
           },
           messageRef,
-          variantIndex: placement.variantIndex,
+          variantIndex: currentPlacement.variantIndex,
           revisionIndex,
           prompt: normalizedPrompt,
           finalPrompt: directInput?.prompt ?? normalizedPrompt,
-          continuity: placement.continuity
+          continuity: currentPlacement.continuity
             ? {
-                ...placement.continuity,
+                ...currentPlacement.continuity,
                 shotPrompt:
                   promptSnapshot?.continuityShotPrompt ??
-                  (directInput ? placement.continuity.shotPrompt : normalizedPrompt),
+                  (directInput ? currentPlacement.continuity.shotPrompt : normalizedPrompt),
               }
             : undefined,
           // Direct redraw inputs (currently the region editor) contain only
@@ -1293,6 +1328,9 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           // previous-story source. Keep old placements without metadata
           // distinguishable by leaving the non-direct path undefined.
           referenceKinds: promptSnapshot?.referenceKinds ?? (directInput ? [] : undefined),
+          referenceSource: promptSnapshot?.referenceKinds?.includes('previous-story-image')
+            ? (promptSnapshot.continuity?.source ?? null)
+            : null,
         });
         if (!presentation) throw new Error('重绘图片无法加入页面内存缓存');
         if (
@@ -1364,7 +1402,6 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       return;
     }
     task.status = 'running';
-    let retainFirstResult: boolean;
     status.value = 'generating';
     if (shouldRenderInlineTask(displayMode, task.status)) renderInlineTasksForMessage(task.messageId);
     if (displayMode === 'gift') audit.gift.status = 'running';
@@ -1385,14 +1422,12 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         return;
       }
       const resources = await requestImages(profile, input, task.abortController.signal);
-      const deferredScope = taskScope(task);
       let presentations: NonNullable<ReturnType<ImagePresenter['present']>>[] = [];
       try {
         if (!currentTask()) {
           removeRenderedTaskHost(task);
           return;
         }
-        retainFirstResult = displayMode === 'inline' && retention.isDeferred(deferredScope);
         const primaryResource = resources[0];
         if (!primaryResource) throw new Error('图片 API 响应中没有可显示的图片');
         assignImageResource(task, primaryResource);
@@ -1405,8 +1440,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           anchorTextBefore: task.anchorTextBefore,
           anchorTextAfter: task.anchorTextAfter,
         };
-        const resourcesToPresent = retainFirstResult ? resources.slice(0, 1) : resources;
-        presentations = resourcesToPresent
+        presentations = resources
           .map((resource, variantIndex) =>
             presenter.present({
               resource,
@@ -1429,6 +1463,9 @@ export function createStoryImageRuntime(): StoryImageRuntime {
                   }
                 : undefined,
               referenceKinds: input.referenceSources?.map(source => source.kind) ?? [],
+              referenceSource: input.referenceSources?.some(source => source.kind === 'previous-story-image')
+                ? (continuity?.source ?? null)
+                : null,
             }),
           )
           .filter(presentation => presentation !== null);
@@ -1453,15 +1490,11 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         recentCache.getArtifact(presentation.artifact.id),
       );
       if (!retainedPresentation) throw new Error('图片无法加入页面内存缓存');
-      if (
-        displayMode === 'inline' &&
-        retainFirstResult &&
-        retainedPresentation.placement &&
-        !rememberAutoPlacement(retainedPresentation.placement, task, deferredScope)
-      ) {
-        task.artifactId = null;
-        if (cache.get(imageTaskKey(task)) === task) task.status = 'cancelled';
-        return;
+      if (displayMode === 'inline' && retainedPresentation.placement) {
+        const siblings = placementCache.placements.value.filter(item =>
+          isSameScope(placementScope(item), taskScope(task)),
+        );
+        workflow.keepBase(workflow.base(siblings) ?? retainedPresentation.placement, siblings);
       }
       if (displayMode === 'inline') removeRenderedTaskHost(task);
       task.artifactId = retainedPresentation.artifact.id;
@@ -1532,6 +1565,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         generationId: generation.id,
       });
       taskRetentionToken.set(task, retention.token(taskScope(task)));
+      const messageRef = rawMessageRef(messageId);
+      if (messageRef) taskMessageRefs.set(task, messageRef);
       cache.set(task);
       if (generation.displayMode === 'inline') {
         inlineTaskKeys.add(imageTaskKey(task));
@@ -1560,6 +1595,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     const currentSettings = settings;
     const groupId = SillyTavern.groupId;
     const isSwipe = isSwipeGeneration(type, dryRun);
+    const isRegenerate = type === 'regenerate' && !dryRun;
+    floorDecisions.sync(SillyTavern.chat);
     const pendingSwipe = pendingSwipeTarget;
     pendingSwipeTarget = null;
     const pendingSwipeMessage = isSwipe && pendingSwipe ? getChatMessages(-1, { include_swipes: true })[0] : undefined;
@@ -1608,24 +1645,36 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       return;
     }
 
-    const nextFloorCount = isSwipe ? normalAssistantFloorCount : normalAssistantFloorCount + 1;
-    const decision =
-      isSwipe && swipeDecision
-        ? swipeDecision
-        : decideFloorTrigger({
-            enabled: currentSettings.enabled,
-            isNormalGeneration: true,
-            isGroupChat: false,
-            normalAssistantFloorCount: nextFloorCount,
-            displaySettings: currentSettings.displaySettings,
-          });
+    const regenerationTarget =
+      isRegenerate && getChatMessages(-1)[0]?.role === 'assistant' ? getLastMessageId() : undefined;
+    const eligibility = floorDecisions.prepare({
+      type: isSwipe ? 'swipe' : isRegenerate ? 'regenerate' : 'normal',
+      chat: SillyTavern.chat,
+      freshUserInput: type === 'normal' && String($('#send_textarea').val?.() ?? '').trim().length > 0,
+      targetMessageId: isSwipe ? swipeMessageId! : regenerationTarget,
+      decide: nextFloorCount =>
+        decideFloorTrigger({
+          enabled: currentSettings.enabled,
+          isNormalGeneration: true,
+          isGroupChat: false,
+          normalAssistantFloorCount: nextFloorCount,
+          displaySettings: currentSettings.displaySettings,
+        }),
+    });
+    if (!eligibility) {
+      activeGeneration = null;
+      installPrompt(null);
+      return;
+    }
+    const { nextFloorCount, decision } = eligibility;
     audit.run_id += 1;
     const generation: GenerationState = {
       id: `story-image-${Date.now()}-${audit.run_id}`,
-      type: isSwipe ? 'swipe' : 'normal',
-      messageId: isSwipe ? swipeMessageId : null,
+      type: isSwipe ? 'swipe' : isRegenerate ? 'regenerate' : 'normal',
+      eligibility,
+      messageId: isSwipe ? swipeMessageId : (regenerationTarget ?? null),
       chatId: memoryChatId,
-      startChatLength: SillyTavern.chat.length,
+      startChatLength: regenerationTarget ?? SillyTavern.chat.length,
       startTailRef: (() => {
         const tailId = getLastMessageId();
         return tailId >= 0 ? rawMessageRef(tailId) : null;
@@ -1644,13 +1693,31 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     };
     if (decision.shouldTrigger && generation.displayMode === 'inline') {
       generation.continuity = captureContinuity(
-        isSwipe ? swipeMessageId! : SillyTavern.chat.length,
+        isSwipe ? swipeMessageId! : (regenerationTarget ?? SillyTavern.chat.length),
         generation.preset.id,
         generation.outputPreset.id,
-        generation.preset.instructionText.includes('{{xx_pic}}') ||
-          generation.outputPreset.templateText.includes('{{xx_pic}}') ||
-          generation.outputPreset.usePreviousStoryImage === true,
+        generation.outputPreset.usePreviousStoryImage === true,
       );
+      if (generation.outputPreset.usePreviousStoryImage) {
+        const latest = placementCache.placements.value
+          .filter(
+            placement =>
+              placement.continuity?.drawingPresetId === generation.preset.id &&
+              placement.continuity?.outputPresetId === generation.outputPreset.id &&
+              placement.target.messageId < (isSwipe ? swipeMessageId! : generation.startChatLength) &&
+              currentSwipeId(placement.target.messageId) === placement.target.swipeId,
+          )
+          .sort((a, b) => b.target.messageId - a.target.messageId || b.target.imageIndex - a.target.imageIndex)[0];
+        const source = generation.continuity.source;
+        if (!source) toastr.info('暂无已确认镜头，本次不使用剧情图参考。');
+        else if (
+          latest &&
+          (latest.target.messageId > source.messageId ||
+            (latest.target.messageId === source.messageId && latest.target.imageIndex > source.imageIndex))
+        ) {
+          toastr.info(`上一镜头尚未确认，本次沿用第 ${source.messageId} 楼已确认镜头。`);
+        }
+      }
     }
     activeGeneration = generation;
     audit.generation = { id: generation.id, status: 'running' };
@@ -1680,21 +1747,21 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     const candidates = [
       eventMessageId,
       generation.type === 'swipe' ? generation.messageId : null,
-      generation.type === 'normal' ? getLastMessageId() : null,
-      generation.type === 'normal' ? SillyTavern.chat.length - 1 : null,
+      generation.type !== 'swipe' ? getLastMessageId() : null,
+      generation.type !== 'swipe' ? SillyTavern.chat.length - 1 : null,
     ];
     const seen = new Set<number>();
     for (const candidate of candidates) {
       if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0 || seen.has(candidate))
         continue;
       seen.add(candidate);
-      if (generation.type === 'normal' && candidate < generation.startChatLength) continue;
+      if (generation.type !== 'swipe' && candidate < generation.startChatLength) continue;
       const rawMessage = rawMessageRef(candidate);
       const message = getChatMessages(candidate)[0];
       if (
         message?.role !== 'assistant' ||
         !rawMessage ||
-        (generation.type === 'normal' && rawMessage === generation.startTailRef)
+        (generation.type !== 'swipe' && rawMessage === generation.startTailRef)
       )
         continue;
       if (generation.type === 'swipe' && generation.messageId !== null && candidate !== generation.messageId) continue;
@@ -1721,10 +1788,32 @@ export function createStoryImageRuntime(): StoryImageRuntime {
 
     generation.messageId = messageId;
     activeGeneration = null;
-    if (generation.type === 'normal') {
-      normalAssistantFloorCount = generation.nextFloorCount;
-      floorDecisions.set(rawMessageRef(messageId), generation.decision);
-    } else {
+    const receivedRef = rawMessageRef(messageId);
+    const predecessor = rawMessageRef(messageId - 1);
+    const committed =
+      receivedRef &&
+      floorDecisions.commit(
+        generation.eligibility,
+        receivedRef,
+        SillyTavern.chat,
+        predecessor && SillyTavern.chat[messageId - 1]?.is_user ? predecessor : undefined,
+      );
+    if (!committed) {
+      // This text generation no longer owns the reply position. Do not parse or
+      // clean its body, launch image tasks, or touch another generation's work.
+      installPrompt(null);
+      releaseContinuity(generation.continuity, true);
+      if (audit.generation.id === generation.id) {
+        audit.generation.status = 'success';
+        audit.gift.status = generation.displayMode === 'gift' ? 'skipped' : 'idle';
+        audit.gift.last_skip_reason = 'stale-reply';
+      }
+      if (generation.type === 'swipe') audit.swipe = { ...audit.swipe, started: false, skipped: true };
+      syncRuntimeStatus();
+      return;
+    }
+    normalAssistantFloorCount = floorDecisions.count;
+    if (generation.type === 'swipe') {
       audit.swipe = { ...audit.swipe, message_id: messageId, started: true, skipped: false };
     }
     audit.gift.assistant_reply_count = normalAssistantFloorCount;
@@ -1777,6 +1866,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     audit.arrival_notice = { status: 'idle', shown: false };
     audit.last_error = null;
     retention.clear();
+    workflow.clear();
     messageAdvance.seed(SillyTavern.chat);
     syncCacheAudit();
   };
@@ -1796,6 +1886,40 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     status,
     audit,
     recentImages: recentCache.images,
+    workbenchShots,
+    confirmWorkbenchImage: placementId => {
+      const placement = placementCache.get(placementId);
+      if (placement) void placementRenderHandlers.onPin?.(placement);
+    },
+    abandonWorkbenchShot: shotId => {
+      const shot = workbenchShots.value.find(item => item.id === shotId);
+      if (!shot) return;
+      pruneExactScope(shot, null);
+      syncCacheAudit();
+      syncRuntimeStatus();
+      renderPlacementsForMessage(shot.messageId);
+    },
+    editWorkbenchImage: async placementId => {
+      const placement = placementCache.get(placementId);
+      if (placement && canBeginManualRevision(placement, placement.prompt))
+        await placementRenderHandlers.onEditPrompt?.(placement);
+    },
+    redrawWorkbenchImage: async placementId => {
+      const placement = placementCache.get(placementId);
+      if (placement && canBeginManualRevision(placement, placement.prompt))
+        await placementRenderHandlers.onRegionRedraw?.(placement);
+    },
+    removeWorkbenchImage: placementId => {
+      const placement = placementCache.get(placementId);
+      if (placement) void placementRenderHandlers.onDelete?.(placement);
+    },
+    jumpToWorkbenchShot: shotId => {
+      const shot = workbenchShots.value.find(item => item.id === shotId);
+      if (!shot || !rawMessageRef(shot.messageId)) return;
+      const element = retrieveDisplayedMessage(shot.messageId)[0];
+      if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      else toastr.info('该楼层尚未加载，请先在聊天中加载较早消息。');
+    },
     saveRecentImageToGallery: async artifactId => {
       const resource = recentCache.cloneResource(artifactId);
       if (!resource) throw new Error('图片已不在页面内存中');
@@ -1880,8 +2004,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         renderInlineTasksForMessage(messageId, swipeId);
         renderPlacementsForMessage(messageId, swipeId);
         updateTaskAudit(messageId, swipeId);
+        syncWorkbench();
       });
       listen(tavern_events.MESSAGE_SWIPE_DELETED, eventData => {
+        const sourceMessageRef = rawMessageRef(eventData.messageId);
+        for (const snapshot of continuityOwners.keys()) {
+          if (!sourceMessageRef || snapshotMessageRefs.get(snapshot) !== sourceMessageRef) continue;
+          const sourceSwipe = snapshotSwipeIds.get(snapshot);
+          if (sourceSwipe === eventData.swipeId) releaseContinuity(snapshot, true);
+          else if (sourceSwipe !== undefined && sourceSwipe > eventData.swipeId)
+            snapshotSwipeIds.set(snapshot, sourceSwipe - 1);
+        }
         pendingSwipeTarget = null;
         abortPromptEditor();
         abortRegionEditor();
@@ -1896,6 +2029,17 @@ export function createStoryImageRuntime(): StoryImageRuntime {
             inline: inlineTaskKeys.has(imageTaskKey(task)),
           }))
           .sort((left, right) => left.oldScope.swipeId - right.oldScope.swipeId);
+        const affectedScopes = new Map<string, ImageRetentionScope>();
+        placementCache.placements.value
+          .filter(
+            placement =>
+              placement.target.messageId === eventData.messageId && placement.target.swipeId >= eventData.swipeId,
+          )
+          .forEach(placement => {
+            const scope = placementScope(placement);
+            affectedScopes.set(imageRetentionScopeKey(scope), scope);
+          });
+        shiftedTasks.forEach(({ oldScope }) => affectedScopes.set(imageRetentionScopeKey(oldScope), oldScope));
         shiftedTasks.forEach(({ task }) => removeRenderedTaskHost(task));
         cache.removeSwipe(memoryChatId, eventData.messageId, eventData.swipeId);
         placementCache.removeSwipe(eventData.messageId, eventData.swipeId);
@@ -1908,11 +2052,22 @@ export function createStoryImageRuntime(): StoryImageRuntime {
               artifact.target.swipeId === eventData.swipeId,
           )
           .forEach(artifact => recentCache.remove(artifact.id));
+        [...affectedScopes.values()]
+          .sort((left, right) => left.swipeId - right.swipeId)
+          .forEach(scope => {
+            if (scope.swipeId === eventData.swipeId) retention.forgetScope(scope);
+            else {
+              const targetScope = { ...scope, swipeId: scope.swipeId - 1 };
+              // Ascending migration has already vacated this position. Its old
+              // token must not invalidate the surviving reply's manual request.
+              retention.forgetScope(targetScope);
+              retention.moveScope(scope, targetScope);
+            }
+          });
         cache.shiftSwipeIdsAfterDeletion(memoryChatId, eventData.messageId, eventData.swipeId);
-        shiftedTasks.forEach(({ task, oldKey, oldScope, inline }) => {
+        shiftedTasks.forEach(({ task, oldKey, inline }) => {
           inlineTaskKeys.delete(oldKey);
           if (inline) inlineTaskKeys.add(imageTaskKey(task));
-          if (inline) retention.moveScope(oldScope, taskScope(task));
           taskRetentionToken.set(task, retention.token(taskScope(task)));
         });
         placementCache.shiftSwipeIdsAfterDeletion(eventData.messageId, eventData.swipeId);
@@ -1972,12 +2127,20 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         renderPlacementsForMessage(messageId);
       });
       listen(tavern_events.MESSAGE_DELETED, () => {
+        floorDecisions.sync(SillyTavern.chat);
         abortPromptEditor();
         abortRegionEditor();
-        abortManualRevisions();
-        clearPrompt();
-        clearContinuity();
-        activeGeneration = null;
+        placementCache.placements.value
+          .filter(placement => {
+            const messageRef = placementCache.messageRef(placement.id);
+            return !messageRef || rawMessageRef(placement.target.messageId) !== messageRef;
+          })
+          .forEach(placement => abortManualRevisionsForPlacement(placement.id));
+        if (activeGeneration?.type !== 'regenerate') {
+          clearPrompt();
+          releaseContinuity(activeGeneration?.continuity, true);
+          activeGeneration = null;
+        }
         recentCache.reconcileMessageIndexes(memoryChatId, SillyTavern.chat);
         recentCache.artifacts.value
           .filter(
@@ -1985,14 +2148,18 @@ export function createStoryImageRuntime(): StoryImageRuntime {
               artifact.purpose === 'current' && artifact.chatId === memoryChatId && artifact.target.messageId === null,
           )
           .forEach(artifact => recentCache.remove(artifact.id));
-        cache.clear();
-        inlineTaskKeys.clear();
+        cache
+          .values()
+          .filter(task => rawMessageRef(task.messageId) !== taskMessageRefs.get(task))
+          .forEach(removeTask);
         placementCache.reconcileMessageIndexes(SillyTavern.chat);
+        checkContinuity();
         prunePlacementSelectionMemory();
         clearRenderedHosts();
         sourceCleanupInFlight.clear();
         giftArrivalNoticeGenerations.clear();
-        audit.generation = { id: null, status: 'pending' };
+        if (!activeGeneration && manualRevisionControllers.size === 0)
+          audit.generation = { id: null, status: 'pending' };
         pendingSwipeTarget = null;
         audit.markers = { count: 0, valid_count: 0, truncated: false };
         audit.tasks = [

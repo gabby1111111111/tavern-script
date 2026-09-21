@@ -26,7 +26,6 @@ const selectedRevisionByVariant = new Map<string, RevisionSelection>();
 const selectedVariantByGroup = new Map<string, number>();
 const activePlacementActions = new Set<string>();
 const loadingPlacementActions = new Set<string>();
-const renderedPlacements = new WeakSet<ImagePlacement>();
 
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -238,6 +237,17 @@ function rememberedRevision(
     if (byRevision.length > 0) return latestRevision(byRevision);
   }
   return latestRevision(placements);
+}
+
+/** Explicitly choose the retained base; new candidates never call this automatically. */
+export function selectImagePlacement(placement: ImagePlacement, onlyIfMissing = false): void {
+  const groupKey = placementGroupKey(placement);
+  if (onlyIfMissing && selectedVariantByGroup.has(groupKey)) return;
+  selectedVariantByGroup.set(groupKey, placement.variantIndex);
+  selectedRevisionByVariant.set(`${groupKey}::${placement.variantIndex}`, {
+    placementId: placement.id,
+    revisionIndex: placement.revisionIndex,
+  });
 }
 
 export function getSelectedImagePlacements(placements: ReadonlyArray<ImagePlacement>): ImagePlacement[] {
@@ -643,8 +653,8 @@ function syncPlacementActionButtons(
     const available = $button.attr('data-story-image-action-available') === 'true';
     const pinned = action === 'pin' && handlers?.isPinned?.(placement) === true;
     const symbol =
-      action === 'pin' ? (pinned ? '已固定' : '📌') : ($button.attr('data-story-image-action-label') ?? '');
-    const title = pinned ? '已固定（保留此版本）' : action === 'pin' ? '固定此版本并清理同位置其他版本' : undefined;
+      action === 'pin' ? (pinned ? '已确认' : '确认') : ($button.attr('data-story-image-action-label') ?? '');
+    const title = pinned ? '已确认（后续剧情可参考）' : action === 'pin' ? '确认此图并清理本镜头其他版本' : undefined;
     const actionKey = placementActionKey(placement, action);
     const active = activePlacementActions.has(actionKey);
     const loading = loadingPlacementActions.has(actionKey);
@@ -706,8 +716,6 @@ function renderPlacementContent(
     .find('[data-story-image-placement-id]')
     .filter((_index, element) => $(element).attr('data-story-image-placement-id') === placement.id)
     .first() as JQuery<HTMLElement>;
-  const isFirstPlacementRender = !renderedPlacements.has(placement);
-  renderedPlacements.add(placement);
   if ($slide.length === 0) {
     $slide = $('<div class="story-image-revision">')
       .attr('data-story-image-placement-id', placement.id)
@@ -782,17 +790,11 @@ function renderPlacementContent(
     };
     addAction('edit-prompt', '✎', '修改提示词并生成', handlers?.onEditPrompt);
     addAction('region-redraw', '▧', '区域重绘', handlers?.onRegionRedraw);
-    addAction('pin', '📌', '固定此版本并清理同位置其他版本', handlers?.onPin);
+    addAction('pin', '确认', '确认此图并清理本镜头其他版本', handlers?.onPin);
     addAction('delete', '×', '删除当前版本', handlers?.onDelete);
     $media.append($actions);
   }
   refreshPlacementHost($host);
-  if (isFirstPlacementRender && placement.revisionIndex > 0) {
-    setRevisionSelection($host, $slot, $slide[0]);
-    refreshRevisionSlot($host, $slot);
-    const $carouselForSelection = $host.find('.story-image-carousel').first() as JQuery<HTMLElement>;
-    refreshVariantSelection($host, $carouselForSelection, variantSlots($carouselForSelection));
-  }
   syncPlacementActionButtons($slide, placement, handlers);
 
   const isCurrentImage = (): boolean => $slide.find('img.story-image-inline-image').first()[0] === image;

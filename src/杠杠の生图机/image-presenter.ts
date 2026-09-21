@@ -28,6 +28,7 @@ export type ImagePresentationInput = {
   continuity?: StoryContinuityMetadata;
   /** Lightweight provenance for the exact references sent with this image. */
   referenceKinds?: ReadonlyArray<ImageReferenceKind>;
+  referenceSource?: Readonly<{ messageId: number; swipeId: number; imageIndex: number }> | null;
 };
 
 export type ImagePresentation = {
@@ -90,6 +91,7 @@ export function presentGeneratedImage(
       messageRef: input.messageRef,
       continuity: input.continuity,
       referenceKinds: input.referenceKinds,
+      referenceSource: input.referenceSource,
     });
     if (!placement) {
       // An artifact without a renderable inline owner is not useful and would

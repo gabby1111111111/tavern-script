@@ -72,7 +72,7 @@ async function verify(mode: ImageRequestMode, avatars: boolean, prior: boolean, 
     ...(prior ? ['上一镜头参考图'] : []),
   ];
   const expectedPrompt =
-    `${labels.map((label, index) => `图${index + 1}：${label}`).join('\n')}\nPrevious: previous scene\nCurrent: new scene`.trim();
+    `${labels.map((label, index) => `图${index + 1}：${label}`).join('\n') || 'null'}\nPrevious: ${prior ? 'previous scene' : 'null'}\nCurrent: new scene`.trim();
   const resources = await requestImages({ ...profile, requestMode: mode }, processed, new AbortController().signal);
   assert.equal(resources.length, 1);
   assert.equal(avatarReads, avatars ? 1 : 0);
@@ -156,7 +156,7 @@ async function verifyReadFailure(mode: ImageRequestMode, allMissing = false): Pr
     preview.referenceSources?.map(source => source.kind) ?? [],
     allMissing ? [] : ['character-avatar', 'previous-story-image'],
   );
-  assert.equal(preview.prompt, allMissing ? '\nscene' : '图1：角色头像\n图2：上一镜头参考图\nscene');
+  assert.equal(preview.prompt, allMissing ? 'null\nscene' : '图1：角色头像\n图2：上一镜头参考图\nscene');
   const submitted = await processDrawingPrompt(preset, 'scene', {
     readReferences: async () => {
       throw new Error('must not reread avatars');
@@ -173,7 +173,7 @@ async function verifyReadFailure(mode: ImageRequestMode, allMissing = false): Pr
   assert.equal(posts.length, 1);
   if (allMissing && mode !== 'chat-multimodal') {
     const body = JSON.parse(posts[0].body as string);
-    assert.equal(body.prompt, 'scene');
+    assert.equal(body.prompt, 'null\nscene');
     assert.equal(body.images, undefined);
     assert.equal(posts[0].body instanceof FormData, false, 'all failed optional refs use ordinary generation body');
   }
@@ -248,6 +248,101 @@ async function verifyRemotePassThrough(): Promise<void> {
   assert.equal(reads, 0);
 }
 
+async function verifySrcdocRelativeReferencePipeline(): Promise<void> {
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const previousFetch = globalThis.fetch;
+  const runtimeWindow = (globalThis as typeof globalThis & { window: { location: { href: string } } }).window;
+  const originalHref = runtimeWindow.location.href;
+  const sourceDocument = { baseURI: 'https://tavern.test/' };
+  const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: sourceDocument,
+    writable: true,
+  });
+  runtimeWindow.location.href = 'about:srcdoc';
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), init });
+    if (init?.method === 'GET') {
+      return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
+    }
+    return new Response(JSON.stringify({ data: [{ url: 'https://provider.test/result.png' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    for (const mode of ['json-reference', 'chat-multimodal', 'multipart-edit'] as const) {
+      const currentProfile = { ...profile, requestMode: mode };
+      const processed = await processDrawingPrompt(
+        createOutputPreset({
+          templateText: '{{reference_sources}}\n{{xx}}',
+          useAvatarReferences: true,
+          usePreviousStoryImage: true,
+        }),
+        'scene',
+        {
+          readReferences: async () => ({
+            references: [
+              { source: 'persona', value: '/user/images/persona.png' },
+              { source: 'character', value: '/characters/character.png' },
+            ],
+            failedSources: [],
+          }),
+          previousStoryImage: previous,
+          referenceContext: { profile: currentProfile, signal: new AbortController().signal },
+        },
+      );
+      assert.deepEqual(
+        processed.referenceSources?.map(source => source.kind),
+        ['user-avatar', 'character-avatar', 'previous-story-image'],
+        `${mode} 在 about:srcdoc 下应保留全部三个参考来源`,
+      );
+      assert.equal(processed.referenceImages?.length, 3, `${mode} 应保留全部三个参考输入`);
+      await requestImages(currentProfile, processed, new AbortController().signal);
+      assert.equal(calls.length, 3, `${mode} 应先读取两张头像，再只发起一次图片 POST`);
+      assert.deepEqual(
+        calls.slice(0, 2).map(call => call.url),
+        ['https://tavern.test/user/images/persona.png', 'https://tavern.test/characters/character.png'],
+        `${mode} 应使用 document.baseURI 读取相对头像`,
+      );
+      const post = calls[2].init;
+      if (mode === 'multipart-edit') {
+        assert(post?.body instanceof FormData, 'multipart 应发送 FormData');
+        assert.equal((post.body as FormData).getAll('image[]').length, 3, 'multipart 应发送三个参考图文件');
+      } else {
+        assert.equal(typeof post?.body, 'string', `${mode} 应发送 JSON body`);
+        const body = JSON.parse(post!.body as string) as Record<string, unknown>;
+        if (mode === 'chat-multimodal') {
+          const content = (body.messages as Array<{ content: unknown }>)[0].content as Array<{
+            type: string;
+            image_url?: { url: string };
+          }>;
+          assert.equal(content.length, 4, 'chat 应发送文本和三个参考图');
+          assert(
+            content.slice(1).every(item => item.image_url?.url.startsWith('data:image/png;base64,')),
+            'chat 参考图应为 data URL',
+          );
+        } else {
+          const images = body.images as unknown[];
+          assert.equal(images.length, 3, 'json-reference 应发送三个参考图');
+          assert(
+            images.every(value => typeof value === 'string' && value.startsWith('data:image/png;base64,')),
+            'JSON 参考图应为 data URL',
+          );
+        }
+      }
+      calls.length = 0;
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+    runtimeWindow.location.href = originalHref;
+    if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
+}
+
 async function run(): Promise<void> {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -267,6 +362,7 @@ async function run(): Promise<void> {
     }
     await verifyAbortAndTimeout();
     await verifyRemotePassThrough();
+    await verifySrcdocRelativeReferencePipeline();
     console.info('story-image continuity API integration and optional read failure tests passed');
   } finally {
     globalThis.fetch = originalFetch;

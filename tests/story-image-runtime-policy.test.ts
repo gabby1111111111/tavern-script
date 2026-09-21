@@ -2,6 +2,7 @@ import {
   isMatchingAssistantReply,
   isMatchingNormalAssistantReply,
   isNormalGeneration,
+  isRegenerateGeneration,
   isSwipeGeneration,
   isSingleCharacterChat,
   MessageIdentityStore,
@@ -20,6 +21,9 @@ for (const type of ['quiet', 'regenerate', 'impersonate', 'continue', 'swipe', '
 assertEqual(isSwipeGeneration('swipe'), true);
 assertEqual(isSwipeGeneration('swipe', true), false);
 assertEqual(isSwipeGeneration('normal'), false);
+assertEqual(isRegenerateGeneration('regenerate'), true);
+assertEqual(isRegenerateGeneration('regenerate', true), false);
+assertEqual(isRegenerateGeneration('normal'), false);
 
 assertEqual(isSingleCharacterChat(''), true);
 assertEqual(isSingleCharacterChat(undefined), true);
@@ -38,6 +42,32 @@ assertEqual(identities.get(survivingMessage), undefined, 'chat changes must rese
 
 assertEqual(shouldArmStoryImageGeneration({ enabled: true, type: 'normal', dryRun: false, groupId: '' }), true);
 assertEqual(shouldArmStoryImageGeneration({ enabled: true, type: 'normal', dryRun: false, groupId: 'group-1' }), false);
+assertEqual(shouldArmStoryImageGeneration({ enabled: true, type: 'regenerate', dryRun: false, groupId: '' }), true);
+for (const type of ['quiet', 'continue', 'impersonate', 'regenerate']) {
+  assertEqual(shouldArmStoryImageGeneration({ enabled: true, type, dryRun: true, groupId: '' }), false);
+}
+for (const receivedType of ['normal', 'regenerate']) {
+  assertEqual(
+    isMatchingAssistantReply({
+      generationType: 'regenerate',
+      receivedType,
+      role: 'assistant',
+      expectedMessageId: 8,
+      receivedMessageId: 8,
+    }),
+    true,
+  );
+}
+assertEqual(
+  isMatchingAssistantReply({
+    generationType: 'regenerate',
+    receivedType: 'swipe',
+    role: 'assistant',
+    expectedMessageId: 8,
+    receivedMessageId: 8,
+  }),
+  false,
+);
 assertEqual(
   shouldArmStoryImageGeneration({
     enabled: true,

@@ -3,7 +3,7 @@
   <section class="story-image-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の生图机 V0.4.0</b>
+        <b>杠杠の生图机 V0.4.2</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
@@ -127,7 +127,8 @@
               <span>Swipe 新回答也生图</span>
             </label>
             <p class="story-image-settings__description">
-              仅对原本符合出图频率的楼层生效；只有生成新的 Swipe 回答时才调用图片 API，切换已有 Swipe 不会调用。
+              仅控制有配图资格的楼层生成新 Swipe 时是否生图；切换已有 Swipe
+              不重复请求。删楼再生成、直接重新生成不受此开关影响。
             </p>
           </div>
 
@@ -224,13 +225,13 @@
             </label>
             <p class="story-image-settings__description">
               <code v-text="'{{xx}}'"></code> 是本次镜头文字；<code v-text="'{{xx_pic}}'"></code>
-              是上一镜头文字（画图预设也可用）。文字引用与图片开关独立。
+              是上一镜头文字（画图预设也可用）。关闭上一镜头图开关时，两处均展开为 null。
               <code v-text="'{{reference_sources}}'"></code>
-              在出图模板中展开实际图号和来源说明。没有上一图时使用空文字并跳过该图。
+              在出图模板中展开实际图号和来源说明。没有已确认上一图时，上一镜头文字为 null，并跳过该图。
             </p>
             <button class="menu_button" type="button" @click="addContinuousStoryExamples">添加连续剧情示例预设</button>
             <p class="story-image-settings__description">
-              添加一对示例供手动选择，不改变当前选择。连续线按画图与出图预设组合区分，使用前楼当前显示的图片；礼物图不参与。
+              添加一对示例供手动选择，不改变当前选择。连续线按画图与出图预设组合区分，使用前楼最近已确认的镜头；礼物图不参与。
             </p>
             <p class="story-image-settings__description story-image-settings__avatar-reference-note">
               参考图依次为 User 头像、角色头像、上一镜头图；缺失来源会跳过，编号按实际图片顺序排列。

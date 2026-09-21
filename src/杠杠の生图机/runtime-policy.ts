@@ -6,6 +6,10 @@ export function isSwipeGeneration(type: string, dryRun = false): boolean {
   return !dryRun && type === 'swipe';
 }
 
+export function isRegenerateGeneration(type: string, dryRun = false): boolean {
+  return !dryRun && type === 'regenerate';
+}
+
 export function isSingleCharacterChat(groupId: unknown): boolean {
   return typeof groupId !== 'string' || groupId.trim().length === 0;
 }
@@ -42,23 +46,22 @@ export function shouldArmStoryImageGeneration(input: {
   swipeFloorEligible?: boolean;
 }): boolean {
   if (!input.enabled || !isSingleCharacterChat(input.groupId)) return false;
-  if (isNormalGeneration(input.type, input.dryRun)) return true;
+  if (isNormalGeneration(input.type, input.dryRun) || isRegenerateGeneration(input.type, input.dryRun)) return true;
   return (
-    input.generateOnSwipe === true &&
-    input.swipeFloorEligible === true &&
-    isSwipeGeneration(input.type, input.dryRun)
+    input.generateOnSwipe === true && input.swipeFloorEligible === true && isSwipeGeneration(input.type, input.dryRun)
   );
 }
 
 export function isMatchingAssistantReply(input: {
-  generationType: 'normal' | 'swipe';
+  generationType: 'normal' | 'swipe' | 'regenerate';
   receivedType: string;
   role: string | undefined;
   expectedMessageId: number | null;
   receivedMessageId: number;
 }): boolean {
   return (
-    input.receivedType === input.generationType &&
+    (input.receivedType === input.generationType ||
+      (input.generationType === 'regenerate' && input.receivedType === 'normal')) &&
     input.role === 'assistant' &&
     (input.expectedMessageId === null || input.expectedMessageId === input.receivedMessageId)
   );

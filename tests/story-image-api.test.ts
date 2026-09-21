@@ -1,6 +1,7 @@
 import {
   collectImageResources,
   ImageApiError,
+  materializeReferenceImage,
   requestImage,
   requestImages,
   type ImageRequestMode,
@@ -410,6 +411,77 @@ const testChatAndJsonReferenceModes = async (): Promise<void> => {
   assert(!('images' in jsonBody), 'json-reference 不应保留其他引用字段');
 };
 
+const testSrcdocReferenceBaseResolution = async (): Promise<void> => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const sourceDocument = { baseURI: 'https://tavern.test/chat' };
+  const sourceWindow = {
+    atob,
+    btoa,
+    location: { href: 'about:srcdoc' },
+    parent: { location: { href: 'https://tavern.test/' } },
+    setTimeout: testWindowSetTimeout,
+    clearTimeout: testWindowClearTimeout,
+  };
+  const reads: string[] = [];
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: sourceWindow,
+    writable: true,
+  });
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: sourceDocument,
+    writable: true,
+  });
+  globalObject.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    equal(init?.method, 'GET', '参考预处理只应读取头像，不应发起生图 POST');
+    reads.push(String(input));
+    return responseWithLocalReference();
+  };
+
+  try {
+    const references = ['/user/images/persona.png', 'https://tavern.test/characters/character.png'];
+    for (const mode of ['json-reference', 'chat-multimodal', 'multipart-edit'] as const) {
+      for (const reference of references) {
+        const materialized = await materializeReferenceImage(
+          reference,
+          { ...profile, requestMode: mode },
+          new AbortController().signal,
+        );
+        assert(materialized.startsWith('data:image/png;base64,'), `${mode} 应将 ST 同源参考图转换为 data URL`);
+      }
+    }
+    equal(
+      reads,
+      [
+        'https://tavern.test/user/images/persona.png',
+        'https://tavern.test/characters/character.png',
+        'https://tavern.test/user/images/persona.png',
+        'https://tavern.test/characters/character.png',
+        'https://tavern.test/user/images/persona.png',
+        'https://tavern.test/characters/character.png',
+      ],
+      'about:srcdoc 下应使用 document.baseURI 解析相对和同源绝对参考图',
+    );
+
+    sourceDocument.baseURI = 'about:srcdoc';
+    reads.length = 0;
+    await materializeReferenceImage(
+      '/fallback/avatar.png',
+      { ...profile, requestMode: 'json-reference' },
+      new AbortController().signal,
+    );
+    equal(reads, ['https://tavern.test/fallback/avatar.png'], 'document.baseURI 不可用时应回退到父页面来源');
+  } finally {
+    globalObject.fetch = originalFetch;
+    if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+    else Reflect.deleteProperty(globalThis, 'document');
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+};
+
 const testResponseBodyTimeout = async (): Promise<void> => {
   calls.length = 0;
   const tracked = trackedSignal();
@@ -570,6 +642,7 @@ testNoReferences()
   .then(testCandidateRepresentationDeduplication)
   .then(testSingleImageCompatibility)
   .then(testChatAndJsonReferenceModes)
+  .then(testSrcdocReferenceBaseResolution)
   .then(testResponseBodyTimeout)
   .then(testLateConsumerTimeoutGuard)
   .then(testParentCancellationDuringResponseBody)

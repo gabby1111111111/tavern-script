@@ -1,9 +1,11 @@
-# 杠杠の生图机 V0.4.0
+# 杠杠の生图机 V0.4.2
 
 一个运行在 SillyTavern / Tavern Helper 中的轻量异步生图脚本。正文 AI 按当前画图预设输出
 `<pic prompt="...">`，脚本在正文完成后异步生图；失败只跳过图片，不阻塞聊天。
 
-当前稳定版本为 v0.4.0，公开安装请使用固定标签 `杠杠の生图机-v0.4.0`。
+当前稳定版本为 v0.4.2，公开安装请使用固定标签 `杠杠の生图机-v0.4.2`。
+
+v0.4.2 已完成异步剧情图改造；开发行为与验收记录见 [v0.4.2 执行记录](docs/V0.4.2-DEVELOPMENT.md)。
 
 ## 安装
 
@@ -12,10 +14,10 @@
 新建一个 Tavern Helper 后台脚本，填入下面的固定版本导入语句：
 
 ```ts
-import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の生图机-v0.4.0/dist/杠杠の生图机/index.js';
+import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の生图机-v0.4.2/dist/杠杠の生图机/index.js';
 ```
 
-加载后，在扩展设置中应看到标题为“杠杠の生图机 V0.4.0”的设置抽屉。也可以从对应 GitHub Release 下载 `index.js`
+加载后，在扩展设置中应看到标题为“杠杠の生图机 V0.4.2”的设置抽屉。也可以从对应 GitHub Release 下载 `index.js`
 后，按 Tavern Helper 的脚本导入方式加载。
 
 ## 用户怎么使用

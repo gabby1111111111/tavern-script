@@ -27,10 +27,54 @@ export function resolveImageRequestMode(serviceUrl: string, configured: ImageReq
   return 'multipart-edit';
 }
 
+function usableHttpBaseUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tavern Helper scripts can run in an about:srcdoc iframe. Its
+ * window.location.href is not a usable base for resolving ST-relative paths,
+ * while document.baseURI still points at the host page. Keep all URL
+ * resolution behind one safe fallback so the adapter behaves the same in a
+ * normal page, srcdoc, and the Node-only test harness.
+ */
+function runtimeBaseUrl(): string {
+  const candidates: unknown[] = [];
+  if (typeof document !== 'undefined') {
+    try {
+      candidates.push(document.baseURI);
+    } catch {
+      // Some embedded documents can reject base URI access.
+    }
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      candidates.push(window.parent.location.href);
+    } catch {
+      // Cross-origin parent access is expected to fail safely.
+    }
+    try {
+      candidates.push(window.location.href);
+    } catch {
+      // A non-browser harness may expose only part of Window.
+    }
+  }
+  for (const candidate of candidates) {
+    const baseUrl = usableHttpBaseUrl(candidate);
+    if (baseUrl) return baseUrl;
+  }
+  return 'http://localhost/';
+}
+
 function serviceHostname(serviceUrl: string): string {
   try {
-    const baseUrl = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
-    return new URL(serviceUrl.trim(), baseUrl).hostname.toLowerCase();
+    return new URL(serviceUrl.trim(), runtimeBaseUrl()).hostname.toLowerCase();
   } catch {
     return '';
   }
@@ -150,8 +194,7 @@ function markdownImageUrls(value: string): string[] {
 }
 
 export function inferImageEditUrl(serviceUrl: string): string {
-  const baseUrl = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
-  const url = new URL(serviceUrl.trim(), baseUrl);
+  const url = new URL(serviceUrl.trim(), runtimeBaseUrl());
   const pathname = url.pathname.replace(/\/+$/, '');
   if (pathname.endsWith('/generations')) {
     url.pathname = `${pathname.slice(0, -'/generations'.length)}/edits`;
@@ -207,8 +250,7 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
 
 function referenceFilename(value: string, index: number): string {
   try {
-    const baseUrl = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
-    const pathname = new URL(value, baseUrl).pathname;
+    const pathname = new URL(value, runtimeBaseUrl()).pathname;
     const candidate = pathname.split('/').pop()?.trim() ?? '';
     const safe = candidate.replace(/[^a-zA-Z0-9._-]/g, '-');
     if (safe) return safe;
@@ -242,7 +284,7 @@ function isHttpReference(value: string): boolean {
 function isSameOriginReference(value: string): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    const pageUrl = new URL(window.location.href);
+    const pageUrl = new URL(runtimeBaseUrl());
     return new URL(value, pageUrl).origin === pageUrl.origin;
   } catch {
     return false;
@@ -261,7 +303,7 @@ async function resolveJsonReference(value: string, timeoutMs: number, signal: Ab
   if (!normalized) throw new ImageApiError('参考图地址为空');
   if (shouldUseReferenceDirectly(normalized)) return normalized;
 
-  const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, window.location.href).toString() : normalized;
+  const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, runtimeBaseUrl()).toString() : normalized;
   return await fetchWithTimeout(sourceUrl, { method: 'GET' }, timeoutMs, signal, async response => {
     if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
     if (signal.aborted) throw makeAbortError('图片请求已取消');
@@ -626,7 +668,7 @@ export async function materializeReferenceImage(
   const mode = resolveImageRequestMode(profile.serviceUrl, profileRequestMode(profile));
   const timeoutMs = Number.isFinite(profile.timeoutMs) ? Math.max(1000, profile.timeoutMs) : 120000;
   if (mode !== 'multipart-edit') return resolveJsonReference(normalized, timeoutMs, signal);
-  const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, window.location.href).toString() : normalized;
+  const sourceUrl = typeof window !== 'undefined' ? new URL(normalized, runtimeBaseUrl()).toString() : normalized;
   return fetchWithTimeout(sourceUrl, { method: 'GET' }, timeoutMs, signal, async response => {
     if (!response.ok) throw new ImageApiError(`参考图读取失败（HTTP ${response.status}）`);
     return blobToDataUrl(await response.blob());

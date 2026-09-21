@@ -520,7 +520,10 @@
 .story-image-prompt-editor {
   position: fixed;
   z-index: 100000;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -659,7 +662,10 @@
 .story-image-region-editor {
   position: fixed;
   z-index: 100000;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -24,6 +24,7 @@ export type ImagePlacement = Readonly<{
   continuity?: StoryContinuityMetadata;
   /** Known reference provenance for this exact variant/revision. */
   referenceKinds?: ReadonlyArray<ImageReferenceKind>;
+  referenceSource?: Readonly<{ messageId: number; swipeId: number; imageIndex: number }> | null;
 }>;
 
 export type ImagePlacementInput = Pick<ImagePlacement, 'artifactId' | 'target'> & {
@@ -35,6 +36,7 @@ export type ImagePlacementInput = Pick<ImagePlacement, 'artifactId' | 'target'> 
   messageRef?: object | null;
   continuity?: StoryContinuityMetadata;
   referenceKinds?: ReadonlyArray<ImageReferenceKind>;
+  referenceSource?: Readonly<{ messageId: number; swipeId: number; imageIndex: number }> | null;
 };
 export type ImagePlacementCloneProvider = (artifactId: string) => ImageResource | null;
 export type ImagePlacementCacheOptions = {
@@ -83,6 +85,9 @@ export class ImagePlacementCache {
       url: resource.url,
       createdAt: Date.now(),
       ...(input.continuity ? { continuity: normalizeStoryContinuityMetadata(input.continuity) } : {}),
+      ...(input.referenceSource !== undefined
+        ? { referenceSource: input.referenceSource ? Object.freeze({ ...input.referenceSource }) : null }
+        : {}),
       ...(input.referenceKinds ? { referenceKinds: normalizeReferenceKinds(input.referenceKinds) } : {}),
     });
     const ownerKey = `image-placement-owner-${sequence}`;
@@ -106,6 +111,10 @@ export class ImagePlacementCache {
 
   get(id: string): ImagePlacement | undefined {
     return this.items.value.find(item => item.id === id);
+  }
+
+  messageRef(id: string): object | undefined {
+    return this.messageRefs.get(id);
   }
 
   /** A request owns its clone independently from the displayed placement. */

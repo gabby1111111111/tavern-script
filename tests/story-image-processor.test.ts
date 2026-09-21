@@ -1,4 +1,9 @@
-import { processDrawingPrompt, processPrompt } from '../src/杠杠の生图机/prompt-processor';
+import {
+  applyDrawingPromptTemplate,
+  applyOutputPromptTemplate,
+  processDrawingPrompt,
+  processPrompt,
+} from '../src/杠杠の生图机/prompt-processor';
 import type { ImageOutputPreset } from '../src/杠杠の生图机/pipeline-types';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -92,6 +97,36 @@ const testTemplateReplacement = async (): Promise<void> => {
   );
 };
 
+const testEmptyTemplateValues = async (): Promise<void> => {
+  equal(
+    applyOutputPromptTemplate('{{xx}}|{{xx_pic}}|{{reference_sources}}', ' \t', '\n', []),
+    'null|null|null',
+    '三个空模板值（包括纯空白）都应替换为字面量 null',
+  );
+  equal(
+    applyOutputPromptTemplate('{{xx}}|{{xx_pic}}|{{reference_sources}}', '  当前提示词  ', '  上一镜头  ', [
+      { kind: 'user-avatar', label: 'User 头像', value: 'avatar' },
+    ]),
+    '  当前提示词  |  上一镜头  |图1：User 头像',
+    '非空模板值应保留原始内容和周围空白',
+  );
+  equal(
+    applyOutputPromptTemplate('{{xx}}', '外层 {{xx_pic}}'),
+    '外层 {{xx_pic}}',
+    '模板替换必须保持单次处理，不递归替换插入内容',
+  );
+  equal(
+    applyDrawingPromptTemplate('{{xx_pic}}|{{xx}}', ''),
+    'null|{{xx}}',
+    '画图模板的空 xx_pic 应为 null，其他占位符保持原样',
+  );
+  equal(
+    applyDrawingPromptTemplate('{{xx_pic}}', '  上一镜头  '),
+    '  上一镜头  ',
+    '画图模板的非空 xx_pic 应保留原始内容',
+  );
+};
+
 const testProcessingWithReferences = async (): Promise<void> => {
   let readCount = 0;
   const result = await processDrawingPrompt(referencePreset, '场景 prompt', {
@@ -128,6 +163,28 @@ const testProcessingWithReferences = async (): Promise<void> => {
   });
   equal(reversed, { prompt: '反向调用', processing: 'processed' }, '兼容 prompt-first 调用顺序');
   assert(!('referenceImages' in reversed), '关闭头像引用时应省略 referenceImages 字段');
+};
+
+const testDisabledPreviousStory = async (): Promise<void> => {
+  const resolvedReferenceSources = [
+    { kind: 'user-avatar' as const, label: 'User 头像', value: 'user' },
+    { kind: 'previous-story-image' as const, label: '上一镜头参考图', value: 'previous' },
+  ];
+  const result = await processDrawingPrompt(
+    { ...referencePreset, templateText: '{{xx}}|{{xx_pic}}|{{reference_sources}}', usePreviousStoryImage: false },
+    'current',
+    { previousShotPrompt: 'must not leak', previousStoryImage: 'previous', resolvedReferenceSources },
+  );
+  equal(result.prompt, 'current|null|图1：User 头像', '关闭上一镜头开关时屏蔽旧镜头文字与预解析图片');
+  equal(result.referenceImages, ['user'], '保留头像，移除上一镜头图');
+  equal(resolvedReferenceSources.length, 2, '不得修改调用方来源快照');
+  const enabled = await processDrawingPrompt(
+    { ...referencePreset, templateText: '{{xx_pic}}', usePreviousStoryImage: true },
+    'current',
+    { previousShotPrompt: 'previous shot', resolvedReferenceSources },
+  );
+  equal(enabled.prompt, 'previous shot', '开启上一镜头时保留镜头文字');
+  equal(enabled.referenceImages, ['user', 'previous'], '开启时保留完整参考顺序');
 };
 
 const testCurrentAvatarAdapter = async (): Promise<void> => {
@@ -169,7 +226,9 @@ const testCurrentAvatarAdapter = async (): Promise<void> => {
 
 testDefaultTemplateWithoutReferences()
   .then(testTemplateReplacement)
+  .then(testEmptyTemplateValues)
   .then(testProcessingWithReferences)
+  .then(testDisabledPreviousStory)
   .then(testCurrentAvatarAdapter)
   .then(() => console.info('<杠杠の生图机> story image processor tests passed'))
   .catch(error => {
