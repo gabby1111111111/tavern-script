@@ -443,13 +443,6 @@
   opacity: 1 !important;
 }
 
-.story-image-revision__button[data-story-image-action='pin'] {
-  width: auto;
-  min-width: 2rem;
-  padding: 0 0.45rem;
-  border-radius: 999px;
-}
-
 .story-image-carousel__button {
   flex: 0 0 auto;
   width: 2rem;
@@ -822,10 +815,17 @@
     min-height: 2.75rem;
   }
 
-  .story-image-revision__button,
+  /* 手机上把图片卡片的操作按钮直接叠回图片内（和桌面一致），只是整体缩小，减少对图片的遮挡。 */
+  .story-image-revision__button {
+    width: 2.25rem;
+    height: 2.25rem;
+    font-size: 1.05rem;
+  }
+
   .story-image-carousel__button {
-    width: 2.75rem;
-    height: 2.75rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    font-size: 1.05rem;
   }
 
   .story-image-settings__preset-toolbar,

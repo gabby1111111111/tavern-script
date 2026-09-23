@@ -1,14 +1,15 @@
 # 生图机代码线路图
 
-## v0.4.2 当前开发线路
+## v0.4.3 当前线路
 
-验收状态见 [V0.4.2-DEVELOPMENT.md](V0.4.2-DEVELOPMENT.md)，尚未发布。以下线路替代历史说明中的自动取显示图和只计 normal 的门控。
+v0.4.2 已发布（标签 `杠杠の生图机-v0.4.2`，验收状态见 [V0.4.2-DEVELOPMENT.md](V0.4.2-DEVELOPMENT.md)）；v0.4.3 只收尾悬浮面板与正文图片操作界面，不改动以下线路。以下线路替代历史说明中的自动取显示图和只计 normal 的门控。
 
 - `GENERATION_STARTED` → `generation-eligibility.ts` 按消息身份决定新推进或复用位置资格 → `runtime-policy.ts` 保留总开关和 Swipe 开关 → 锁定本轮预设及最近已确认来源。
 - `shot-workflow.ts` 分开记录底图、确认及首次聊天推进；runtime 只将已确认 placement 交给 `story-continuity.ts` 按组合和剧情位置选源。未确认镜头回退只用非阻塞提醒。
 - 关闭 `usePreviousStoryImage` 时不捕获上一图；正文注入和 `prompt-processor.ts` 同时使上一镜头文字为空，再由模板空值规则写成字面 `null`。
 - 具体回答通过消息身份校验后才提交资格并处理标记；删除后的同编号新回答不会继承图片。资格 ledger 与图片生命周期分开，刷新均不恢复。
 - `StoryImageWorkbench.vue` 经 `index.ts` 独立挂载到宿主页；它和正文共用 runtime facade。面板候选选择仅为本地预览，确认/放弃才修改镜头状态。
+- 面板位置、主题与浏览方式只存在组件内 ref；窗口 resize 时 `clampFloatingPositions()` 把入口和面板拉回视口内，不写入脚本设置。入口与正文图片按钮同为一套图标语义。
 - `workbench-types.ts` 向面板传递镜头、候选、任务数及来源楼层；图片内容、镜头文字和关联只留内存，audit 仅记录有界身份和计数。
 - 确认清理本镜头并保留其他已锁定请求的资源副本；显式删除来源消息或放弃来源镜头仍按生命周期使相关快照失效。不自动重跑请求。
 

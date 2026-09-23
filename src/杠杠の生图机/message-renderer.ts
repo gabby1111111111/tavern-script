@@ -653,7 +653,7 @@ function syncPlacementActionButtons(
     const available = $button.attr('data-story-image-action-available') === 'true';
     const pinned = action === 'pin' && handlers?.isPinned?.(placement) === true;
     const symbol =
-      action === 'pin' ? (pinned ? '已确认' : '确认') : ($button.attr('data-story-image-action-label') ?? '');
+      action === 'pin' ? (pinned ? '✔' : '✓') : ($button.attr('data-story-image-action-label') ?? '');
     const title = pinned ? '已确认（后续剧情可参考）' : action === 'pin' ? '确认此图并清理本镜头其他版本' : undefined;
     const actionKey = placementActionKey(placement, action);
     const active = activePlacementActions.has(actionKey);
@@ -790,8 +790,8 @@ function renderPlacementContent(
     };
     addAction('edit-prompt', '✎', '修改提示词并生成', handlers?.onEditPrompt);
     addAction('region-redraw', '▧', '区域重绘', handlers?.onRegionRedraw);
-    addAction('pin', '确认', '确认此图并清理本镜头其他版本', handlers?.onPin);
     addAction('delete', '×', '删除当前版本', handlers?.onDelete);
+    addAction('pin', '✓', '确认此图并清理本镜头其他版本', handlers?.onPin);
     $media.append($actions);
   }
   refreshPlacementHost($host);

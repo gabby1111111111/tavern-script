@@ -82,6 +82,22 @@ class FakeNode {
   contains(node: FakeNode): boolean {
     return node === this || this.children.some(child => child.contains(node));
   }
+  closest(selector: string): FakeNode | null {
+    let node: FakeNode | null = this;
+    while (node) {
+      if (node.tag === selector) return node;
+      node = node.parent;
+    }
+    return null;
+  }
+  setAttribute(key: string, value: string) {
+    this.props[key] = value;
+  }
+  getBoundingClientRect() {
+    return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  }
+  setPointerCapture() {}
+  releasePointerCapture() {}
 }
 
 const renderer = createRenderer<FakeNode, FakeNode>({
@@ -169,6 +185,11 @@ async function click(node: FakeNode) {
 function candidate(): FakeNode {
   return button('候选 1 · 版本 2 · 待选');
 }
+function previewImage(): FakeNode {
+  const result = all().find(node => node.tag === 'img' && node.props.class === 'story-workbench__image');
+  assert.ok(result, 'Missing current preview image');
+  return result;
+}
 
 async function main() {
   assert.ok(observedResize, 'Input observation must use the host window, not the hidden script frame');
@@ -182,7 +203,7 @@ async function main() {
     '312px',
     'Input growth must update the reserved viewport inset',
   );
-  await click(button('打开或关闭剧情图面板'));
+  await click(button('打开或关闭杠杠の生图机面板'));
   assert.equal(focusState.current, button('关闭剧情图面板'), 'Opening panel moves focus to close control');
   await click(candidate());
   assert.deepEqual(calls, [], 'Preview must not confirm, change the base, or issue requests');
@@ -192,7 +213,7 @@ async function main() {
   workbenchShots.value = [{ ...shot, pendingCount: 1 }];
   await nextTick();
   assert.equal(candidate().props['aria-pressed'], true, 'Task updates must not reset candidate preview');
-  await click(button('放大第 10 楼当前预览图'));
+  await click(previewImage());
   assert.ok(all().some(node => node.props.role === 'dialog'));
   assert.deepEqual(calls, [], 'Opening full image preview must not issue requests');
   const onKeydown = documentListeners.get('keydown') as (event: unknown) => void;
@@ -205,24 +226,30 @@ async function main() {
   });
   await nextTick();
   assert.ok(!all().some(node => node.props.role === 'dialog'), 'Escape closes full image preview');
-  assert.equal(focusState.current, button('放大第 10 楼当前预览图'), 'Closing preview returns focus to image');
-  await click(button('确认这张'));
+  assert.equal(focusState.current, previewImage(), 'Closing preview returns focus to image');
+  await click(button('确认此图并清理本镜头其他版本'));
   assert.deepEqual(calls, [], 'Cancel confirmation must preserve all images');
   allowConfirm = true;
-  await click(button('确认这张'));
+  await click(button('确认此图并清理本镜头其他版本'));
   assert.deepEqual(calls, ['confirm:candidate']);
   assert.equal(confirmations, 2, 'One confirmation per explicit confirmation action');
 
   settings.enabled = false;
   await nextTick();
-  assert.equal(button('修改提示词').props.disabled, true);
+  assert.equal(button('修改提示词并生成').props.disabled, true);
   assert.equal(button('区域重绘').props.disabled, true);
-  await click(button('修改提示词'));
+  await click(button('修改提示词并生成'));
   assert.deepEqual(calls, ['confirm:candidate'], 'Disabled generation must remain guarded even if called directly');
-  assert.equal(
-    button('确认这张').props.disabled,
-    false,
+  assert.notEqual(
+    button('确认此图并清理本镜头其他版本').props.disabled,
+    true,
     'Existing images remain manageable when generation is disabled',
+  );
+  await click(button('确认此图并清理本镜头其他版本'));
+  assert.deepEqual(
+    calls,
+    ['confirm:candidate', 'confirm:candidate'],
+    'Confirmation stays available while generation is disabled',
   );
 
   workbenchShots.value = [];
@@ -230,7 +257,7 @@ async function main() {
   assert.ok(!all().some(node => node.tag === 'img'), 'Chat scope removal must remove all previous images');
 
   await click(button('关闭剧情图面板'));
-  assert.equal(focusState.current, button('打开或关闭剧情图面板'), 'Closing panel returns focus');
+  assert.equal(focusState.current, button('打开或关闭杠杠の生图机面板'), 'Closing panel returns focus');
   app.unmount();
   assert.equal(documentListeners.size, 0, 'Unmount removes keyboard listener');
   assert.equal(windowListeners.size, 0, 'Unmount removes resize listener');
