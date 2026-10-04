@@ -11,7 +11,22 @@ import type { WorkbenchShot } from '../src/杠杠の生图机/workbench-types';
 
 // Mount the actual SFC in Vue's renderer. No browser, persisted state or image API is involved.
 const load = createRequire(path.resolve(process.cwd(), 'package.json'));
-const settings = reactive({ enabled: true });
+type PersistedWorkbenchUi = {
+  themeMode: string;
+  compactThumbnails: boolean;
+  orbPosition: { x: number; y: number } | null;
+  panelPosition: { x: number; y: number } | null;
+};
+// Seed persisted preferences so mounting must restore them from script variables.
+const settings = reactive({
+  enabled: true,
+  workbenchUi: {
+    themeMode: 'night',
+    compactThumbnails: false,
+    orbPosition: { x: 12, y: 24 },
+    panelPosition: null,
+  } as PersistedWorkbenchUi,
+});
 const componentPath = path.resolve('src/杠杠の生图机/StoryImageWorkbench.vue');
 const { descriptor } = parse(readFileSync(componentPath, 'utf8'), { filename: componentPath });
 const script = compileScript(descriptor, { id: 'story-workbench-test', inlineTemplate: true });
@@ -40,6 +55,7 @@ let observedResize: (() => void) | null = null;
 let observerDisconnected = false;
 let inputRect = { top: 800, height: 100 };
 const hostWindow = {
+  innerWidth: 1200,
   innerHeight: 900,
   ResizeObserver: class {
     constructor(callback: () => void) {
@@ -69,6 +85,8 @@ class FakeNode {
   parent: FakeNode | null = null;
   props: Record<string, unknown> = {};
   text = '';
+  offsetWidth = 0;
+  offsetHeight = 0;
   ownerDocument = hostDocument;
   constructor(readonly tag: string) {
     markRaw(this);
@@ -205,6 +223,55 @@ async function main() {
   );
   await click(button('打开或关闭杠杠の生图机面板'));
   assert.equal(focusState.current, button('关闭剧情图面板'), 'Opening panel moves focus to close control');
+
+  // 挂载时必须从脚本变量恢复上次的主题、浏览方式和入口位置。
+  assert.ok(button('切换主题，当前为夜色'), 'Persisted theme must be restored on mount');
+  assert.ok(button('切换图片显示，当前为大图'), 'Persisted browse mode must be restored on mount');
+  const orbNode = button('打开或关闭杠杠の生图机面板');
+  // 组件运行在独立 vm realm，跨 realm 的对象不能直接 deepStrictEqual，逐字段比较。
+  const restoredOrbStyle = orbNode.props.style as Record<string, string>;
+  assert.equal(restoredOrbStyle.left, '12px', 'Persisted orb x must be restored on mount');
+  assert.equal(restoredOrbStyle.top, '24px', 'Persisted orb y must be restored on mount');
+
+  // 主题与浏览方式切换后应立即写回脚本变量。
+  await click(button('切换主题，当前为夜色'));
+  assert.equal(settings.workbenchUi.themeMode, 'follow', 'Theme toggle must persist the new mode');
+  assert.ok(button('切换主题，当前为跟随酒馆'), 'Theme button must reflect the persisted mode');
+  await click(button('切换图片显示，当前为大图'));
+  assert.equal(settings.workbenchUi.compactThumbnails, true, 'Browse toggle must persist the new mode');
+  assert.ok(button('切换图片显示，当前为缩略图'), 'Browse button must reflect the persisted mode');
+
+  // 拖动松手才记录位置：拖动过程中的中间位置不得写入脚本变量。
+  const header = all().find(node => node.props.class === 'story-workbench__header');
+  assert.ok(header, 'Missing panel header');
+  const pointer = (target: FakeNode, type: string, x: number, y: number, pointerId: number) =>
+    (target.props[type] as (event: unknown) => void)({
+      button: 0,
+      pointerId,
+      clientX: x,
+      clientY: y,
+      currentTarget: target,
+      target,
+    });
+  pointer(header, 'onPointerdown', 100, 60, 21);
+  pointer(header, 'onPointermove', 300, 200, 21);
+  assert.equal(settings.workbenchUi.panelPosition, null, 'Panel position must not persist before release');
+  pointer(header, 'onPointerup', 300, 200, 21);
+  assert.equal(
+    JSON.stringify(settings.workbenchUi.panelPosition),
+    JSON.stringify({ x: 200, y: 140 }),
+    'Panel drag must persist the released position',
+  );
+
+  pointer(orbNode, 'onPointerdown', 12, 24, 22);
+  pointer(orbNode, 'onPointermove', 40, 60, 22);
+  pointer(orbNode, 'onPointerup', 40, 60, 22);
+  assert.equal(
+    JSON.stringify(settings.workbenchUi.orbPosition),
+    JSON.stringify({ x: 28, y: 36 }),
+    'Orb drag must persist the released position',
+  );
+
   await click(candidate());
   assert.deepEqual(calls, [], 'Preview must not confirm, change the base, or issue requests');
   assert.equal(workbenchShots.value[0].basePlacementId, 'base');

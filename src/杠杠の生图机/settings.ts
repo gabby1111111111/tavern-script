@@ -551,6 +551,24 @@ function migrateLegacyGiftTrigger(
   };
 }
 
+// 悬浮面板的界面偏好：只记录入口/面板位置、主题与浏览方式。
+// 图片、重绘文本、任务状态等其他内容仍只留在页面内存。
+export const WorkbenchPositionSchema = z.object({
+  x: z.coerce.number(),
+  y: z.coerce.number(),
+});
+
+export const WorkbenchUiSchema = z
+  .object({
+    themeMode: z.enum(['follow', 'day', 'night']).default('follow'),
+    compactThumbnails: z.boolean().default(true),
+    orbPosition: WorkbenchPositionSchema.nullable().default(null),
+    panelPosition: WorkbenchPositionSchema.nullable().default(null),
+  })
+  .prefault({});
+
+export type WorkbenchUiSettings = z.infer<typeof WorkbenchUiSchema>;
+
 const StoryImageSettingsSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -560,6 +578,7 @@ const StoryImageSettingsSchema = z
     currentOutputPresetId: z.string().default(DEFAULT_OUTPUT_PRESET_ID),
     recentImageLimit: RecentImageLimitSchema,
     displaySettings: DisplaySettingsSchema.prefault({}),
+    workbenchUi: WorkbenchUiSchema,
     activeApiProfileId: z.string().default(DEFAULT_IMAGE_API_PROFILE_ID),
     apiProfiles: z.array(ImageApiProfile).min(1).default([DEFAULT_IMAGE_API_PROFILE]),
 
@@ -658,6 +677,7 @@ export function parseStoryImageSettings(raw: unknown): StoryImageSettings {
     currentOutputPresetId,
     recentImageLimit,
     displaySettings,
+    workbenchUi: rawRecord.workbenchUi,
     activeApiProfileId,
     apiProfiles: profiles,
     storyApiProfileId: profileRouteId(rawRecord, 'storyApiProfileId', activeApiProfileId),

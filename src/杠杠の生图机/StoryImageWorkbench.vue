@@ -252,23 +252,71 @@ const opener = ref<HTMLButtonElement>();
 const panelRef = ref<HTMLElement>();
 const closeButton = ref<HTMLButtonElement>();
 const lightboxClose = ref<HTMLButtonElement>();
+type ThemeMode = 'follow' | 'day' | 'night';
+type FloatingPosition = { x: number; y: number };
+
+// 面板偏好由 settings.ts 的 WorkbenchUiSchema 校验和补全；
+// 这里再兜一层，兼容旧数据、缺失字段和只提供部分设置的宿主。
+const DEFAULT_WORKBENCH_UI = {
+  themeMode: 'follow' as ThemeMode,
+  compactThumbnails: true,
+  orbPosition: null as FloatingPosition | null,
+  panelPosition: null as FloatingPosition | null,
+};
+
+function readFloatingPosition(value: unknown): FloatingPosition | null {
+  if (!value || typeof value !== 'object') return null;
+  const { x, y } = value as { x?: unknown; y?: unknown };
+  if (typeof x !== 'number' || !Number.isFinite(x) || typeof y !== 'number' || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+const persistedWorkbenchUi = (() => {
+  const stored = (settingsStore.settings as { workbenchUi?: unknown } | undefined)?.workbenchUi;
+  if (!stored || typeof stored !== 'object') return { ...DEFAULT_WORKBENCH_UI };
+  const candidate = stored as Record<string, unknown>;
+  return {
+    themeMode:
+      candidate.themeMode === 'day' || candidate.themeMode === 'night'
+        ? candidate.themeMode
+        : DEFAULT_WORKBENCH_UI.themeMode,
+    compactThumbnails:
+      typeof candidate.compactThumbnails === 'boolean'
+        ? candidate.compactThumbnails
+        : DEFAULT_WORKBENCH_UI.compactThumbnails,
+    orbPosition: readFloatingPosition(candidate.orbPosition),
+    panelPosition: readFloatingPosition(candidate.panelPosition),
+  };
+})();
+
 const open = ref(false);
 const bottomInset = ref(148);
 const selectedIds = ref<Record<string, string>>({});
 const expandedPromptIds = ref<Record<string, boolean>>({});
-const compactThumbnails = ref(true);
+const compactThumbnails = ref(persistedWorkbenchUi.compactThumbnails);
 const lightboxId = ref<string | null>(null);
-type ThemeMode = 'follow' | 'day' | 'night';
-const themeMode = ref<ThemeMode>('follow');
-const orbPosition = ref<{ x: number; y: number } | null>(null);
-const panelPosition = ref<{ x: number; y: number } | null>(null);
+const themeMode = ref<ThemeMode>(persistedWorkbenchUi.themeMode);
+const orbPosition = ref<FloatingPosition | null>(persistedWorkbenchUi.orbPosition);
+const panelPosition = ref<FloatingPosition | null>(persistedWorkbenchUi.panelPosition);
 let lightboxOpener: HTMLElement | null = null;
 let inputObserver: ResizeObserver | null = null;
 let hostDocument: Document | null = null;
 let hostWindow: (Window & typeof globalThis) | null = null;
 let orbDrag: { pointerId: number; offsetX: number; offsetY: number; startX: number; startY: number } | null = null;
 let orbDragged = false;
-let panelDrag: { pointerId: number; offsetX: number; offsetY: number } | null = null;
+let panelDrag: { pointerId: number; offsetX: number; offsetY: number; moved: boolean } | null = null;
+
+// 面板偏好写入脚本变量：只写位置与外观，刷新或切换聊天后沿用上次的设置。
+function persistWorkbenchUi(): void {
+  const target = settingsStore.settings as { workbenchUi?: unknown } | undefined;
+  if (!target || typeof target !== 'object') return;
+  target.workbenchUi = {
+    themeMode: themeMode.value,
+    compactThumbnails: compactThumbnails.value,
+    orbPosition: orbPosition.value ? { ...orbPosition.value } : null,
+    panelPosition: panelPosition.value ? { ...panelPosition.value } : null,
+  };
+}
 
 const shots = computed(() => props.runtime.workbenchShots.value);
 const pendingCount = computed(() => shots.value.reduce((count, shot) => count + shot.pendingCount, 0));
@@ -409,6 +457,7 @@ function isConfirmedSelected(shot: WorkbenchShot): boolean {
 
 function toggleThumbnails(): void {
   compactThumbnails.value = !compactThumbnails.value;
+  persistWorkbenchUi();
 }
 
 function closePanel() {
@@ -419,6 +468,7 @@ function closePanel() {
 
 function cycleTheme() {
   themeMode.value = themeMode.value === 'follow' ? 'day' : themeMode.value === 'day' ? 'night' : 'follow';
+  persistWorkbenchUi();
 }
 
 const orbStyle = computed<CSSProperties>(() => {
@@ -470,6 +520,8 @@ function endOrbDrag(event: PointerEvent): void {
     // Pointer capture is best-effort; dragging still works without it.
   }
   orbDrag = null;
+  // 只有实际拖动过才记录位置；单纯点一下入口仍然只是开关面板。
+  if (orbDragged) persistWorkbenchUi();
 }
 
 function handleOrbClick(): void {
@@ -498,6 +550,7 @@ function startPanelDrag(event: PointerEvent): void {
     pointerId: event.pointerId,
     offsetX: event.clientX - rect.left,
     offsetY: event.clientY - rect.top,
+    moved: false,
   };
   try {
     handle.setPointerCapture(event.pointerId);
@@ -512,10 +565,14 @@ function movePanelDrag(event: PointerEvent): void {
   if (!drag || drag.pointerId !== event.pointerId || !panel) return;
   const maxX = Math.max(0, (hostWindow?.innerWidth ?? 0) - panel.offsetWidth);
   const maxY = Math.max(0, (hostWindow?.innerHeight ?? 0) - panel.offsetHeight);
-  panelPosition.value = {
+  const next = {
     x: Math.min(Math.max(0, event.clientX - drag.offsetX), maxX),
     y: Math.min(Math.max(0, event.clientY - drag.offsetY), maxY),
   };
+  if (next.x !== panelPosition.value?.x || next.y !== panelPosition.value?.y) {
+    panelPosition.value = next;
+    drag.moved = true;
+  }
 }
 
 function endPanelDrag(event: PointerEvent): void {
@@ -525,7 +582,10 @@ function endPanelDrag(event: PointerEvent): void {
   } catch {
     // Pointer capture is best-effort; dragging still works without it.
   }
+  const moved = panelDrag !== null && panelDrag.moved;
   panelDrag = null;
+  // 只有实际拖动过才记录位置；点头部空白处不算移动。
+  if (moved) persistWorkbenchUi();
 }
 
 async function togglePanel() {
@@ -620,12 +680,16 @@ function clampFloatingPositions(): void {
   const viewportHeight = hostWindow?.innerHeight ?? 0;
   if (viewportWidth <= 0 || viewportHeight <= 0) return;
 
+  let adjusted = false;
   const orbSize = opener.value?.offsetWidth || 48;
   const orb = orbPosition.value;
   if (orb) {
     const x = clampValue(orb.x, viewportWidth - orbSize);
     const y = clampValue(orb.y, viewportHeight - orbSize);
-    if (x !== orb.x || y !== orb.y) orbPosition.value = { x, y };
+    if (x !== orb.x || y !== orb.y) {
+      orbPosition.value = { x, y };
+      adjusted = true;
+    }
   }
 
   const panelElement = panelRef.value;
@@ -633,8 +697,14 @@ function clampFloatingPositions(): void {
   if (panelElement && panel) {
     const x = clampValue(panel.x, viewportWidth - panelElement.offsetWidth);
     const y = clampValue(panel.y, viewportHeight - panelElement.offsetHeight);
-    if (x !== panel.x || y !== panel.y) panelPosition.value = { x, y };
+    if (x !== panel.x || y !== panel.y) {
+      panelPosition.value = { x, y };
+      adjusted = true;
+    }
   }
+
+  // 窗口变小把入口/面板拉回视口后，同样记住修正后的位置。
+  if (adjusted) persistWorkbenchUi();
 }
 
 watch(shots, nextShots => {
