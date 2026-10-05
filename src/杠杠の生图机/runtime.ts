@@ -75,6 +75,9 @@ import {
   type ImageTask,
   type ImageTaskStatus,
 } from './task-cache';
+import { executeConfirmedShotRemoval, type ConfirmedShotRemovalReason } from './delete-sync';
+import { planConfirmedShotRestore, type ConfirmedShotRestorePlanEntry } from './restore';
+import { removeConfirmedShotEntry, upsertConfirmedShot, type ConfirmedShotIdentity } from './shot-storage';
 
 export type RuntimeStatus = 'idle' | 'generating' | 'ready' | 'error' | 'stopped';
 
@@ -177,6 +180,8 @@ export type StoryImageAudit = {
     output_preset_id: string | null;
     reference_count: number;
     reference_kinds: string[];
+    /** v0.5 确认镜头存储域：计数 + 有界错误，不含图片路径、URL 或 Base64。 */
+    storage: { uploaded: number; deleted: number; restored: number; last_error: string | null };
   };
   workflow: { confirmed_count: number; unconfirmed_count: number; pending_count: number };
   last_error: string | null;
@@ -240,6 +245,7 @@ export function createEmptyAudit(): StoryImageAudit {
       output_preset_id: null,
       reference_count: 0,
       reference_kinds: [],
+      storage: { uploaded: 0, deleted: 0, restored: 0, last_error: null },
     },
     workflow: { confirmed_count: 0, unconfirmed_count: 0, pending_count: 0 },
     last_error: null,
@@ -496,6 +502,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       invalidateContinuitySource(placement.id);
       retention.forgetPlacement(placement.id);
       workflow.forget(placement.id);
+      restoredPlacementIds.delete(placement.id);
       removeRenderedPlacementHost(placement.id);
       prunePlacementSelectionMemory();
     },
@@ -557,6 +564,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       output_preset_id: outputPresetId.slice(0, 120),
       reference_count: 0,
       reference_kinds: [],
+      // 携带同一个 storage 对象：确认/删除/恢复计数的生命周期独立于连续性快照。
+      storage: audit.continuity.storage,
     };
     return snapshot;
   };
@@ -859,6 +868,222 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     console.warn(LOG_PREFIX, message);
   };
 
+  // ── v0.5 确认镜头存储：确认即存挂钩 / 删除同步挂钩 / 刷新恢复 ─────────
+  // 存储侧每次调用各写一次脚本变量表，并发会竞态，因此统一串行执行。
+
+  let storageOpChain: Promise<void> = Promise.resolve();
+  const enqueueStorageOp = (op: () => Promise<void>): Promise<void> => {
+    const next = storageOpChain.then(op, op);
+    storageOpChain = next.catch(() => undefined);
+    return next;
+  };
+
+  const noteStorageError = (message: string): void => {
+    audit.continuity.storage.last_error = message;
+  };
+
+  /** 已恢复 placement 的标记：其图片加载失败时只剪索引，绝不删服务器文件。 */
+  const restoredPlacementIds = new Set<string>();
+
+  const persistConfirmedShotRemoval = (
+    identity: ConfirmedShotIdentity,
+    reason: ConfirmedShotRemovalReason,
+    chatId = memoryChatId,
+  ): void => {
+    void enqueueStorageOp(async () => {
+      try {
+        const outcome = await executeConfirmedShotRemoval(chatId, identity, reason);
+        if (outcome.status === 'deleted') audit.continuity.storage.deleted += 1;
+        if (outcome.warning) noteStorageError(outcome.warning);
+      } catch (error) {
+        noteStorageError(errorText(error));
+      }
+    });
+  };
+
+  const persistConfirmedShotUpload = (
+    placement: ImagePlacement,
+    siblings: ReadonlyArray<ImagePlacement>,
+    chatId: string,
+  ): void => {
+    void enqueueStorageOp(async () => {
+      // 入队后重验（确认↔删除竞态）：排队期间镜头可能已被 × 删除 / 放弃 / 删楼
+      // 移除，或已被同位置的新确认取代。此时不上传、不写索引，交由队列中排在
+      // 后面的删除同步收尾；通过后“读图→上传→写索引（含旧格式清理）”在本串行
+      // 链内完成，与删除同步天然互斥——不会把已删除镜头的条目写回索引留下孤儿
+      // 文件，也不会并发读改写同一脚本变量表丢写。
+      if (placementCache.get(placement.id) !== placement || !workflow.isConfirmed(placement.id)) return;
+      await workflow.confirmAndPersist(
+        placement,
+        siblings,
+        { chatId },
+        {
+          onUploaded: () => {
+            audit.continuity.storage.uploaded += 1;
+          },
+          onStorageError: error => {
+            noteStorageError(errorText(error));
+          },
+        },
+      );
+    });
+  };
+
+  /**
+   * 删楼 / 删 Swipe 之后让索引跟随 placement 的稳定身份迁移：被移除的已确认
+   * 镜头走删除同步（简报 §4.4 的生命周期事件）；身份变化的幸存者把索引条目
+   * 搬到新楼层 / Swipe 号，避免刷新恢复把旧条目误判为失效或错位恢复。
+   */
+  const syncConfirmedShotIndexWithPlacements = (
+    captured: ReadonlyArray<{ placementId: string; identity: ConfirmedShotIdentity }>,
+    removedReason: Extract<ConfirmedShotRemovalReason, 'message-deleted' | 'swipe-deleted'>,
+  ): void => {
+    const chatId = memoryChatId;
+    // 先入队全部删除、再入队迁移：幸存者可能迁入被删镜头的旧身份槽位，
+    // 若迁移先落地，随后的删除会误删幸存镜头的条目与服务器文件。
+    const migrations: Array<{ identity: ConfirmedShotIdentity; next: ConfirmedShotIdentity }> = [];
+    for (const { placementId, identity } of captured) {
+      const current = placementCache.get(placementId);
+      if (!current) {
+        persistConfirmedShotRemoval(identity, removedReason, chatId);
+        continue;
+      }
+      const nextIdentity: ConfirmedShotIdentity = {
+        messageId: current.target.messageId,
+        swipeId: current.target.swipeId,
+        imageIndex: current.target.imageIndex,
+      };
+      if (
+        nextIdentity.messageId === identity.messageId &&
+        nextIdentity.swipeId === identity.swipeId &&
+        nextIdentity.imageIndex === identity.imageIndex
+      )
+        continue;
+      migrations.push({ identity, next: nextIdentity });
+    }
+    for (const { identity, next } of migrations) {
+      void enqueueStorageOp(async () => {
+        try {
+          const entry = removeConfirmedShotEntry(chatId, identity);
+          if (entry) upsertConfirmedShot(chatId, { ...entry, messageId: next.messageId, swipeId: next.swipeId });
+        } catch (error) {
+          noteStorageError(errorText(error));
+        }
+      });
+    }
+  };
+
+  /** 把索引里的相对路径解析为可加载的绝对图片 URL；脚本 iframe 以宿主页为基准。 */
+  const resolveRestoredShotUrl = (url: string): string | null => {
+    const bases: string[] = [];
+    try {
+      if (typeof document !== 'undefined') bases.push(document.baseURI);
+    } catch {
+      // 某些嵌入文档会拒绝访问 baseURI，安全忽略。
+    }
+    try {
+      if (typeof window !== 'undefined') bases.push(window.location.href);
+    } catch {
+      // 跨域父页面访问失败时安全忽略。
+    }
+    for (const base of bases) {
+      try {
+        return new URL(url, base).toString();
+      } catch {
+        // 尝试下一个基准。
+      }
+    }
+    return null;
+  };
+
+  const restoreConfirmedShotEntry = (
+    chatId: string,
+    entry: ConfirmedShotRestorePlanEntry,
+    currentSettings: StoryImageSettings,
+  ): boolean => {
+    const messageRef = rawMessageRef(entry.identity.messageId);
+    if (!messageRef) return false;
+    const url = resolveRestoredShotUrl(entry.url);
+    if (!url) {
+      noteStorageError('确认镜头图片地址解析失败，已跳过该条目');
+      return false;
+    }
+    // 标记清理后正文不再保留生图标记，恢复 placement 以该楼首段为锚点，
+    // 由 imageIndex 顺序保证同楼多图的先后关系。
+    const presentation = presenter.present({
+      resource: { url, kind: 'remote-url' },
+      chatId,
+      sourceIntentId: null,
+      origin: 'external',
+      displayMode: 'inline',
+      placementTarget: {
+        kind: 'inline-anchor',
+        messageId: entry.identity.messageId,
+        swipeId: entry.identity.swipeId,
+        imageIndex: entry.identity.imageIndex,
+        paragraphIndex: 0,
+        anchorTextBefore: '',
+        anchorTextAfter: '',
+      },
+      artifactTarget: {
+        messageId: entry.identity.messageId,
+        swipeId: entry.identity.swipeId,
+        imageIndex: entry.identity.imageIndex,
+      },
+      messageRef,
+      variantIndex: 0,
+      revisionIndex: 0,
+      prompt: entry.shotPrompt ?? '',
+      finalPrompt: entry.shotPrompt,
+      // 索引不记录预设组合；按当前启用预设盖章，使恢复镜头可被连续剧情参考沿用。
+      continuity: {
+        chatId,
+        drawingPresetId: getCurrentDrawingPreset(currentSettings).id,
+        outputPresetId: getCurrentOutputPreset(currentSettings).id,
+        shotPrompt: entry.shotPrompt ?? '',
+      },
+    });
+    if (!presentation?.placement) return false;
+    workflow.confirm(presentation.placement, [presentation.placement]);
+    retention.pin(placementScope(presentation.placement), presentation.placement.id);
+    restoredPlacementIds.add(presentation.placement.id);
+    return true;
+  };
+
+  /**
+   * 刷新恢复入口（脚本初始化与 CHAT_CHANGED 调用）：校验失败不影响聊天，
+   * 单条失败只跳过该条目；开关关闭时只完成校验/剪除，不放置图片。
+   */
+  const restoreConfirmedShotsForCurrentChat = (): void => {
+    const chatId = memoryChatId;
+    let report: ReturnType<typeof planConfirmedShotRestore>;
+    try {
+      report = planConfirmedShotRestore({ chatId });
+    } catch (error) {
+      noteStorageError(errorText(error));
+      console.warn(LOG_PREFIX, '确认镜头恢复失败，本次跳过');
+      return;
+    }
+    if (report.lastError) noteStorageError(report.lastError);
+    if (report.plan.length === 0) return;
+    const currentSettings = settings;
+    if (!currentSettings?.enabled) {
+      console.info(LOG_PREFIX, '生图开关关闭，本次只校验索引不恢复图片');
+      return;
+    }
+    let restoredCount = 0;
+    for (const entry of report.plan) {
+      try {
+        if (restoreConfirmedShotEntry(chatId, entry, currentSettings)) restoredCount += 1;
+      } catch (error) {
+        noteStorageError(errorText(error));
+        console.warn(LOG_PREFIX, '单条确认镜头恢复失败，已跳过');
+      }
+    }
+    audit.continuity.storage.restored += restoredCount;
+    if (restoredCount > 0) syncCacheAudit();
+  };
+
   const clearPrompt = (): void => {
     promptUninject?.();
     promptUninject = null;
@@ -951,6 +1176,19 @@ export function createStoryImageRuntime(): StoryImageRuntime {
 
   const placementRenderHandlers: ImagePlacementRenderHandlers = {
     onImageError: placement => {
+      if (restoredPlacementIds.has(placement.id)) {
+        // 恢复失配（简报 §4.4）：404 等加载失败只剪索引，绝不删服务器文件。
+        const chatId = memoryChatId;
+        const identity: ConfirmedShotIdentity = placement.target;
+        noteStorageError('已恢复的确认镜头图片加载失败，已移除其索引条目');
+        void enqueueStorageOp(async () => {
+          try {
+            removeConfirmedShotEntry(chatId, identity);
+          } catch (error) {
+            noteStorageError(errorText(error));
+          }
+        });
+      }
       removePlacementAndArtifact(placement);
       prunePlacementSelectionMemory();
       syncCacheAudit();
@@ -1116,7 +1354,10 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       if (placementCache.get(placement.id) !== placement) return;
       const scope = placementScope(placement);
       const siblings = placementCache.placements.value.filter(item => isSameScope(placementScope(item), scope));
+      // 确认即存：本地确认同步先行（confirmAndPersist 内部首步 confirm 幂等），
+      // 交互不阻塞；“读图→上传→写索引”整体入存储串行链，与删除同步互斥。
       workflow.confirm(placement, siblings);
+      persistConfirmedShotUpload(placement, siblings, memoryChatId);
       selectImagePlacement(placement);
       retention.pin(scope, placement.id);
       pruneExactScope(scope, placement.id);
@@ -1128,7 +1369,11 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     isPinned: placement => workflow.isConfirmed(placement.id),
     onDelete: placement => {
       abortPromptEditor();
+      // × 删除已确认图：生命周期移除落定的同时同步删除服务器文件（失败仅警告）。
+      const wasConfirmed = workflow.isConfirmed(placement.id);
+      const identity: ConfirmedShotIdentity = placement.target;
       removePlacementAndArtifact(placement);
+      if (wasConfirmed) persistConfirmedShotRemoval(identity, 'image-removed');
       prunePlacementSelectionMemory();
       syncCacheAudit();
       syncRuntimeStatus();
@@ -1867,6 +2112,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     audit.last_error = null;
     retention.clear();
     workflow.clear();
+    restoredPlacementIds.clear();
     messageAdvance.seed(SillyTavern.chat);
     syncCacheAudit();
   };
@@ -1894,7 +2140,15 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     abandonWorkbenchShot: shotId => {
       const shot = workbenchShots.value.find(item => item.id === shotId);
       if (!shot) return;
+      // 放弃已确认镜头：与 × 删除同走删除同步；未确认候选不触碰服务器。
+      const hadConfirmed = shot.confirmedPlacementId !== null;
+      const identity: ConfirmedShotIdentity = {
+        messageId: shot.messageId,
+        swipeId: shot.swipeId,
+        imageIndex: shot.imageIndex,
+      };
       pruneExactScope(shot, null);
+      if (hadConfirmed) persistConfirmedShotRemoval(identity, 'shot-abandoned');
       syncCacheAudit();
       syncRuntimeStatus();
       renderPlacementsForMessage(shot.messageId);
@@ -2016,6 +2270,18 @@ export function createStoryImageRuntime(): StoryImageRuntime {
             snapshotSwipeIds.set(snapshot, sourceSwipe - 1);
         }
         pendingSwipeTarget = null;
+        // 在任何 placement 移除前捕获已确认镜头身份，供删除同步与索引迁移使用。
+        const capturedConfirmedShots = placementCache.placements.value
+          .filter(placement => placement.target.messageId === eventData.messageId)
+          .filter(placement => workflow.isConfirmed(placement.id))
+          .map(placement => ({
+            placementId: placement.id,
+            identity: {
+              messageId: placement.target.messageId,
+              swipeId: placement.target.swipeId,
+              imageIndex: placement.target.imageIndex,
+            } satisfies ConfirmedShotIdentity,
+          }));
         abortPromptEditor();
         abortRegionEditor();
         abortManualRevisionsForSwipeDeletion(eventData.messageId, eventData.swipeId);
@@ -2071,6 +2337,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           taskRetentionToken.set(task, retention.token(taskScope(task)));
         });
         placementCache.shiftSwipeIdsAfterDeletion(eventData.messageId, eventData.swipeId);
+        syncConfirmedShotIndexWithPlacements(capturedConfirmedShots, 'swipe-deleted');
         checkContinuity();
         recentCache.reconcileDeletedSwipe(memoryChatId, eventData.messageId, eventData.swipeId);
         recentCache.artifacts.value
@@ -2100,7 +2367,9 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         clearPrompt();
         resetMemory();
         messageAdvance.seed(SillyTavern.chat);
+        restoreConfirmedShotsForCurrentChat();
         status.value = 'idle';
+        setTimeout(renderAllPlacements, 0);
       });
       listen(tavern_events.MESSAGE_EDITED, messageId => {
         abortPromptEditor();
@@ -2128,6 +2397,18 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       });
       listen(tavern_events.MESSAGE_DELETED, () => {
         floorDecisions.sync(SillyTavern.chat);
+        // 在 reconcile 前捕获已确认镜头身份：被删楼层的镜头走删除同步，
+        // 幸存者按新的楼层号迁移索引条目（简报 §4.4 删楼生命周期）。
+        const capturedConfirmedShots = placementCache.placements.value
+          .filter(placement => workflow.isConfirmed(placement.id))
+          .map(placement => ({
+            placementId: placement.id,
+            identity: {
+              messageId: placement.target.messageId,
+              swipeId: placement.target.swipeId,
+              imageIndex: placement.target.imageIndex,
+            } satisfies ConfirmedShotIdentity,
+          }));
         abortPromptEditor();
         abortRegionEditor();
         placementCache.placements.value
@@ -2153,6 +2434,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           .filter(task => rawMessageRef(task.messageId) !== taskMessageRefs.get(task))
           .forEach(removeTask);
         placementCache.reconcileMessageIndexes(SillyTavern.chat);
+        syncConfirmedShotIndexWithPlacements(capturedConfirmedShots, 'message-deleted');
         checkContinuity();
         prunePlacementSelectionMemory();
         clearRenderedHosts();
@@ -2183,6 +2465,7 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         renderAllPlacements();
       });
       installPrompt(null);
+      restoreConfirmedShotsForCurrentChat();
       renderAllPlacements();
     },
     stop: () => {

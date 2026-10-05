@@ -10,6 +10,11 @@ import {
 } from '../src/杠杠の生图机/prompt-editor';
 import { groupImagePlacements } from '../src/杠杠の生图机/renderer-model';
 import { createStoryImageRuntime, type StoryImageRuntime } from '../src/杠杠の生图机/runtime';
+import {
+  getChatConfirmedShots,
+  readConfirmedShotIndex,
+  type ConfirmedShotEntry,
+} from '../src/杠杠の生图机/shot-storage';
 import { ImageSettings, type StoryImageSettings } from '../src/杠杠の生图机/settings';
 import type { ImagePlacement } from '../src/杠杠の生图机/image-placement';
 import type { ImagePlacementRenderHandlers } from '../src/杠杠の生图机/message-renderer';
@@ -84,6 +89,8 @@ function installRuntimeMocks(trackPendingHosts = false) {
     'getChatMessages',
     'getLastMessageId',
     'getPersonaAvatarPath',
+    'getScriptId',
+    'getVariables',
     'injectPrompts',
     'location',
     'uninjectPrompts',
@@ -91,6 +98,7 @@ function installRuntimeMocks(trackPendingHosts = false) {
     'setChatMessages',
     'tavern_events',
     'toastr',
+    'updateVariablesWith',
     'window',
     '__storyImageAudit',
   ];
@@ -114,6 +122,11 @@ function installRuntimeMocks(trackPendingHosts = false) {
   const renderCalls: RenderCall[] = [];
   const pendingHosts = new Set<string>();
   const injections: Array<Array<{ content: string }>> = [];
+  // v0.5 存储域：脚本变量表与 /api/images/* 请求单独记录，不污染生图请求计数。
+  const variablesTable: Record<string, unknown> = {};
+  const storageRequests: Array<{ url: string; body: unknown }> = [];
+  let storageRequestCount = 0;
+  let failStorageRequests = false;
   let requestCount = 0;
   let messageWriteCount = 0;
   let failPersonaReference = false;
@@ -234,6 +247,7 @@ function installRuntimeMocks(trackPendingHosts = false) {
     groupId: '',
     name2: '测试角色',
     getCurrentChatId: () => 'synthetic-chat',
+    getRequestHeaders: () => ({ 'X-CSRF-TOKEN': 'synthetic-csrf' }),
   };
   globals.getChatMessages = (messageId = -1) => {
     const index = messageId < 0 ? chat.length + messageId : messageId;
@@ -266,6 +280,14 @@ function installRuntimeMocks(trackPendingHosts = false) {
     return Promise.resolve();
   };
   globals.toastr = { error: () => undefined, info: () => undefined, warning: () => undefined };
+  globals.getScriptId = () => 'synthetic-script';
+  globals.getVariables = () => variablesTable;
+  globals.updateVariablesWith = (updater: (variables: Record<string, unknown>) => Record<string, unknown>) => {
+    const next = updater({ ...variablesTable });
+    Object.keys(variablesTable).forEach(key => delete variablesTable[key]);
+    Object.assign(variablesTable, next);
+    return variablesTable;
+  };
   globals.eventOn = (event: unknown, listener: unknown) => {
     const name = String(event);
     const typedListener = listener as EventListener;
@@ -278,8 +300,21 @@ function installRuntimeMocks(trackPendingHosts = false) {
   };
   globals.fetch = (_input: unknown, init?: unknown) => {
     const request = init as RequestInit | undefined;
-    if (request?.method === 'GET') {
-      referenceReadCount += 1;
+    const requestUrl = String(_input);
+    if (requestUrl.endsWith('/api/images/upload') || requestUrl.endsWith('/api/images/delete')) {
+      storageRequestCount += 1;
+      storageRequests.push({ url: requestUrl, body: request?.body });
+      if (failStorageRequests) return Promise.resolve(new Response('storage unavailable', { status: 500 }));
+      const payload = requestUrl.endsWith('/api/images/upload')
+        ? { path: `/user/images/杠杠の生图机/uploaded-${storageRequestCount}.png` }
+        : {};
+      return Promise.resolve(
+        new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      );
+    }
+    if ((request?.method ?? 'GET') === 'GET') {
+      // 带显式 init 的 GET 才是参考图/头像读取；确认上传的资源读图不带 init。
+      if (request) referenceReadCount += 1;
       if (failPersonaReference && String(_input).includes('/avatars/user.png'))
         return Promise.resolve(new Response('', { status: 404 }));
       return Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } }));
@@ -320,6 +355,14 @@ function installRuntimeMocks(trackPendingHosts = false) {
     renderCalls,
     pendingHosts,
     imagePosts,
+    variablesTable,
+    storageRequests,
+    get storageRequestCount() {
+      return storageRequestCount;
+    },
+    failStorageRequests: () => {
+      failStorageRequests = true;
+    },
     failPersonaReference: () => {
       failPersonaReference = true;
     },
@@ -416,7 +459,7 @@ function testSettings(
 }
 
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
     if (predicate()) return;
     await new Promise<void>(resolve => setTimeout(resolve, 0));
   }
@@ -2136,7 +2179,226 @@ async function testManualRevisionSurvivesPrecedingSwipeDeletion(
   }
 }
 
+function readStoredShots(mocks: ReturnType<typeof installRuntimeMocks>, chatId: string): ConfirmedShotEntry[] {
+  return getChatConfirmedShots(readConfirmedShotIndex({ readVariables: () => mocks.variablesTable }), chatId);
+}
+
+/** 经函数读取存储审计域：避免字面量窄化让后续 `=== 1` 之类比较成为 TS2367。 */
+function storageAuditOf(runtime: StoryImageRuntime) {
+  return runtime.audit.continuity.storage;
+}
+
+/** 同上，读取存储请求计数。 */
+function storageRequestCountOf(mocks: ReturnType<typeof installRuntimeMocks>): number {
+  return mocks.storageRequests.length;
+}
+
+function storedShotFixture(messageId: number, path: string): Record<string, unknown> {
+  return {
+    messageId,
+    swipeId: 0,
+    imageIndex: 0,
+    filename: `stored-${messageId}.png`,
+    path,
+    shotPrompt: `镜头 ${messageId}`,
+    confirmedAt: 1_700_000_000_000,
+  };
+}
+
+async function testConfirmPersistsShotAndRecordsAudit(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, testSettings(true), false);
+    assert(storageAuditOf(runtime).uploaded === 0, '未确认时不得计数上传');
+    assert(storageRequestCountOf(mocks) === 0, '未确认时不得发起存储请求');
+    const shotId = runtime.workbenchShots.value[0]?.basePlacementId;
+    assert(shotId, '确认存储测试需要 workbench 镜头');
+    runtime.confirmWorkbenchImage(shotId!);
+    await waitFor(() => storageAuditOf(runtime).uploaded === 1, '确认应自动上传并计入审计');
+    assert(
+      storageRequestCountOf(mocks) === 1 && mocks.storageRequests[0]?.url === '/api/images/upload',
+      '确认应只向上传端点发起一次请求',
+    );
+    const shots = readStoredShots(mocks, 'synthetic-chat');
+    assert(shots.length === 1, '上传成功应写入确认镜头索引');
+    assert(shots[0]?.path === '/user/images/杠杠の生图机/uploaded-1.png', '索引应记录服务器返回的路径');
+    assert(shots[0]?.messageId === 0 && shots[0]?.swipeId === 0, '索引条目应携带楼层身份');
+    assert(!JSON.stringify(mocks.variablesTable).includes('base64,'), '索引变量不得包含图片数据');
+
+    mocks.failStorageRequests();
+    runtime.confirmWorkbenchImage(shotId!);
+    await waitFor(() => storageAuditOf(runtime).last_error !== null, '上传失败应记录有界错误');
+    assert(storageAuditOf(runtime).uploaded === 1, '上传失败不得计入成功');
+    assert(runtime.workbenchShots.value[0]?.confirmedPlacementId !== null, '上传失败不得影响本地确认状态');
+    assert(readStoredShots(mocks, 'synthetic-chat').length === 1, '上传失败不得改写既有索引条目');
+    const lastError = String(storageAuditOf(runtime).last_error);
+    assert(!lastError.includes('uploaded') && !lastError.includes('http'), '存储错误消息不得包含路径或 URL');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testMessageDeletionSyncsAndMigratesConfirmedShotIndex(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, testSettings(true), false);
+    const firstShot = runtime.workbenchShots.value[0]?.basePlacementId;
+    assert(firstShot, '删楼同步测试需要第一镜');
+    runtime.confirmWorkbenchImage(firstShot!);
+    await waitFor(() => storageAuditOf(runtime).uploaded === 1, '第一镜应先上传');
+    await appendContinuityMessage(mocks, '<pic prompt="second shot">');
+    await waitFor(() => runtime.audit.generation.status === 'success', '第二镜应先完成');
+    const secondShot = runtime.workbenchShots.value.find(shot => shot.messageId === 1)?.basePlacementId;
+    assert(secondShot, '删楼同步测试需要第二镜');
+    runtime.confirmWorkbenchImage(secondShot!);
+    await waitFor(() => storageAuditOf(runtime).uploaded === 2, '第二镜应上传');
+    const secondPath = readStoredShots(mocks, 'synthetic-chat').find(entry => entry.messageId === 1)?.path;
+    assert(secondPath === '/user/images/杠杠の生图机/uploaded-2.png', '第二镜索引应指向第二次上传');
+
+    mocks.chat.splice(0, 1);
+    await mocks.emit(eventNames.MESSAGE_DELETED, 0);
+    await waitFor(() => storageAuditOf(runtime).deleted === 1, '被删楼层的已确认镜头应删除同步');
+    await waitFor(() => {
+      const shots = readStoredShots(mocks, 'synthetic-chat');
+      return shots.length === 1 && shots[0]?.messageId === 0 && shots[0]?.path === secondPath;
+    }, '幸存镜头的索引条目应迁移到新楼层号');
+    assert(
+      mocks.storageRequests.filter(request => request.url === '/api/images/delete').length === 1,
+      '删楼只应对被删镜头发起一次删除请求',
+    );
+    assert(storageAuditOf(runtime).last_error === null, '删除与迁移成功不应留下错误');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testSwipeDeletionSyncsConfirmedShotStorage(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, testSettings(true), false);
+    const shotId = runtime.workbenchShots.value[0]?.basePlacementId;
+    assert(shotId, 'Swipe 删除同步测试需要已确认镜头');
+    runtime.confirmWorkbenchImage(shotId!);
+    await waitFor(() => storageAuditOf(runtime).uploaded === 1, '确认应先上传');
+    await mocks.emit(eventNames.MESSAGE_SWIPE_DELETED, { messageId: 0, swipeId: 0, newSwipeId: 0 });
+    await waitFor(() => storageAuditOf(runtime).deleted === 1, '删除已确认镜头所在 Swipe 应删除同步');
+    assert(readStoredShots(mocks, 'synthetic-chat').length === 0, 'Swipe 删除后索引条目应剪除');
+    assert(mocks.storageRequests.at(-1)?.url === '/api/images/delete', 'Swipe 删除应请求删除端点');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testRestorePlacesConfirmedShotsOnInitAndChatChange(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    Object.assign(mocks.variablesTable, {
+      confirmedShotStorage: {
+        version: 1,
+        chats: {
+          'synthetic-chat': { shots: [storedShotFixture(0, '/user/images/杠杠の生图机/stored-0.png')] },
+        },
+      },
+    });
+    const runtime = createStoryImageRuntime();
+    runtime.updateSettings(continuitySettings());
+    runtime.start();
+    assert(storageAuditOf(runtime).restored === 1, '初始化应按索引恢复已确认镜头');
+    assert(mocks.storageRequests.length === 0, '恢复阶段不得发起网络请求');
+    const shot = runtime.workbenchShots.value[0];
+    assert(shot?.status === 'confirmed' && shot?.confirmedPlacementId !== null, '恢复镜头应标记已确认');
+    assert(shot?.messageId === 0, '恢复镜头应对应索引楼层');
+    const expectedImageUrl = new URL('/user/images/杠杠の生图机/stored-0.png', 'http://story-image.test/').toString();
+    assert(shot?.images[0]?.url === expectedImageUrl, '恢复图片应以宿主页为基准解析为绝对 URL');
+    assert(shot?.shotPrompt === '镜头 0', '恢复镜头应保留镜头提示词');
+    const restoredRender = mocks.renderCalls.at(-1);
+    const restoredPlacement = restoredRender?.placements.find(item => item.target.messageId === 0);
+    assert(restoredPlacement && restoredRender?.handlers, '恢复 placement 应进入渲染输入');
+
+    mocks.chat.push({ message_id: 1, role: 'user', message: '继续', swipe_id: 0 });
+    await mocks.emit(eventNames.GENERATION_STARTED, 'normal', null, false);
+    assert(runtime.audit.continuity.source?.messageId === 0, '连续剧情应沿用恢复后的已确认参考');
+
+    restoredRender!.handlers!.onImageError?.(restoredPlacement!);
+    await waitFor(() => readStoredShots(mocks, 'synthetic-chat').length === 0, '恢复失配应只剪除索引');
+    assert(mocks.storageRequests.length === 0, '恢复失配绝不删除服务器文件');
+    assert(storageAuditOf(runtime).last_error !== null, '恢复失配应留下有界错误');
+
+    Object.assign(mocks.variablesTable, {
+      confirmedShotStorage: {
+        version: 1,
+        chats: {
+          'another-chat': { shots: [storedShotFixture(0, '/user/images/杠杠の生图机/stored-another.png')] },
+        },
+      },
+    });
+    await mocks.emit(eventNames.CHAT_CHANGED, 'another-chat');
+    await waitFor(() => storageAuditOf(runtime).restored === 2, '切换聊天后应按新聊天索引恢复');
+    assert(runtime.workbenchShots.value[0]?.status === 'confirmed', '新聊天恢复镜头应标记已确认');
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testDeleteDuringPendingUploadSkipsUploadAndSync(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime, placement } = await startRuntimeWithInitialPlacement(mocks, testSettings(true), false);
+    // 确认后立刻删楼：上传与删除同步同入串行链，上传入队重验发现镜头已移除，
+    // 应跳过上传、不写索引；删除同步对无条目身份为 none，不触碰服务器文件。
+    runtime.confirmWorkbenchImage(placement.id);
+    mocks.chat.splice(0, 1);
+    await mocks.emit(eventNames.MESSAGE_DELETED, 0);
+    await new Promise<void>(resolve => setTimeout(resolve, 20));
+    assert(mocks.storageRequests.length === 0, '排队期间被删除的镜头不得上传也不得删服务器文件');
+    assert(storageAuditOf(runtime).uploaded === 0, '被删除镜头不得计入上传成功');
+    assert(storageAuditOf(runtime).deleted === 0, '无索引条目的删除应为 none 不计数');
+    assert(readStoredShots(mocks, 'synthetic-chat').length === 0, '被删除镜头不得写回索引复活');
+    assert(storageAuditOf(runtime).last_error === null, '竞态收尾不应留下错误');
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
+async function testRapidConfirmsSerializeIndexWrites(): Promise<void> {
+  const mocks = installRuntimeMocks();
+  try {
+    const { runtime } = await startRuntimeWithInitialPlacement(mocks, testSettings(true), false);
+    await appendContinuityMessage(mocks, '<pic prompt="second shot">');
+    await waitFor(() => runtime.audit.generation.status === 'success', '第二镜完成');
+    const firstShot = runtime.workbenchShots.value[0]?.basePlacementId;
+    const secondShot = runtime.workbenchShots.value.find(shot => shot.messageId === 1)?.basePlacementId;
+    assert(firstShot && secondShot, '串行写测试需要两个镜头');
+    // 两个不同镜头近乎同时确认：上传整体入串行链，两次读改写互不丢失。
+    runtime.confirmWorkbenchImage(firstShot);
+    runtime.confirmWorkbenchImage(secondShot);
+    await waitFor(() => storageAuditOf(runtime).uploaded === 2, '两次确认都应完成上传');
+    const shots = readStoredShots(mocks, 'synthetic-chat');
+    assert(shots.length === 2, '串行链不得丢失任何一次索引写入');
+    assert(JSON.stringify(shots.map(entry => entry.messageId)) === '[0,1]', '两个镜头的索引条目都应保留');
+    assert(
+      mocks.storageRequests.filter(request => request.url === '/api/images/upload').length === 2,
+      '两次确认各发起一次上传请求',
+    );
+    runtime.stop();
+  } finally {
+    mocks.restore();
+  }
+}
+
 void (async () => {
+  await testConfirmPersistsShotAndRecordsAudit();
+  await testMessageDeletionSyncsAndMigratesConfirmedShotIndex();
+  await testSwipeDeletionSyncsConfirmedShotStorage();
+  await testRestorePlacesConfirmedShotsOnInitAndChatChange();
+  await testDeleteDuringPendingUploadSkipsUploadAndSync();
+  await testRapidConfirmsSerializeIndexWrites();
   await testManualRevisionSurvivesPrecedingSwipeDeletion('prompt');
   await testManualRevisionSurvivesPrecedingSwipeDeletion('region');
   await testManualRevisionSurvivesPrecedingSwipeDeletion('whole');

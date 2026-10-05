@@ -1,8 +1,8 @@
 # 生图机代码线路图
 
-## v0.4.4 当前线路
+## v0.5.0 当前线路
 
-v0.4.2、v0.4.3 已发布（标签 `杠杠の生图机-v0.4.2`、`杠杠の生图机-v0.4.3`）；v0.4.4 只为悬浮面板增加位置、主题与浏览方式的记忆（`workbenchUi` 脚本变量），不改动以下线路。以下线路替代历史说明中的自动取显示图和只计 normal 的门控。
+v0.4.2~v0.4.4 已发布；v0.5.0 新增服务器存储线路,其余线路不变。存储线路:确认镜头(✓)→ `shot-workflow.ts` 异步上传 → `shot-storage.ts` 写入图库专用文件夹 `杠杠の生图机` 与脚本变量索引 `confirmedShotStorage`(版本化 zod schema,按 chatId 分组);脚本初始化/CHAT_CHANGED → `restore.ts` 按现行消息身份校验并恢复已确认图(失效条目只剪索引,绝不删服务器文件);删楼/Swipe 覆盖/× 删除 → `delete-sync.ts` 同步删除服务器文件并剪除索引(仅原生删除事件路径,`TavernHelper.deleteChatMessages` API 不发删除事件;失败只警告)。所有索引写入经 runtime 串行链,上传入队后重验确认态,避免竞态写回。以下线路替代历史说明中的自动取显示图和只计 normal 的门控。
 
 - `GENERATION_STARTED` → `generation-eligibility.ts` 按消息身份决定新推进或复用位置资格 → `runtime-policy.ts` 保留总开关和 Swipe 开关 → 锁定本轮预设及最近已确认来源。
 - `shot-workflow.ts` 分开记录底图、确认及首次聊天推进；runtime 只将已确认 placement 交给 `story-continuity.ts` 按组合和剧情位置选源。未确认镜头回退只用非阻塞提醒。

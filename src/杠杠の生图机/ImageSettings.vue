@@ -3,7 +3,7 @@
   <section class="story-image-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の生图机 V0.4.4</b>
+        <b>杠杠の生图机 V0.5.0</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
