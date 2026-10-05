@@ -69,7 +69,7 @@ async function verify(mode: ImageRequestMode, avatars: boolean, prior: boolean, 
   const expected = [...(avatars ? (missingUser ? [character] : [user, character]) : []), ...(prior ? [previous] : [])];
   const labels = [
     ...(avatars ? (missingUser ? ['角色头像'] : ['User 头像', '角色头像']) : []),
-    ...(prior ? ['上一镜头参考图'] : []),
+    ...(prior ? ['上一镜头图'] : []),
   ];
   const expectedPrompt =
     `${labels.map((label, index) => `图${index + 1}：${label}`).join('\n') || 'null'}\nPrevious: ${prior ? 'previous scene' : 'null'}\nCurrent: new scene`.trim();
@@ -156,7 +156,7 @@ async function verifyReadFailure(mode: ImageRequestMode, allMissing = false): Pr
     preview.referenceSources?.map(source => source.kind) ?? [],
     allMissing ? [] : ['character-avatar', 'previous-story-image'],
   );
-  assert.equal(preview.prompt, allMissing ? 'null\nscene' : '图1：角色头像\n图2：上一镜头参考图\nscene');
+  assert.equal(preview.prompt, allMissing ? 'null\nscene' : '图1：角色头像\n图2：上一镜头图\nscene');
   const submitted = await processDrawingPrompt(preset, 'scene', {
     readReferences: async () => {
       throw new Error('must not reread avatars');

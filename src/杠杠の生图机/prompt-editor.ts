@@ -5,7 +5,7 @@ import { resolveRegionEditorMountTarget } from './region-redraw-editor';
 
 export type PromptEditorOutputPreset = Pick<
   ImageOutputPreset,
-  'id' | 'name' | 'templateText' | 'useAvatarReferences' | 'usePreviousStoryImage'
+  'id' | 'name' | 'templateText' | 'useAvatarReferences' | 'useGalleryReferences' | 'usePreviousStoryImage'
 >;
 
 export type PromptEditorAvatarReferenceStatus = {
@@ -18,11 +18,20 @@ export type PromptEditorReferenceSelection = {
   /** False means the placement predates reference provenance tracking. */
   known: boolean;
   useAvatarReferences: boolean;
+  /** v0.5.2:图鉴/风格段是否随本次重绘发送;缺省视为关闭。 */
+  useGalleryReferences?: boolean;
   usePreviousStoryImage: boolean;
+  /**
+   * v0.5.2:编辑器当前场景描述,由 openImagePromptEditor 在准备参考时带上,
+   * 让声明制匹配(`当前出场角色：…`)以确认时的场景文本为准。
+   */
+  scenePrompt?: string;
 };
 
 export type PromptEditorReferenceAvailability = {
   avatarReferences: boolean;
+  /** v0.5.2:图鉴参考候选是否可用(出图预设的图鉴开关)。 */
+  galleryReferences?: boolean;
   previousStoryImage: boolean;
 };
 
@@ -41,6 +50,8 @@ export type ImagePromptEditorInput = {
   referenceSources?: ResolvedReferenceSource[];
   referenceSelection?: PromptEditorReferenceSelection;
   referenceAvailability?: PromptEditorReferenceAvailability;
+  /** v0.5.2 图鉴参考预演快照;提供时在参考图面板中只读展示。 */
+  galleryPreview?: PromptEditorGalleryPreview;
   /** Materializes only the sources enabled for this one redraw. */
   prepareReferenceSources?: PromptEditorReferencePreparation;
   signal?: AbortSignal;
@@ -118,6 +129,10 @@ export function selectPromptEditorReferenceSources(
   return sources
     .filter(source => {
       if (source.kind === 'previous-story-image') return selection.usePreviousStoryImage;
+      // v0.5.2:图鉴/风格段跟随图鉴参考开关;缺省(undefined)视为关闭,
+      // 旧调用方(未提供该字段)不会误选图鉴来源。
+      if (source.kind === 'gallery-reference' || source.kind === 'style-reference')
+        return selection.useGalleryReferences === true;
       return selection.useAvatarReferences;
     })
     .map(source => ({ ...source }));
@@ -126,7 +141,9 @@ export function selectPromptEditorReferenceSources(
 const promptEditorReferenceLabels: Record<ImageReferenceKind, string> = {
   'user-avatar': 'User 头像',
   'character-avatar': '角色头像',
-  'previous-story-image': '上一镜头参考图',
+  'gallery-reference': '图鉴参考',
+  'style-reference': '风格参考',
+  'previous-story-image': '上一镜头图',
 };
 
 /**
@@ -143,10 +160,62 @@ export function buildPromptEditorReferenceCandidates(
   if (availability.avatarReferences || recorded.has('user-avatar') || recorded.has('character-avatar')) {
     kinds.push('user-avatar', 'character-avatar');
   }
+  // v0.5.2:候选顺序保持固定段序(身份→图鉴→风格→上一镜头);物化前的占位
+  // 标签是泛化名,prepareReferenceSources 返回后替换为含命中别名的真实标签。
+  if (availability.galleryReferences || recorded.has('gallery-reference') || recorded.has('style-reference')) {
+    kinds.push('gallery-reference', 'style-reference');
+  }
   if (availability.previousStoryImage || recorded.has('previous-story-image')) {
     kinds.push('previous-story-image');
   }
   return kinds.map(kind => ({ kind, label: promptEditorReferenceLabels[kind], value: '' }));
+}
+
+// ---------------------------------------------------------------------------
+// v0.5.2 图鉴参考预演(执行简报 §0.6):改提示词/重绘弹窗列出本次匹配结果。
+// ---------------------------------------------------------------------------
+
+/** 重绘弹窗中的图鉴参考预演快照(打开编辑器时组装判定,只含标签与别名,不含路径)。 */
+export type PromptEditorGalleryPreview = {
+  /** 图鉴参考匹配模式是否开启。 */
+  galleryEnabled: boolean;
+  /** 是否读到非空的出场角色声明。 */
+  declarationFound: boolean;
+  /** 命中的图鉴参考标签(声明序,形如 `图鉴·角色(a2)`,标签+别名一体)。 */
+  matches: string[];
+  /** 声明了但图鉴中无匹配的别名(声明序)。 */
+  missingAliases: string[];
+  /** 风格段开关是否开启。 */
+  styleRequested: boolean;
+  /** 是否找到与出图预设同名的风格参考图。 */
+  styleFound: boolean;
+  /** 风格段标签(形如 `风格·<预设名>`);命中时展示。 */
+  styleLabel?: string;
+};
+
+/** 预演文案;命中、缺失角色与风格段状态各占一行,全为空时返回空串(不渲染)。 */
+export function describePromptEditorGalleryPreview(preview: PromptEditorGalleryPreview): string {
+  const lines: string[] = [];
+  if (preview.galleryEnabled) {
+    if (!preview.declarationFound) {
+      lines.push('未读到出场角色声明，本次不附图鉴参考。');
+    } else if (preview.matches.length > 0) {
+      lines.push(`图鉴参考：本次将附${preview.matches.join('、')}。`);
+    } else {
+      lines.push('声明的出场角色在图鉴中无匹配，本次不附图鉴参考。');
+    }
+    if (preview.declarationFound && preview.missingAliases.length > 0) {
+      lines.push(`声明了但图鉴中无匹配：${preview.missingAliases.join('、')}。`);
+    }
+  }
+  if (preview.styleRequested) {
+    lines.push(
+      preview.styleFound
+        ? `风格参考：本次将附${preview.styleLabel ?? ''}。`
+        : '风格参考：未找到与出图预设同名的风格参考图，本次不附。',
+    );
+  }
+  return lines.join('\n');
 }
 
 function isPromptEditorFocusable(element: HTMLElement): boolean {
@@ -217,6 +286,9 @@ export function openImagePromptEditor(input: ImagePromptEditorInput): Promise<Im
       useAvatarReferences: referenceSources.some(
         source => source.kind === 'user-avatar' || source.kind === 'character-avatar',
       ),
+      useGalleryReferences: referenceSources.some(
+        source => source.kind === 'gallery-reference' || source.kind === 'style-reference',
+      ),
       usePreviousStoryImage: referenceSources.some(source => source.kind === 'previous-story-image'),
     };
     let selectedReferenceSources = selectPromptEditorReferenceSources(referenceSources, referenceSelection);
@@ -228,6 +300,15 @@ export function openImagePromptEditor(input: ImagePromptEditorInput): Promise<Im
       '本次参考图',
     );
     const referenceControls = createElement(ownerDocument, 'div', 'story-image-prompt-editor__reference-controls');
+    // v0.5.2 图鉴参考预演:打开弹窗时的匹配快照(标签+别名、缺失角色、风格段)。
+    const galleryPreviewText = input.galleryPreview ? describePromptEditorGalleryPreview(input.galleryPreview) : '';
+    const galleryPreviewElement = createElement(
+      ownerDocument,
+      'p',
+      'story-image-prompt-editor__gallery-preview',
+      galleryPreviewText,
+    );
+    if (!galleryPreviewText) galleryPreviewElement.hidden = true;
     const avatarReferenceLabel = createElement(ownerDocument, 'label', 'story-image-prompt-editor__reference-option');
     const avatarReferenceToggle = createElement(ownerDocument, 'input', 'story-image-prompt-editor__reference-toggle');
     avatarReferenceToggle.type = 'checkbox';
@@ -256,7 +337,7 @@ export function openImagePromptEditor(input: ImagePromptEditorInput): Promise<Im
     previousReferenceLabel.append(previousReferenceToggle, previousReferenceText);
     referenceControls.append(avatarReferenceLabel, previousReferenceLabel);
     const referenceStatus = createElement(ownerDocument, 'p', 'story-image-prompt-editor__reference-status');
-    referencePanel.append(referenceTitle, referenceControls, referenceStatus);
+    referencePanel.append(referenceTitle, referenceControls, referenceStatus, galleryPreviewElement);
     const sceneLabel = createElement(
       ownerDocument,
       'label',
@@ -330,9 +411,9 @@ export function openImagePromptEditor(input: ImagePromptEditorInput): Promise<Im
       usePreviousStoryImage: previousReferenceToggle.checked,
     });
     const selectedReferenceKindRequested = (selection: PromptEditorReferenceSelection): boolean =>
-      selection.useAvatarReferences || selection.usePreviousStoryImage;
+      selection.useAvatarReferences || selection.usePreviousStoryImage || selection.useGalleryReferences === true;
     const referenceSelectionKey = (selection: PromptEditorReferenceSelection): string =>
-      `${selection.useAvatarReferences ? 'avatar' : 'no-avatar'}:${selection.usePreviousStoryImage ? 'previous' : 'no-previous'}`;
+      `${selection.useAvatarReferences ? 'avatar' : 'no-avatar'}:${selection.useGalleryReferences ? 'gallery' : 'no-gallery'}:${selection.usePreviousStoryImage ? 'previous' : 'no-previous'}`;
     let activePreparationKey: string | null = null;
     const updateConfirmState = (): void => {
       confirm.disabled =
@@ -349,10 +430,21 @@ export function openImagePromptEditor(input: ImagePromptEditorInput): Promise<Im
         requestedKinds.add('user-avatar');
         requestedKinds.add('character-avatar');
       }
+      // v0.5.2:图鉴与风格段跟随图鉴参考开关;同一 kind 可以有多个来源
+      // (图鉴按声明序命中多张),必须全部保留而不是互相覆盖。
+      if (selection.useGalleryReferences) {
+        requestedKinds.add('gallery-reference');
+        requestedKinds.add('style-reference');
+      }
       if (selection.usePreviousStoryImage) requestedKinds.add('previous-story-image');
       const unrequestedCandidates = referenceSources.filter(source => !requestedKinds.has(source.kind));
-      const preparedByKind = new Map(preparedSources.map(source => [source.kind, { ...source }]));
-      referenceSources = [...unrequestedCandidates, ...preparedByKind.values()];
+      const preparedByKind = new Map<ImageReferenceKind, ResolvedReferenceSource[]>();
+      for (const source of preparedSources) {
+        const list = preparedByKind.get(source.kind) ?? [];
+        list.push({ ...source });
+        preparedByKind.set(source.kind, list);
+      }
+      referenceSources = [...unrequestedCandidates, ...[...preparedByKind.values()].flat()];
     };
     const updateReferenceStatus = (selection: PromptEditorReferenceSelection, message?: string): void => {
       referenceStatus.textContent = message ?? describePromptEditorReferenceSelection(referenceSources, selection);
@@ -416,7 +508,8 @@ export function openImagePromptEditor(input: ImagePromptEditorInput): Promise<Im
         return existing;
       }
       const preparation = input
-        .prepareReferenceSources(selection, signal)
+        // v0.5.2:把当前场景描述带给调用方,声明制匹配以确认时的场景文本为准。
+        .prepareReferenceSources({ ...selection, scenePrompt: sceneTextarea.value }, signal)
         .then(preparedSources => applyPreparedReferenceSources(key, selection, preparedSources))
         .catch(error => {
           applyReferencePreparationError(key, selection, error);

@@ -1,6 +1,7 @@
 import {
   DEFAULT_OUTPUT_PRESET,
   DEFAULT_OUTPUT_PRESET_ID,
+  GALLERY_DECLARATION_INSTRUCTION,
   ImageOutputPresetSchema,
   createOutputPreset,
   deleteOutputPreset,
@@ -22,7 +23,11 @@ function equal(actual: unknown, expected: unknown, message: string): void {
 }
 
 equal(DEFAULT_OUTPUT_PRESET_ID, 'default-output-preset', '默认出图预设 ID 应稳定');
-equal(DEFAULT_OUTPUT_PRESET.templateText, '{{xx}}', '默认出图预设模板必须精确为 {{xx}}');
+assert(DEFAULT_OUTPUT_PRESET.templateText.startsWith('{{xx}}'), '默认出图预设模板必须以 {{xx}} 占位符开头');
+assert(
+  DEFAULT_OUTPUT_PRESET.templateText.includes(GALLERY_DECLARATION_INSTRUCTION),
+  '默认出图预设模板必须包含“当前出场角色”声明指令句（v0.5.2 简报 §2）',
+);
 assert(!DEFAULT_OUTPUT_PRESET.useAvatarReferences, '默认出图预设不得默认使用头像参考图');
 equal(
   ImageOutputPresetSchema.parse({ id: 'schema-default' }),
@@ -31,6 +36,8 @@ equal(
     name: '未命名出图预设',
     templateText: '{{xx}}',
     useAvatarReferences: false,
+    useGalleryReferences: false,
+    useStyleReference: false,
     usePreviousStoryImage: false,
   },
   '出图预设 schema 默认值应完整',
@@ -86,6 +93,8 @@ equal(
     name: '未命名出图预设',
     templateText: '{{xx}}',
     useAvatarReferences: false,
+    useGalleryReferences: false,
+    useStyleReference: false,
     usePreviousStoryImage: false,
   },
   '非法出图字段应回退到安全默认值',

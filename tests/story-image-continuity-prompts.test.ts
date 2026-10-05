@@ -124,7 +124,7 @@ async function run(): Promise<void> {
     }),
   });
   assert.deepEqual(missing.referenceImages, ['character', 'previous']);
-  assert.ok(missing.prompt.includes('图1：角色头像\n图2：上一镜头参考图'));
+  assert.ok(missing.prompt.includes('图1：角色头像\n图2：上一镜头图'));
   const failed = await processDrawingPrompt(createOutputPreset(CONTINUOUS_STORY_OUTPUT_EXAMPLE), 'current', {
     previousStoryImage: 'previous',
     readReferences: async () => {
@@ -132,7 +132,7 @@ async function run(): Promise<void> {
     },
   });
   assert.deepEqual(failed.referenceImages, ['previous']);
-  assert.ok(failed.prompt.includes('图1：上一镜头参考图'));
+  assert.ok(failed.prompt.includes('图1：上一镜头图'));
   const empty = await processDrawingPrompt(createOutputPreset(CONTINUOUS_STORY_OUTPUT_EXAMPLE), 'current', {
     readReferences: async () => ({ references: [], failedSources: [] }),
   });

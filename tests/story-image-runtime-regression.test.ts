@@ -312,6 +312,13 @@ function installRuntimeMocks(trackPendingHosts = false) {
         new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }),
       );
     }
+    if (requestUrl.endsWith('/api/images/list')) {
+      // 图鉴列表请求（v0.5.2 简报 §3.2）：与图片 API 独立，不计入 requestCount、
+      // 不进入 imagePosts。回归用例未配置图鉴文件，恒返回空文件名数组。
+      return Promise.resolve(
+        new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      );
+    }
     if ((request?.method ?? 'GET') === 'GET') {
       // 带显式 init 的 GET 才是参考图/头像读取；确认上传的资源读图不带 init。
       if (request) referenceReadCount += 1;
@@ -1668,7 +1675,7 @@ async function testReferenceFallbackAndEditorFrozenProfile(): Promise<void> {
     const automaticBody = JSON.parse(String(mocks.imagePosts.at(-1)?.init.body));
     assert(mocks.requestCount === 2 && automaticBody.images.length === 2, '404 用户头像不阻止唯一图片请求');
     assert(
-      automaticBody.prompt.includes('图1：角色头像') && automaticBody.prompt.includes('图2：上一镜头参考图'),
+      automaticBody.prompt.includes('图1：角色头像') && automaticBody.prompt.includes('图2：上一镜头图'),
       '实际请求按剩余来源重新编号',
     );
     assert(runtime.audit.continuity.reference_count === 2, '审计记录实际引用数');

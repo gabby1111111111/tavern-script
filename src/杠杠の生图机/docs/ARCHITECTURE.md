@@ -1,5 +1,9 @@
 # 生图机代码线路图
 
+## v0.5.1 当前线路
+
+v0.4.2~v0.5.0 已发布；v0.5.1 新增图鉴匹配线路,存储与异步线路不变。图鉴线路:`gallery-reference.ts` 维护别名索引(图库文件夹内 `参考-<标签>-<别名>.png`,启动/CHAT_CHANGED/本脚本上传删除后刷新)→ 出图预设「图鉴参考匹配」开启且与头像互斥时,`prompt-processor.ts` 解析 `<pic>` 中的『当前出场角色』声明并按声明序匹配(无兜底扫描);命中文件以服务器相对路径进入固定段序组装(身份 → 画风 → 上一镜头图),物化相对宿主页 origin 解析(srcdoc 下 location.origin 不可用,经 `gallery.baseOrigin` 显式传入);预演、toast(仅声明缺失/零匹配)与审计 `reference_match`/`matched_count` 由 runtime 接线。
+
 ## v0.5.0 当前线路
 
 v0.4.2~v0.4.4 已发布；v0.5.0 新增服务器存储线路,其余线路不变。存储线路:确认镜头(✓)→ `shot-workflow.ts` 异步上传 → `shot-storage.ts` 写入图库专用文件夹 `杠杠の生图机` 与脚本变量索引 `confirmedShotStorage`(版本化 zod schema,按 chatId 分组);脚本初始化/CHAT_CHANGED → `restore.ts` 按现行消息身份校验并恢复已确认图(失效条目只剪索引,绝不删服务器文件);删楼/Swipe 覆盖/× 删除 → `delete-sync.ts` 同步删除服务器文件并剪除索引(仅原生删除事件路径,`TavernHelper.deleteChatMessages` API 不发删除事件;失败只警告)。所有索引写入经 runtime 串行链,上传入队后重验确认态,避免竞态写回。以下线路替代历史说明中的自动取显示图和只计 normal 的门控。

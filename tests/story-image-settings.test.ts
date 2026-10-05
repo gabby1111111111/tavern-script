@@ -8,6 +8,7 @@ import {
 } from '../src/杠杠の生图机/drawing-preset';
 import { createPinia, setActivePinia } from 'pinia';
 import {
+  GALLERY_DECLARATION_INSTRUCTION,
   getCurrentDrawingPreset,
   getCurrentOutputPreset,
   getGiftApiProfile,
@@ -57,7 +58,11 @@ assert(defaults.drawingPresets.length === 1, '新设置应至少包含一个画�
 assert(defaults.drawingPresets[0].instructionText.length > 0, '默认画图预设应有正文 AI 指令');
 equal(defaults.currentDrawingPresetId, defaults.drawingPresets[0].id, '默认当前预设应指向可用预设');
 assert(defaults.outputPresets.length === 1, '新设置应至少包含一个出图预设');
-equal(defaults.outputPresets[0].templateText, '{{xx}}', '默认出图预设模板必须精确为 {{xx}}');
+assert(defaults.outputPresets[0].templateText.startsWith('{{xx}}'), '默认出图预设模板必须以 {{xx}} 占位符开头');
+assert(
+  defaults.outputPresets[0].templateText.includes(GALLERY_DECLARATION_INSTRUCTION),
+  '默认出图预设模板必须包含“当前出场角色”声明指令句（v0.5.2 简报 §2）',
+);
 assert(!defaults.outputPresets[0].useAvatarReferences, '默认出图预设不得默认读取头像');
 equal(defaults.currentOutputPresetId, defaults.outputPresets[0].id, '默认当前出图预设应指向可用预设');
 equal(getCurrentOutputPreset(defaults).id, defaults.outputPresets[0].id, 'settings lookup 应返回当前出图预设');
@@ -196,8 +201,13 @@ const explicitOutput = parseStoryImageSettings({
 });
 equal(
   explicitOutput.outputPresets,
-  explicitOutputPresets.map(preset => ({ ...preset, usePreviousStoryImage: false })),
-  '已有出图预设应保留内容，上一图引用默认关闭',
+  explicitOutputPresets.map(preset => ({
+    ...preset,
+    useGalleryReferences: false,
+    useStyleReference: false,
+    usePreviousStoryImage: false,
+  })),
+  '已有出图预设应保留内容，图鉴匹配、风格参考与上一图引用默认关闭',
 );
 equal(explicitOutput.currentOutputPresetId, 'output-b', '已有当前出图预设 ID 应保留');
 assert(getCurrentOutputPreset(explicitOutput).useAvatarReferences, '当前出图预设头像开关应传递');
@@ -211,7 +221,10 @@ const migratedOldDrawingPreset = parseStoryImageSettings({
   apiProfiles: profiles,
 });
 assert(!('needsProcessing' in migratedOldDrawingPreset.drawingPresets[0]), '迁移后的画图预设必须删除 needsProcessing');
-equal(migratedOldDrawingPreset.outputPresets[0].templateText, '{{xx}}', '迁移出的出图模板必须保持 {{xx}}');
+assert(
+  migratedOldDrawingPreset.outputPresets[0].templateText.startsWith('{{xx}}'),
+  '迁移出的出图模板必须保留 {{xx}} 占位符',
+);
 assert(
   migratedOldDrawingPreset.outputPresets[0].useAvatarReferences,
   '出图预设应继承旧当前画图预设的 needsProcessing=true',

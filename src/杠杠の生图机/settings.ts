@@ -18,6 +18,7 @@ import {
   ImageOutputPresetSchema,
   getCurrentOutputPreset as getCurrentOutputPresetFromList,
   normalizeOutputPresets,
+  repairOutputReferenceExclusivity,
   type ImageOutputPreset,
 } from './output-preset';
 
@@ -39,7 +40,9 @@ export {
   DEFAULT_IMAGE_OUTPUT_PRESET_ID,
   DEFAULT_OUTPUT_PRESET,
   DEFAULT_OUTPUT_PRESET_ID,
+  GALLERY_DECLARATION_INSTRUCTION,
   ImageOutputPresetSchema,
+  OUTPUT_REFERENCE_MUTEX_NOTICES,
   createImageOutputPreset,
   createOutputPreset,
   deleteImageOutputPreset,
@@ -49,10 +52,17 @@ export {
   normalizeImageOutputPresets,
   normalizeOutputPreset,
   normalizeOutputPresets,
+  repairOutputReferenceExclusivity,
+  toggleOutputReferenceSwitch,
   updateImageOutputPreset,
   updateOutputPreset,
 } from './output-preset';
-export type { ImageOutputPreset } from './output-preset';
+export type {
+  ImageOutputPreset,
+  OutputReferenceSwitchKey,
+  OutputReferenceSwitchResult,
+  OutputReferenceSwitchState,
+} from './output-preset';
 
 const LEGACY_INLINE_PROMPT_DEFAULT =
   '当回复中确实需要一张或两张随文插图时，在对应正文段落中输出最多两个 <pic prompt="英文绘图提示词"> 标记；没有需要时不要输出标记。不要输出分析过程。';
@@ -410,9 +420,13 @@ function legacyCurrentDrawingPresetNeedsProcessing(raw: Record<string, unknown>)
 
 function parseOutputPresets(raw: Record<string, unknown>, inheritedUseAvatarReferences: boolean): ImageOutputPreset[] {
   if (Array.isArray(raw.outputPresets) && raw.outputPresets.length > 0) {
-    return normalizeOutputPresets(raw.outputPresets);
+    // 设置层的互斥修复(执行简报 §2/§3.5):解析到头像与图鉴同时开启时,
+    // 保留头像并强制关闭图鉴参考匹配。归一化内部已修复一次,这里再显式保证。
+    return normalizeOutputPresets(raw.outputPresets).map(repairOutputReferenceExclusivity);
   }
-  return [{ ...DEFAULT_OUTPUT_PRESET, useAvatarReferences: inheritedUseAvatarReferences }];
+  return [{ ...DEFAULT_OUTPUT_PRESET, useAvatarReferences: inheritedUseAvatarReferences }].map(
+    repairOutputReferenceExclusivity,
+  );
 }
 
 type LegacyGiftTriggerInterval = 'manual' | '3' | '5';

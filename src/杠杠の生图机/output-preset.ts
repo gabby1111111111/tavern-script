@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import type { ImageOutputPreset } from './pipeline-types';
+import type { ImageOutputPreset as PipelineImageOutputPreset } from './pipeline-types';
+
+/**
+ * v0.5.2 extends the pipeline type with the gallery-reference switch.  Like
+ * `usePreviousStoryImage`, the field is optional on the type (legacy/external
+ * data may predate it) and always materializes as a boolean through the schema
+ * (missing or malformed values fall back to `false`).
+ */
+export type ImageOutputPreset = PipelineImageOutputPreset & { useGalleryReferences?: boolean };
 
 /**
  * A user-editable template for the generated image prompt. The template is
@@ -7,12 +15,23 @@ import type { ImageOutputPreset } from './pipeline-types';
  * the runtime when it combines the generated prompt with this preset.
  */
 export const DEFAULT_OUTPUT_TEMPLATE = '{{xx}}';
+
+/**
+ * 图鉴参考匹配(v0.5.2)的“当前出场角色”声明指令句,追加在默认出图预设模板中,
+ * 教正文 AI 在每个 <pic> 提示词里单独输出一行声明。已有用户预设不受影响;
+ * 发布阶段 README 会同时提供可复制的画图预设指令句(执行简报 §0.2/§0.8)。
+ */
+export const GALLERY_DECLARATION_INSTRUCTION =
+  '开启“图鉴参考匹配”时，请在每个 <pic> 提示词中单独输出一行“当前出场角色：a2，b1；”：a2、b1 是本镜头实际出场角色的图鉴别名，多个别名用逗号或顿号分隔，整行以分号结尾；未开启图鉴参考匹配或本镜头没有出场角色时，不要输出这一行。';
+
 export const DEFAULT_OUTPUT_PRESET_ID = 'default-output-preset';
 export const DEFAULT_OUTPUT_PRESET: ImageOutputPreset = {
   id: DEFAULT_OUTPUT_PRESET_ID,
   name: '默认出图格式',
-  templateText: DEFAULT_OUTPUT_TEMPLATE,
+  templateText: `${DEFAULT_OUTPUT_TEMPLATE}\n\n${GALLERY_DECLARATION_INSTRUCTION}`,
   useAvatarReferences: false,
+  useGalleryReferences: false,
+  useStyleReference: false,
   usePreviousStoryImage: false,
 };
 
@@ -21,10 +40,63 @@ export const ImageOutputPresetSchema = z.object({
   name: z.string().trim().default('未命名出图预设'),
   templateText: z.string().default(DEFAULT_OUTPUT_TEMPLATE),
   useAvatarReferences: z.boolean().default(false),
+  useGalleryReferences: z.boolean().default(false),
+  useStyleReference: z.boolean().default(false),
   usePreviousStoryImage: z.boolean().default(false),
 });
 
-export type { ImageOutputPreset } from './pipeline-types';
+/**
+ * 身份参考互斥(执行简报 §0.3):出图预设的「头像参考」与「图鉴参考匹配」不得同时
+ * 开启。解析修复规则:两者同时为真时保留头像、强制关闭图鉴。幂等,数据层与设置层
+ * 的归一化路径都调用它。
+ */
+export function repairOutputReferenceExclusivity(preset: ImageOutputPreset): ImageOutputPreset {
+  if (preset.useAvatarReferences === true && preset.useGalleryReferences === true) {
+    return { ...preset, useGalleryReferences: false };
+  }
+  return preset;
+}
+
+/** The two mutually exclusive identity-reference switches of an output preset. */
+export type OutputReferenceSwitchState = {
+  useAvatarReferences: boolean;
+  useGalleryReferences: boolean;
+};
+
+export type OutputReferenceSwitchKey = keyof OutputReferenceSwitchState;
+
+export type OutputReferenceSwitchResult = OutputReferenceSwitchState & {
+  /** One-sentence UI hint, set only when opening one switch forced the other off. */
+  notice: string | null;
+};
+
+/** Hints shown by the settings UI; wording never contains paths or URLs. */
+export const OUTPUT_REFERENCE_MUTEX_NOTICES = {
+  useAvatarReferences: '已开启头像参考：头像参考与图鉴参考匹配互斥，已自动关闭图鉴参考匹配。',
+  useGalleryReferences: '已开启图鉴参考匹配：图鉴参考匹配与头像参考互斥，已自动关闭头像参考。',
+} as const;
+
+/**
+ * Pure switch logic behind the settings UI: opening one identity-reference
+ * switch turns the other off and reports a hint; closing one never re-enables
+ * the other (closing the gallery switch restores the ability to use avatars,
+ * it does not switch them back on automatically).
+ */
+export function toggleOutputReferenceSwitch(
+  state: OutputReferenceSwitchState,
+  key: OutputReferenceSwitchKey,
+  nextValue: boolean,
+): OutputReferenceSwitchResult {
+  if (!nextValue) {
+    return { ...state, [key]: false, notice: null };
+  }
+  const otherKey: OutputReferenceSwitchKey =
+    key === 'useAvatarReferences' ? 'useGalleryReferences' : 'useAvatarReferences';
+  if (!state[otherKey]) {
+    return { ...state, [key]: true, notice: null };
+  }
+  return { ...state, [key]: true, [otherKey]: false, notice: OUTPUT_REFERENCE_MUTEX_NOTICES[key] };
+}
 
 function fallbackId(index: number): string {
   return index === 0 ? DEFAULT_OUTPUT_PRESET_ID : `${DEFAULT_OUTPUT_PRESET_ID}-${index + 1}`;
@@ -56,8 +128,10 @@ export function normalizeOutputPreset(raw: unknown, index = 0): ImageOutputPrese
     templateText: typeof record.templateText === 'string' ? record.templateText : DEFAULT_OUTPUT_TEMPLATE,
     usePreviousStoryImage: typeof record.usePreviousStoryImage === 'boolean' ? record.usePreviousStoryImage : false,
     useAvatarReferences: typeof record.useAvatarReferences === 'boolean' ? record.useAvatarReferences : false,
+    useGalleryReferences: typeof record.useGalleryReferences === 'boolean' ? record.useGalleryReferences : false,
+    useStyleReference: typeof record.useStyleReference === 'boolean' ? record.useStyleReference : false,
   });
-  return parsed.success ? parsed.data : null;
+  return parsed.success ? repairOutputReferenceExclusivity(parsed.data) : null;
 }
 
 export function normalizeOutputPresets(raw: unknown): ImageOutputPreset[] {
@@ -78,9 +152,11 @@ export function createOutputPreset(
     name: input.name?.trim() || '新建出图预设',
     templateText: input.templateText ?? DEFAULT_OUTPUT_TEMPLATE,
     useAvatarReferences: input.useAvatarReferences ?? false,
+    useGalleryReferences: input.useGalleryReferences ?? false,
+    useStyleReference: input.useStyleReference ?? false,
     usePreviousStoryImage: input.usePreviousStoryImage ?? false,
   };
-  return ImageOutputPresetSchema.parse(candidate);
+  return repairOutputReferenceExclusivity(ImageOutputPresetSchema.parse(candidate));
 }
 
 export function getCurrentOutputPreset(presets: ImageOutputPreset[], currentId: string): ImageOutputPreset {
@@ -94,11 +170,13 @@ export function updateOutputPreset(
 ): ImageOutputPreset[] {
   return presets.map(preset =>
     preset.id === id
-      ? ImageOutputPresetSchema.parse({
-          ...preset,
-          ...patch,
-          id: preset.id,
-        })
+      ? repairOutputReferenceExclusivity(
+          ImageOutputPresetSchema.parse({
+            ...preset,
+            ...patch,
+            id: preset.id,
+          }),
+        )
       : { ...preset },
   );
 }

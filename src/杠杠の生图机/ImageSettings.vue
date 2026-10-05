@@ -3,7 +3,7 @@
   <section class="story-image-settings">
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>杠杠の生图机 V0.5.0</b>
+        <b>杠杠の生图机 V0.5.1</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
@@ -210,11 +210,44 @@
             <label class="story-image-settings__enable-row" for="story-image-output-avatar-references">
               <input
                 id="story-image-output-avatar-references"
-                v-model="activeOutputPreset.useAvatarReferences"
                 type="checkbox"
+                :checked="activeOutputPreset.useAvatarReferences"
+                @change="onAvatarReferencesChange"
               />
               <span>使用当前 User 和角色头像</span>
             </label>
+            <label class="story-image-settings__enable-row" for="story-image-output-gallery-references">
+              <input
+                id="story-image-output-gallery-references"
+                type="checkbox"
+                :checked="activeOutputPreset.useGalleryReferences ?? false"
+                @change="onGalleryReferencesChange"
+              />
+              <span>图鉴参考匹配</span>
+            </label>
+            <p v-if="referenceSwitchNotice" class="story-image-settings__description">
+              {{ referenceSwitchNotice }}
+            </p>
+            <p class="story-image-settings__description">
+              图鉴参考匹配按正文 AI 在
+              <code v-text="'<pic>'"></code>
+              提示词中声明的“当前出场角色”从图鉴文件夹匹配参考图（文件名形如
+              参考-标签-别名.png），声明顺序即附加顺序。头像参考与图鉴参考匹配互斥，开启一个会自动关闭另一个。
+            </p>
+            <label class="story-image-settings__enable-row" for="story-image-output-style-reference">
+              <input
+                id="story-image-output-style-reference"
+                type="checkbox"
+                :checked="activeOutputPreset.useStyleReference ?? false"
+                @change="onStyleReferenceChange"
+              />
+              <span>发送同名风格参考图</span>
+            </label>
+            <p class="story-image-settings__description">
+              开启后按当前出图预设名称在图鉴文件夹精确查找
+              <code v-text="'参考-风格-<预设名>.png'"></code>
+              ，命中时作为画风段参考图发送（排在上一镜头图之前）；未命中仅在预演中提示，不弹通知。预设改名后需同步修改该文件名。
+            </p>
             <label class="story-image-settings__enable-row" for="story-image-output-previous-reference">
               <input
                 id="story-image-output-previous-reference"
@@ -234,7 +267,8 @@
               添加一对示例供手动选择，不改变当前选择。连续线按画图与出图预设组合区分，使用前楼最近已确认的镜头；礼物图不参与。
             </p>
             <p class="story-image-settings__description story-image-settings__avatar-reference-note">
-              参考图依次为 User 头像、角色头像、上一镜头图；缺失来源会跳过，编号按实际图片顺序排列。
+              头像参考模式依次附 User
+              头像、角色头像；图鉴参考匹配模式按声明顺序附匹配到的图鉴参考图；开启上一镜头图时它始终排在最后。缺失来源会跳过，编号按实际图片顺序排列。
             </p>
           </div>
         </div>
@@ -510,7 +544,9 @@ import {
   CONTINUOUS_STORY_OUTPUT_EXAMPLE,
   createOutputPreset,
   deleteOutputPreset,
+  toggleOutputReferenceSwitch,
   updateOutputPreset,
+  type OutputReferenceSwitchKey,
 } from './output-preset';
 import type { ImageApiProfile } from './settings';
 import {
@@ -563,6 +599,7 @@ const extraBodyText = ref(JSON.stringify(activeProfile.value.extraBody, null, 2)
 const extraBodyError = ref('');
 const savingGalleryImageId = ref<string | null>(null);
 const saveGalleryError = ref<string | null>(null);
+const referenceSwitchNotice = ref<string | null>(null);
 
 const runtimeStatus = computed(() => props.runtime.status.value);
 const recentImages = computed(() => props.runtime.recentImages.value);
@@ -617,11 +654,56 @@ function deleteActivePreset(): void {
   settings.value.currentDrawingPresetId = result.currentId;
 }
 
+function readSwitchChecked(event: Event): boolean {
+  return (event.target as HTMLInputElement | null)?.checked === true;
+}
+
+/**
+ * 互斥交互(执行简报 §0.3/§3.5):开启一个身份参考开关会自动关闭另一个并提示一句;
+ * 关闭一侧不自动重开另一侧。写入当前出图预设后由设置 store 的深度监听即时持久化。
+ */
+function applyReferenceSwitchToggle(key: OutputReferenceSwitchKey, nextValue: boolean): void {
+  const active = activeOutputPreset.value;
+  const result = toggleOutputReferenceSwitch(
+    {
+      useAvatarReferences: active.useAvatarReferences,
+      useGalleryReferences: active.useGalleryReferences ?? false,
+    },
+    key,
+    nextValue,
+  );
+  active.useAvatarReferences = result.useAvatarReferences;
+  active.useGalleryReferences = result.useGalleryReferences;
+  referenceSwitchNotice.value = result.notice;
+}
+
+function onAvatarReferencesChange(event: Event): void {
+  applyReferenceSwitchToggle('useAvatarReferences', readSwitchChecked(event));
+}
+
+function onGalleryReferencesChange(event: Event): void {
+  applyReferenceSwitchToggle('useGalleryReferences', readSwitchChecked(event));
+}
+
+function onStyleReferenceChange(event: Event): void {
+  // 风格段为独立开关（执行简报 §0.10）：不参与头像/图鉴互斥，两种身份模式下都可用。
+  activeOutputPreset.value.useStyleReference = readSwitchChecked(event);
+}
+
+watch(
+  () => settings.value.currentOutputPresetId,
+  () => {
+    referenceSwitchNotice.value = null;
+  },
+);
+
 function createOutputPresetEntry(): void {
   const preset = createOutputPreset({
     name: `新预设 ${settings.value.outputPresets.length + 1}`,
     templateText: activeOutputPreset.value.templateText,
     useAvatarReferences: activeOutputPreset.value.useAvatarReferences,
+    useGalleryReferences: activeOutputPreset.value.useGalleryReferences ?? false,
+    useStyleReference: activeOutputPreset.value.useStyleReference ?? false,
     usePreviousStoryImage: activeOutputPreset.value.usePreviousStoryImage ?? false,
   });
   settings.value.outputPresets = [...settings.value.outputPresets, preset];
@@ -635,6 +717,8 @@ function saveOutputPresetEntry(): void {
     name: activeOutputPreset.value.name.trim() || '未命名出图预设',
     templateText: activeOutputPreset.value.templateText,
     useAvatarReferences: activeOutputPreset.value.useAvatarReferences,
+    useGalleryReferences: activeOutputPreset.value.useGalleryReferences ?? false,
+    useStyleReference: activeOutputPreset.value.useStyleReference ?? false,
     usePreviousStoryImage: activeOutputPreset.value.usePreviousStoryImage ?? false,
   }).filter(preset => preset.id === settings.value.currentOutputPresetId);
   if (!saved) return;

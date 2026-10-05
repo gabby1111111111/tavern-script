@@ -32,12 +32,14 @@ import type {
   DisplayMode,
   DrawingPreset,
   FloorTriggerDecision,
+  GalleryReferenceMatchStatus,
   ImageOutputPreset,
   ImageReferenceKind,
   ImageRequestInput,
   ResolvedReferenceSource,
 } from './pipeline-types';
-import { applyDrawingPromptTemplate, processDrawingPrompt, resolveReferenceSources } from './prompt-processor';
+import { applyDrawingPromptTemplate, assembleOutputReferenceSources, processDrawingPrompt } from './prompt-processor';
+import { buildGalleryAliasIndex, fetchGalleryFileNames, type GalleryAliasEntry } from './gallery-reference';
 import { materializeReferenceSources } from './reference-resolution';
 import {
   createStoryContinuitySnapshot,
@@ -77,6 +79,16 @@ import {
 } from './task-cache';
 import { executeConfirmedShotRemoval, type ConfirmedShotRemovalReason } from './delete-sync';
 import { planConfirmedShotRestore, type ConfirmedShotRestorePlanEntry } from './restore';
+
+/** 图鉴相对路径的物化基准:宿主页 origin(srcdoc 下 location.origin 是字符串 null,取 document.baseURI)。 */
+function hostPageOrigin(): string | undefined {
+  try {
+    const origin = new URL(document.baseURI).origin;
+    return /^https?:\/\//.test(origin) ? origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
 import { removeConfirmedShotEntry, upsertConfirmedShot, type ConfirmedShotIdentity } from './shot-storage';
 
 export type RuntimeStatus = 'idle' | 'generating' | 'ready' | 'error' | 'stopped';
@@ -180,6 +192,10 @@ export type StoryImageAudit = {
     output_preset_id: string | null;
     reference_count: number;
     reference_kinds: string[];
+    /** v0.5.2 图鉴参考匹配状态(声明制匹配的落点,不含路径与别名明细)。 */
+    reference_match: GalleryReferenceMatchStatus;
+    /** 最终发送列表中图鉴参考的数量(有界,不含路径)。 */
+    matched_count: number;
     /** v0.5 确认镜头存储域：计数 + 有界错误，不含图片路径、URL 或 Base64。 */
     storage: { uploaded: number; deleted: number; restored: number; last_error: string | null };
   };
@@ -245,6 +261,8 @@ export function createEmptyAudit(): StoryImageAudit {
       output_preset_id: null,
       reference_count: 0,
       reference_kinds: [],
+      reference_match: 'off',
+      matched_count: 0,
       storage: { uploaded: 0, deleted: 0, restored: 0, last_error: null },
     },
     workflow: { confirmed_count: 0, unconfirmed_count: 0, pending_count: 0 },
@@ -303,6 +321,37 @@ export function deriveRuntimeStatusState(input: {
   if (input.activeTask || input.activeManualRevisions > 0) return 'generating';
   if (input.hasError) return 'error';
   return input.hasReadyContent ? 'ready' : 'idle';
+}
+
+/** 审计 matched_count 的有界上限;声明清单本身有限,这里防御脏索引导致的极端值。 */
+export const GALLERY_MATCHED_COUNT_LIMIT = 999;
+
+/**
+ * 图鉴匹配的 toast 文案(执行简报 §0.7,仅图鉴模式开且为镜头生成时调用):
+ * 声明缺失按兜底扫描是否命中分两条;有声明零匹配一条;成功匹配与部分命中
+ * 不弹(预演与审计已体现)。文案不含图片路径、URL 或 Base64。
+ */
+export function galleryReferenceToastNotice(
+  status: GalleryReferenceMatchStatus,
+  scannedAliasCount: number,
+): string | null {
+  if (status === 'no_declaration') {
+    return scannedAliasCount > 0 ? '检测到出场角色但未声明，本次未附图鉴参考' : '未读到出场角色声明，本次未附图鉴参考';
+  }
+  if (status === 'no_match') return '声明的出场角色在图鉴中无匹配';
+  return null;
+}
+
+/**
+ * 别名索引处置(执行简报 §3.2):列表失败(null)→ 索引置空 + 警告,不阻塞
+ * 生成;成功 → buildGalleryAliasIndex 归一化建索引。console 警告不含路径。
+ */
+export function applyGalleryIndexFromFiles(files: string[] | null): GalleryAliasEntry[] {
+  if (files === null) {
+    console.warn(LOG_PREFIX, '图鉴列表获取失败，图鉴参考索引已置空');
+    return [];
+  }
+  return buildGalleryAliasIndex(files);
 }
 
 export function shouldRemovePlacementForRecentReason(reason: RecentImageRemovalReason): boolean {
@@ -564,6 +613,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       output_preset_id: outputPresetId.slice(0, 120),
       reference_count: 0,
       reference_kinds: [],
+      reference_match: 'off',
+      matched_count: 0,
       // 携带同一个 storage 对象：确认/删除/恢复计数的生命周期独立于连续性快照。
       storage: audit.continuity.storage,
     };
@@ -878,6 +929,26 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     return next;
   };
 
+  // ── v0.5.2 图鉴参考:别名索引与刷新时机(执行简报 §3.2)────────────────
+  // 刷新时机:脚本启动、CHAT_CHANGED、本脚本自身的图库上传/删除完成后;
+  // 列表失败 → 索引置空 + 警告,不阻塞生成;默认单次请求,无重试。
+  let galleryAliasIndex: GalleryAliasEntry[] = [];
+  let galleryIndexRefreshInFlight = false;
+  const refreshGalleryAliasIndex = (): void => {
+    if (galleryIndexRefreshInFlight) return;
+    galleryIndexRefreshInFlight = true;
+    void fetchGalleryFileNames()
+      .then(files => {
+        galleryAliasIndex = applyGalleryIndexFromFiles(files);
+      })
+      .catch(() => {
+        galleryAliasIndex = applyGalleryIndexFromFiles(null);
+      })
+      .finally(() => {
+        galleryIndexRefreshInFlight = false;
+      });
+  };
+
   const noteStorageError = (message: string): void => {
     audit.continuity.storage.last_error = message;
   };
@@ -893,7 +964,11 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     void enqueueStorageOp(async () => {
       try {
         const outcome = await executeConfirmedShotRemoval(chatId, identity, reason);
-        if (outcome.status === 'deleted') audit.continuity.storage.deleted += 1;
+        if (outcome.status === 'deleted') {
+          audit.continuity.storage.deleted += 1;
+          // 专用图库文件夹内容已变化,刷新图鉴别名索引(失败置空,不阻塞)。
+          refreshGalleryAliasIndex();
+        }
         if (outcome.warning) noteStorageError(outcome.warning);
       } catch (error) {
         noteStorageError(errorText(error));
@@ -920,6 +995,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         {
           onUploaded: () => {
             audit.continuity.storage.uploaded += 1;
+            // 专用图库文件夹内容已变化,刷新图鉴别名索引(失败置空,不阻塞)。
+            refreshGalleryAliasIndex();
           },
           onStorageError: error => {
             noteStorageError(errorText(error));
@@ -1208,6 +1285,10 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         known: recordedReferenceKinds !== undefined,
         useAvatarReferences:
           recordedReferenceKinds?.some(kind => kind === 'user-avatar' || kind === 'character-avatar') ?? false,
+        // v0.5.2:图鉴/风格段随出图预设开关;旧 placement 已带图鉴来源时以记录为准。
+        useGalleryReferences:
+          recordedReferenceKinds?.some(kind => kind === 'gallery-reference' || kind === 'style-reference') ??
+          outputPreset.useGalleryReferences === true,
         usePreviousStoryImage: recordedReferenceKinds?.includes('previous-story-image') ?? false,
       };
       const continuity = captureContinuity(
@@ -1221,9 +1302,24 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           // Availability is resolved only when the user has selected avatars;
           // opening a text editor must not wait for avatar/image GETs.
           avatarReferences: true,
+          // v0.5.2:图鉴候选可用性 = 出图预设的图鉴开关(列表为空时仅无命中)。
+          galleryReferences: outputPreset.useGalleryReferences === true,
           previousStoryImage: Boolean(continuity.resource?.url?.trim()),
         };
         const referenceCandidates = buildPromptEditorReferenceCandidates(recordedReferenceKinds, referenceAvailability);
+        // v0.5.2 图鉴参考预演(执行简报 §0.6):打开弹窗时按当前镜头提示词与
+        // 别名索引做一次声明匹配快照;命中、缺失角色与风格段状态各占一行,
+        // 只含标签与别名,不含图片路径。确认时的声明以场景文本重新解析。
+        const galleryPreviewEnabled =
+          outputPreset.useGalleryReferences === true || outputPreset.useStyleReference === true;
+        const galleryAssembly = galleryPreviewEnabled
+          ? assembleOutputReferenceSources({
+              preset: outputPreset,
+              avatarReferences: emptyAvatarReferenceReadResult(),
+              promptText: placement.prompt,
+              galleryAliasIndex,
+            })
+          : null;
         const editorResult = await openImagePromptEditor({
           prompt: placement.prompt,
           finalPrompt: placement.finalPrompt,
@@ -1236,6 +1332,21 @@ export function createStoryImageRuntime(): StoryImageRuntime {
           referenceSources: referenceCandidates,
           referenceSelection,
           referenceAvailability,
+          ...(galleryAssembly
+            ? {
+                galleryPreview: {
+                  galleryEnabled: outputPreset.useGalleryReferences === true,
+                  declarationFound: galleryAssembly.declarationFound,
+                  matches: galleryAssembly.sources
+                    .filter(source => source.kind === 'gallery-reference')
+                    .map(source => source.label),
+                  missingAliases: galleryAssembly.unmatchedAliases,
+                  styleRequested: outputPreset.useStyleReference === true,
+                  styleFound: galleryAssembly.styleFound,
+                  ...(galleryAssembly.styleFound ? { styleLabel: `风格·${outputPreset.name.trim()}` } : {}),
+                },
+              }
+            : {}),
           prepareReferenceSources: async (selection, signal) => {
             if (selection.usePreviousStoryImage) {
               continuityOwners.get(continuity)?.add(controller);
@@ -1251,14 +1362,21 @@ export function createStoryImageRuntime(): StoryImageRuntime {
               // selected. Treat it as unavailable instead of cancelling a
               // text-only redraw or pretending that an empty candidate was sent.
               if (selection.usePreviousStoryImage && !validContinuity(continuity)) return [];
-              return await materializeReferenceSources(
-                resolveReferenceSources(
-                  avatarReferences,
-                  selection.usePreviousStoryImage ? continuity.resource?.url : undefined,
-                ),
-                profile,
-                signal,
-              );
+              // v0.5.2:按本次选择完整走固定段序组装;声明以确认时的场景文本为准
+              // (编辑器未带场景文本时回退到原镜头提示词)。
+              const assembly = assembleOutputReferenceSources({
+                preset: {
+                  ...outputPreset,
+                  useAvatarReferences: selection.useAvatarReferences,
+                  useGalleryReferences: selection.useGalleryReferences === true,
+                  usePreviousStoryImage: selection.usePreviousStoryImage,
+                },
+                avatarReferences,
+                promptText: selection.scenePrompt ?? placement.prompt,
+                previousStoryImage: selection.usePreviousStoryImage ? continuity.resource?.url : undefined,
+                galleryAliasIndex,
+              });
+              return await materializeReferenceSources(assembly.sources, profile, signal);
             } finally {
               // Once materialization has finished, the request owns the
               // resolved bytes/URLs. Removing the old placement must not
@@ -1283,6 +1401,12 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         if (auditedSnapshot === continuity) {
           audit.continuity.reference_count = selectedReferenceSources.length;
           audit.continuity.reference_kinds = selectedReferenceSources.map(source => source.kind);
+          // v0.5.2:手动重绘不跑声明制匹配(reference_match 保持本次快照重置的
+          // 'off'),matched_count 只同步实际附上的图鉴来源数量。
+          audit.continuity.matched_count = Math.min(
+            selectedReferenceSources.filter(source => source.kind === 'gallery-reference').length,
+            GALLERY_MATCHED_COUNT_LIMIT,
+          );
         }
         const storedScenePrompt = editorResult.scenePrompt?.trim() || normalizedPrompt;
         onSubmitted?.();
@@ -1657,7 +1781,29 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         readReferences: () => avatarReferences,
         previousShotPrompt: continuity?.shotPrompt,
         previousStoryImage: continuity?.resource?.url,
+        // v0.5.2 图鉴参考:别名索引由 runtime 维护;列表失败已被置空,不阻塞生成。
+        gallery: {
+          aliasIndex: galleryAliasIndex,
+          // srcdoc 下 location.origin 不可用,显式传宿主页 origin 作为图鉴相对路径的物化基准。
+          baseOrigin: hostPageOrigin(),
+        },
       });
+      // v0.5.2 toast 与审计接线:判定来自组装结果,matched_count 以最终实际发送
+      // 列表(物化剔除后)为准;仅自动镜头任务在此触发,手动重绘走预演不弹 toast。
+      const finalGalleryCount = (input.referenceSources ?? []).filter(
+        source => source.kind === 'gallery-reference',
+      ).length;
+      if (auditedSnapshot === continuity) {
+        audit.continuity.matched_count = Math.min(finalGalleryCount, GALLERY_MATCHED_COUNT_LIMIT);
+        if (input.galleryMatch) audit.continuity.reference_match = input.galleryMatch.status;
+      }
+      if (input.galleryMatch) {
+        const notice = galleryReferenceToastNotice(input.galleryMatch.status, input.galleryMatch.scannedAliasCount);
+        if (notice) {
+          toastr.warning(notice);
+          console.info(LOG_PREFIX, '图鉴参考提示', { reference_match: input.galleryMatch.status });
+        }
+      }
       if (auditedSnapshot === continuity) {
         audit.continuity.reference_count = input.referenceImages?.length ?? 0;
         audit.continuity.reference_kinds = input.referenceSources?.map(source => source.kind) ?? [];
@@ -2368,6 +2514,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         resetMemory();
         messageAdvance.seed(SillyTavern.chat);
         restoreConfirmedShotsForCurrentChat();
+        // v0.5.2:切换聊天后刷新图鉴别名索引(失败置空,不阻塞生成)。
+        refreshGalleryAliasIndex();
         status.value = 'idle';
         setTimeout(renderAllPlacements, 0);
       });
@@ -2466,6 +2614,8 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       });
       installPrompt(null);
       restoreConfirmedShotsForCurrentChat();
+      // v0.5.2:脚本启动时刷新图鉴别名索引(异步,不阻塞启动;失败置空+警告)。
+      refreshGalleryAliasIndex();
       renderAllPlacements();
     },
     stop: () => {
