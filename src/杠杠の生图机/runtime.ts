@@ -38,7 +38,12 @@ import type {
   ImageRequestInput,
   ResolvedReferenceSource,
 } from './pipeline-types';
-import { applyDrawingPromptTemplate, assembleOutputReferenceSources, processDrawingPrompt } from './prompt-processor';
+import {
+  applyDrawingPromptTemplate,
+  applyOutputPromptTemplate,
+  assembleOutputReferenceSources,
+  processDrawingPrompt,
+} from './prompt-processor';
 import { buildGalleryAliasIndex, fetchGalleryFileNames, type GalleryAliasEntry } from './gallery-reference';
 import { materializeReferenceSources } from './reference-resolution';
 import {
@@ -1320,9 +1325,21 @@ export function createStoryImageRuntime(): StoryImageRuntime {
               galleryAliasIndex,
             })
           : null;
+        // 恢复镜头的 placement.finalPrompt 只存了镜头原文(索引不存展开文本),
+        // 直接展示会让“最终提示词”与场景描述相同、重绘丢失出图预设的风格规则;
+        // 这里按“恢复镜头采用当前预设”的既有语义,用当前出图预设模板现算展开文本。
+        const editorInitialFinalPrompt =
+          restoredPlacementIds.has(placement.id) || !placement.finalPrompt?.trim()
+            ? applyOutputPromptTemplate(
+                outputPreset.templateText,
+                placement.prompt,
+                continuity.shotPrompt,
+                galleryAssembly?.sources ?? [],
+              )
+            : placement.finalPrompt;
         const editorResult = await openImagePromptEditor({
           prompt: placement.prompt,
-          finalPrompt: placement.finalPrompt,
+          finalPrompt: editorInitialFinalPrompt,
           outputPreset,
           avatarReferences: promptEditorAvatarReferenceStatus(
             outputPreset.useAvatarReferences,
