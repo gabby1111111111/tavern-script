@@ -60,8 +60,12 @@ equal(defaults.currentDrawingPresetId, defaults.drawingPresets[0].id, '默认当
 assert(defaults.outputPresets.length === 1, '新设置应至少包含一个出图预设');
 assert(defaults.outputPresets[0].templateText.startsWith('{{xx}}'), '默认出图预设模板必须以 {{xx}} 占位符开头');
 assert(
-  defaults.outputPresets[0].templateText.includes(GALLERY_DECLARATION_INSTRUCTION),
-  '默认出图预设模板必须包含“当前出场角色”声明指令句（v0.5.2 简报 §2）',
+  !defaults.outputPresets[0].templateText.includes(GALLERY_DECLARATION_INSTRUCTION),
+  '默认出图预设模板不携带声明指令句(出图模板发给画图 API)',
+);
+assert(
+  defaults.drawingPresets[0].instructionText.includes(GALLERY_DECLARATION_INSTRUCTION),
+  '默认画图预设指令必须包含“当前出场角色”声明指令句(简报 §0.2:声明由正文 AI 输出)',
 );
 assert(!defaults.outputPresets[0].useAvatarReferences, '默认出图预设不得默认读取头像');
 equal(defaults.currentOutputPresetId, defaults.outputPresets[0].id, '默认当前出图预设应指向可用预设');

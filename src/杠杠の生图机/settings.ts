@@ -63,6 +63,8 @@ export type {
   OutputReferenceSwitchResult,
   OutputReferenceSwitchState,
 } from './output-preset';
+// 本地使用(re-export 不建立本地绑定):默认画图指令引用图鉴声明指令句。
+import { GALLERY_DECLARATION_INSTRUCTION } from './output-preset';
 
 const LEGACY_INLINE_PROMPT_DEFAULT =
   '当回复中确实需要一张或两张随文插图时，在对应正文段落中输出最多两个 <pic prompt="英文绘图提示词"> 标记；没有需要时不要输出标记。不要输出分析过程。';
@@ -282,6 +284,8 @@ const DEFAULT_DRAWING_INSTRUCTION = [
   DEFAULT_PROMPT_SECTIONS.scene.join('\n'),
   DEFAULT_PROMPT_SECTIONS.style.join('\n'),
   DEFAULT_PROMPT_SECTIONS.safety.join('\n'),
+  // 图鉴参考匹配的“当前出场角色”声明由正文 AI 输出,指令句属于画图预设(简报 §0.2)。
+  GALLERY_DECLARATION_INSTRUCTION,
 ]
   .map(section => section.trim())
   .filter(Boolean)

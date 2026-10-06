@@ -17,9 +17,10 @@ export type ImageOutputPreset = PipelineImageOutputPreset & { useGalleryReferenc
 export const DEFAULT_OUTPUT_TEMPLATE = '{{xx}}';
 
 /**
- * 图鉴参考匹配(v0.5.2)的“当前出场角色”声明指令句,追加在默认出图预设模板中,
- * 教正文 AI 在每个 <pic> 提示词里单独输出一行声明。已有用户预设不受影响;
- * 发布阶段 README 会同时提供可复制的画图预设指令句(执行简报 §0.2/§0.8)。
+ * 图鉴参考匹配(v0.5.2)的“当前出场角色”声明指令句。声明由正文 AI 输出,
+ * 指令句属于画图预设(settings.ts 默认画图指令引用本常量);默认出图预设模板
+ * 不含它——出图模板随请求发给画图 API,不该携带教正文 AI 的指令。
+ * (执行简报 §0.2/§0.8)
  */
 export const GALLERY_DECLARATION_INSTRUCTION =
   '开启“图鉴参考匹配”时，请在每个 <pic> 提示词中单独输出一行“当前出场角色：a2，b1；”：a2、b1 是本镜头实际出场角色的图鉴别名，多个别名用逗号或顿号分隔，整行以分号结尾；未开启图鉴参考匹配或本镜头没有出场角色时，不要输出这一行。';
@@ -28,7 +29,7 @@ export const DEFAULT_OUTPUT_PRESET_ID = 'default-output-preset';
 export const DEFAULT_OUTPUT_PRESET: ImageOutputPreset = {
   id: DEFAULT_OUTPUT_PRESET_ID,
   name: '默认出图格式',
-  templateText: `${DEFAULT_OUTPUT_TEMPLATE}\n\n${GALLERY_DECLARATION_INSTRUCTION}`,
+  templateText: DEFAULT_OUTPUT_TEMPLATE,
   useAvatarReferences: false,
   useGalleryReferences: false,
   useStyleReference: false,

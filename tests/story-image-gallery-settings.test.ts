@@ -83,8 +83,8 @@ equal(defaults.outputPresets[0].useGalleryReferences, false, '解析新设置时
 
 assert(DEFAULT_OUTPUT_PRESET.templateText.startsWith('{{xx}}'), '默认出图预设模板必须保留 {{xx}} 占位符');
 assert(
-  DEFAULT_OUTPUT_PRESET.templateText.includes(GALLERY_DECLARATION_INSTRUCTION),
-  '默认出图预设模板应原样包含声明指令句',
+  !DEFAULT_OUTPUT_PRESET.templateText.includes(GALLERY_DECLARATION_INSTRUCTION),
+  '默认出图预设模板不携带声明指令句(出图模板发给画图 API,声明指令属于画图预设)',
 );
 assert(
   GALLERY_DECLARATION_INSTRUCTION.includes('当前出场角色：a2，b1；'),
