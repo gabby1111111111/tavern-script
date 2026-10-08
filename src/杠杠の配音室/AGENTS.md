@@ -92,7 +92,7 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 | 面板没出现          | 角色脚本 loader 的 `localhost:5501` 是否在线并带 CORS | `bootstrap.ts` 挂载、watch bundle、Tavern Helper 监听 |
 | 正文漏读/对白识别错 | `tts/text.ts` fixtures                                | `reading.ts` 模式过滤                                 |
 | 角色声音分错        | `runtime.routeSegments`                               | 配音表、角色 override、默认路由                       |
-| Provider 失败       | `tts/providers.ts` adapter                            | request builder；豆包查 NDJSON 错误码，Fish 查 `enableCorsProxy` |
+| Provider 失败       | `tts/providers.ts` adapter                            | 豆包/Fish 都先查酒馆 `enableCorsProxy`（合成走 `/proxy`）；豆包再看 NDJSON 错误码与 Resource ID，Fish 再看 `model` 头 |
 | 一直 generating     | `prepareSegment` 与 AbortSignal                       | Provider、IndexedDB、代次是否过期                     |
 | Stop 后旧声音回来   | `playback.ts` pending-play race                       | `readingSequence/lifecycleEpoch`                      |
 | 两个声音重叠        | `playRoutedSegments`                                  | `playSoundEffect` 是否先废止旧朗读                    |
@@ -114,6 +114,7 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 - Ambience 是独立试听/未来背景 lane，不能阻塞串行朗读。
 - 最近十条是页内历史；合成缓存是 `memory → IndexedDB`，Blob/base64 不写设置。
 - Object URL、listener、AbortController 必须在结束、失败、取消、替换和卸载路径清理。
+- 豆包与 Fish 的**合成**必须走酒馆 `/proxy`：豆包的 CORS 预检不放行新版 `X-Api-Key`，改回浏览器直连等于豆包在新版凭据下直接失败（这是外部硬约束，不是待优化项）。
 
 ## 验证与发布
 
@@ -131,4 +132,4 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 - 生产 bundle 还必须对 `ganggang-tts-bridge` 做负向扫描（结果零匹配）：v0.2.0 起桥接不属于浏览器侧。
 - 仓库根 `LICENSE` 当前是指向 Ghostscript subject matter 的 AFPL
   v9 文本，是否清晰适用于本项目尚未确认。发布前必须由维护者选择并确认代码许可证；Agent 不得擅自替换、解释为已授权或在 README 中作确定性承诺。
-- Edge 是外部可选依赖；Fish 需要酒馆 `enableCorsProxy: true`（唯一需要用户改配置的引擎），豆包/小米/MiniMax 零安装。
+- Edge 是外部可选依赖；豆包与 Fish 的合成都需要酒馆 `enableCorsProxy: true`（都要改一次配置并重启），小米/MiniMax 零额外安装。

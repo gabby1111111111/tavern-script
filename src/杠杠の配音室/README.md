@@ -3,7 +3,7 @@
 一个面向 Tavern
 Helper 的轻量配音脚本：配置多个 TTS 来源，让当前酒馆 AI 自动生成角色配音表，并从消息、单句、选中文字或最近语音直接播放。
 
-> 当前版本：`v0.2.0`。默认推荐制品，只提供用户自行配置的音效；四家云端引擎零服务端安装。
+> 当前版本：`v0.2.0`。默认推荐制品，只提供用户自行配置的音效；四家云端引擎零插件安装（豆包与 Fish 需酒馆打开 `enableCorsProxy`）。
 
 ## 当前版本能力
 
@@ -35,18 +35,20 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 
 ## Provider 与依赖
 
-| Provider          | 额外依赖或限制                                                            |
-| ----------------- | ------------------------------------------------------------------------- |
-| Edge              | 外部 Edge TTS 插件；本项目不内置                                          |
-| OpenAI-compatible | 对应服务需允许浏览器请求                                                  |
-| MiniMax           | 浏览器直连；音色为内置精选清单（官方目录接口已改版）                      |
-| 小米 MiMo         | 浏览器直连官方 API；免费档限额以官方为准                                  |
-| 豆包              | 浏览器直连官方 API；新版只填 API Key，旧版填 APP ID + Access Key          |
-| Fish Audio        | 需要酒馆 `enableCorsProxy: true` 并重启；音色市场（`GET /model`）公开直连  |
+| Provider          | 额外依赖或限制                                                             |
+| ----------------- | -------------------------------------------------------------------------- |
+| Edge              | 外部 Edge TTS 插件；本项目不内置                                           |
+| OpenAI-compatible | 对应服务需允许浏览器请求                                                   |
+| MiniMax           | 浏览器直连；音色为内置精选清单（官方目录接口已改版）                       |
+| 小米 MiMo         | 浏览器直连官方 API；免费档限额以官方为准                                   |
+| 豆包              | 只填新版 API Key；合成经酒馆 `/proxy`（需 `enableCorsProxy: true`）        |
+| Fish Audio        | 需要酒馆 `enableCorsProxy: true` 并重启；音色市场（`GET /model`）公开直连   |
 
-Fish 的合成请求经酒馆自带的 `/proxy` 同源转发，这是唯一需要用户改配置的引擎；前提是 `enableCorsProxy: true` 且
-`basicAuthMode: false`（否则插件自带的 `Authorization` 头会被 Basic 认证顶掉）。`server-plugins/ganggang-tts-bridge`
-只服务"语音插座"阶段（桌宠、后台服务等非浏览器消费者），v0.2.0 不再需要它。
+豆包与 Fish 的**合成**请求经酒馆自带的 `/proxy` 同源转发：豆包的跨域预检不放行新版 `X-Api-Key` 请求头
+（2026-10-08 实抓预检响应头确认），浏览器直连只有在旧版凭据下才走得通，因此 v0.2.0 起统一改走 `/proxy`
+并只支持新版 API Key（旧版 APP ID + Access Key 弃用）。前置要求是 `enableCorsProxy: true` 且
+`basicAuthMode: false`（否则凭据头会被 Basic 认证顶掉），改完必须重启酒馆。
+`server-plugins/ganggang-tts-bridge` 只服务"语音插座"阶段（桌宠、后台服务等非浏览器消费者），v0.2.0 不再需要它。
 
 ## 自定义音效
 
@@ -75,11 +77,11 @@ Fish 的合成请求经酒馆自带的 `/proxy` 同源转发，这是唯一需�
 
 确认音效已启用，并填写能区分场景的名称、分类和简短说明。AI 只能从这些元数据中选择，不会读取音频 URL 或试听音频内容。
 
-### Fish 报 404 或 402
+### 豆包或 Fish 报 404 / 402
 
-404 说明酒馆没开 `/proxy`：在 `config.yaml` 打开 `enableCorsProxy: true` 并重启酒馆。402 说明请求走了付费模型，
-通常是因为漏了 `model` 请求头；本项目已固定免费档 `s2.1-pro-free`，若你手填过别的模型请改回（免费档不扣钱包，
-402 ≠ 免费档失效）。
+404 说明酒馆没开 `/proxy`：在 `config.yaml` 打开 `enableCorsProxy: true` 并重启酒馆（豆包与 Fish 的合成都要走它）。
+402 只在 Fish 上出现，表示请求走了付费模型，通常是漏了 `model` 请求头；本项目已固定免费档 `s2.1-pro-free`，
+若你手填过别的模型请改回（免费档不扣钱包，402 ≠ 免费档失效）。
 
 ### 为什么最近十条刷新后没了，但第二次生成仍可能更快？
 

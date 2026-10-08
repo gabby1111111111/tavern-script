@@ -224,30 +224,73 @@ export function buildOpenAiSpeechPayload(profile: TtsProviderProfile, request: S
   };
 }
 
-/** 中文标签直接接中文；以 ASCII 结尾的标签补一个空格，避免出现 "Fish音频" 这类粘字。 */
+/** 统一「标签 + 空格 + 原因」，避免出现 "Fish音频" 这类粘字（CJK 标签也留一格，读起来更清楚）。 */
 function withLabel(label: string, text: string): string {
-  return `${label}${/[A-Za-z0-9]$/.test(label) ? ' ' : ''}${text}`;
+  return `${label} ${text}`;
 }
 
 /**
- * `/proxy` 失败分类。酒馆在 `enableCorsProxy: false` 时返回 404 "CORS proxy is disabled"，
- * 402 在本项目里等同于"漏了 model 请求头 → 走了付费模型"，都要直接点出修法。
+ * `/proxy` 失败分类。酒馆在 `enableCorsProxy: false` 时返回 404 "CORS proxy is disabled"；
+ * `quotaHint` 用来承载各家 402 的专属语义（Fish 是"漏了 model 头走付费档"，豆包传空串走通用文案）。
  */
-export function describeProxyFailure(label: string, status: number, bodyHead = ''): string {
+export function describeProxyFailure(
+  label: string,
+  status: number,
+  bodyHead = '',
+  quotaHint = '额度不足：请确认请求头 model 是免费档（默认 s2.1-pro-free）',
+): string {
   if (status === 404) {
     return withLabel(label, '酒馆 /proxy 不可用：请在 config.yaml 打开 enableCorsProxy 并重启酒馆');
   }
-  if (status === 402) {
-    return withLabel(label, '额度不足：请确认请求头 model 是免费档（默认 s2.1-pro-free）');
-  }
+  if (status === 402 && quotaHint) return withLabel(label, quotaHint);
   if (status === 401 || status === 403) return withLabel(label, '鉴权失败：凭据无效或未授权');
   if (status === 413) return withLabel(label, '音频超过大小限制');
   if (status === 400) return withLabel(label, '请求配置无效');
   return withLabel(label, `${classifyProviderHttpStatus(status, bodyHead)}（HTTP ${status}）`);
 }
 
+type ProxyUpstreamRequest = { url: string; headers: Record<string, string>; payload: unknown };
+
 /**
- * 读取经酒馆 `/proxy` 流回的音频。
+ * 经酒馆同源 `/proxy` 发一次上游请求：套 120 秒硬超时，非 2xx 直接抛可读原因。
+ * Fish（音频流）与豆包（NDJSON 文本流）共用这一层，差别只在拿到 Response 之后怎么读。
+ */
+async function postViaProxy(
+  upstream: ProxyUpstreamRequest,
+  label: string,
+  profile: TtsProviderProfile,
+  signal: AbortSignal,
+  fetcher: FetchLike,
+  describe: (label: string, status: number, bodyHead: string) => string = describeProxyFailure,
+): Promise<Response> {
+  const timeout = withSynthesisTimeout(signal, label);
+  try {
+    const response = await fetcher(upstream.url, {
+      method: 'POST',
+      headers: upstream.headers,
+      body: JSON.stringify(upstream.payload),
+      signal: timeout.signal,
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(redactProviderSecrets(describe(label, response.status, body), profile));
+    }
+    return response;
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(
+        redactProviderSecrets(withLabel(label, '网络错误：无法连接酒馆 /proxy（检查酒馆是否运行、页面是否已登录）'), profile),
+        { cause: error },
+      );
+    }
+    throw error;
+  } finally {
+    timeout.dispose();
+  }
+}
+
+/**
+ * 读取经酒馆 `/proxy` 流回的音频（非 2xx 已由 `postViaProxy` 拦掉）。
  * 关键点（2026-10-08 在 8000 实测）：`/proxy` 会丢掉上游 `Content-Type`，
  * 所以 MIME 必须先用文件魔数识别，再退回响应头，否则真音频会被误判成"未返回音频"。
  */
@@ -256,10 +299,6 @@ async function readProxyAudio(
   label: string,
   profile: TtsProviderProfile,
 ): Promise<SynthesizedAudio> {
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(redactProviderSecrets(describeProxyFailure(label, response.status, body), profile));
-  }
   const declaredLength = Number(response.headers?.get?.('content-length') || 0);
   if (declaredLength > MAX_PROXY_AUDIO_BYTES) throw new Error(withLabel(label, '音频超过大小限制'));
   const reader = response.body?.getReader?.();
@@ -315,19 +354,15 @@ function withSynthesisTimeout(signal: AbortSignal, label: string): { signal: Abo
 }
 
 /**
- * 豆包 HTTP 层失败分类。`403` 与 `45000000` 在豆包语义里是"音色与资源 ID 不配套"，
- * 既不是 CORS 问题，也不该报成通用鉴权失败 —— 必须单独点出修法。
+ * 豆包经 `/proxy` 的失败分类：`403` / `45000000` 在豆包语义里是"音色与资源 ID 不配套"
+ * （旧版解释），既不是 CORS 问题，也不该报成通用鉴权失败；其余交给通用 `/proxy` 文案
+ * （豆包不返回 402，所以 402 文案传空串走通用分支）。
  */
-async function throwDoubaoResponseError(response: Response, profile: TtsProviderProfile): Promise<never> {
-  const body = await response.text().catch(() => '');
-  if (response.status === 403 || body.includes('45000000')) {
-    throw new Error(
-      redactProviderSecrets('豆包 音色与资源 ID 不配套：2.0 音色必须配 X-Api-Resource-Id: seed-tts-2.0', profile),
-    );
+function describeDoubaoProxyFailure(label: string, status: number, bodyHead: string): string {
+  if (status === 403 || String(bodyHead || '').includes('45000000')) {
+    return withLabel(label, '音色与资源 ID 不配套：2.0 音色必须配 X-Api-Resource-Id: seed-tts-2.0');
   }
-  throw new Error(
-    redactProviderSecrets(`豆包 ${classifyProviderHttpStatus(response.status, body)}（HTTP ${response.status}）`, profile),
-  );
+  return describeProxyFailure(label, status, bodyHead, '');
 }
 
 export function buildMinimaxPayload(profile: TtsProviderProfile, request: SynthesisRequest) {
@@ -442,7 +477,8 @@ export function createProviderRegistry({
     },
     doubao: {
       async probe(profile, signal) {
-        // 豆包 HTTP 合成支持浏览器直连（2026-10-08 三重实测 + 真实出声），不再依赖同源桥接。
+        // 豆包合成经酒馆同源 /proxy（新版 `X-Api-Key` 不在豆包的 CORS 放行名单里，浏览器直连必被拦），
+        // 所以 probe 直接以真实合成"你好"验凭据，并报告 proxy 传输模式。
         // 探针音色固定用内置豆包目录第一条：默认音色可能是误填的其他引擎音色，音色不匹配会污染凭据验证结论。
         const result = await probeBySynthesis(
           profile,
@@ -450,7 +486,7 @@ export function createProviderRegistry({
           signal,
           getStaticVoiceCatalog(profile)[0]?.voiceId || '',
         );
-        return { ...result, mode: 'direct' as const };
+        return { ...result, mode: 'proxy' as const };
       },
       async listVoices(profile) {
         assertProfile(profile, 'doubao');
@@ -461,20 +497,19 @@ export function createProviderRegistry({
         try {
           const upstream = buildDoubaoUpstreamRequest({
             apiKey: String(profile.apiKey || '').trim(),
-            appId: String(profile.appId || '').trim(),
-            accessKey: String(profile.accessKey || '').trim(),
             resourceId: String(profile.resourceId || DEFAULT_DOUBAO_RESOURCE_ID).trim(),
             speaker: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
             text: ensureText(request?.text),
             contextText: request?.contextText,
           });
-          const response = await fetcher(upstream.url, {
-            method: 'POST',
-            headers: upstream.headers,
-            body: JSON.stringify(upstream.payload),
-            signal: request.signal,
-          });
-          if (!response.ok) await throwDoubaoResponseError(response, profile);
+          const response = await postViaProxy(
+            upstream,
+            '豆包',
+            profile,
+            request.signal,
+            fetcher,
+            describeDoubaoProxyFailure,
+          );
           // 响应是连续的 JSON 对象流（base64 音频分片），线上字节数必然大于解码后的音频。
           const wireBytes = await readBoundedBytes(response, '豆包', MAX_TTS_WIRE_BYTES);
           const audioBytes = parseDoubaoNdjson(new TextDecoder().decode(wireBytes), MAX_TTS_RESPONSE_BYTES);
@@ -568,7 +603,6 @@ export function createProviderRegistry({
       },
       async synthesize(profile, request) {
         assertProfile(profile, 'fish');
-        const timeout = withSynthesisTimeout(request.signal, 'Fish');
         try {
           const upstream = buildFishSynthesisRequest({
             apiKey: String(profile.apiKey || '').trim(),
@@ -577,23 +611,10 @@ export function createProviderRegistry({
             text: ensureText(request?.text),
             format: String(profile.responseFormat || 'mp3').trim(),
           });
-          const response = await fetcher(upstream.url, {
-            method: 'POST',
-            headers: upstream.headers,
-            body: JSON.stringify(upstream.payload),
-            signal: timeout.signal,
-          });
+          const response = await postViaProxy(upstream, 'Fish', profile, request.signal, fetcher);
           return await readProxyAudio(response, 'Fish', profile);
         } catch (error) {
-          if (error instanceof TypeError) {
-            throw new Error(
-              redactProviderSecrets('Fish 网络错误：无法连接酒馆 /proxy（检查酒馆是否运行、页面是否已登录）', profile),
-              { cause: error },
-            );
-          }
           return withRedactedError(error, profile);
-        } finally {
-          timeout.dispose();
         }
       },
     },

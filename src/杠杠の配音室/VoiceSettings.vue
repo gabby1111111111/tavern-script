@@ -71,25 +71,17 @@
               <input v-model.trim="profile.endpoint" type="url" placeholder="https://…/audio/speech" />
             </label>
             <label v-if="profile.type !== 'edge'" class="ganggang-voice-field">
-              <span>{{ profile.type === 'doubao' ? 'API Key（新版）' : 'API Key' }}</span>
+              <span>API Key</span>
               <input v-model="profile.apiKey" type="password" autocomplete="off" />
             </label>
             <p v-if="profile.type === 'doubao'" class="ganggang-voice-hint">
-              新版控制台只填 API Key；旧版请留空 API Key，再填写 APP ID 和 Access Key。请求由浏览器直连豆包
-              语音合成接口；连接测试会真实合成一句"你好"来验证凭据（消耗极少量额度）。
+              豆包合成经酒馆自带的 /proxy 转发（浏览器跨域不放行新版 X-Api-Key 头）：请先在 config.yaml 打开
+              enableCorsProxy 并重启酒馆。旧版 APP ID + Access Key 已弃用，只填新版 API Key。
             </p>
             <p v-if="profile.type === 'fish'" class="ganggang-voice-hint">
               Fish 合成经酒馆自带的 /proxy 转发：请先在 config.yaml 打开 enableCorsProxy 并重启酒馆。音色市场
               （GET /model）不需要该开关；模型留空时使用免费档 s2.1-pro-free。
             </p>
-            <label v-if="profile.type === 'doubao'" class="ganggang-voice-field">
-              <span>APP ID（旧版）</span>
-              <input v-model.trim="profile.appId" type="text" autocomplete="off" />
-            </label>
-            <label v-if="profile.type === 'doubao'" class="ganggang-voice-field">
-              <span>Access Key（旧版）</span>
-              <input v-model="profile.accessKey" type="password" autocomplete="off" />
-            </label>
             <label v-if="profile.type === 'doubao'" class="ganggang-voice-field">
               <span>Resource ID</span>
               <input v-model.trim="profile.resourceId" type="text" placeholder="seed-tts-2.0" />

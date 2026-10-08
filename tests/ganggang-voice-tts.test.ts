@@ -3,6 +3,7 @@ import { detectAudioType } from '../src/杠杠の配音室/tts/audio-signature';
 import {
   buildDoubaoUpstreamRequest,
   DOUBAO_TTS_ENDPOINT,
+  DOUBAO_TTS_PROXY_PATH,
   parseDoubaoNdjson,
 } from '../src/杠杠の配音室/tts/doubao-request';
 import {
@@ -103,27 +104,24 @@ void (async () => {
   );
   assert(new Set(segments.map(segment => segment.id)).size === segments.length, '解析结果 ID 必须唯一');
 
-  const doubao = buildDoubaoUpstreamRequest({
-    appId: 'app-id',
-    accessKey: 'access-secret',
-    speaker: 'speaker',
-    text: '你好',
-  });
-  equal(doubao.url, DOUBAO_TTS_ENDPOINT, '豆包必须使用固定供应商端点');
-  equal(doubao.headers['X-Api-Access-Key'], 'access-secret', '豆包凭据必须放在指定请求头');
+  // 豆包经酒馆 /proxy：豆包 CORS 预检不放行新版 X-Api-Key（8000 实测），直连必被拦。
+  const doubao = buildDoubaoUpstreamRequest({ apiKey: 'new-api-secret', speaker: 'speaker', text: '你好' });
+  equal(DOUBAO_TTS_PROXY_PATH, '/proxy/' + DOUBAO_TTS_ENDPOINT, '豆包必须以相对路径 /proxy + 完整目标 URL');
+  equal(doubao.url, DOUBAO_TTS_PROXY_PATH, '豆包合成必须经酒馆同源 /proxy（不走供应商直连）');
+  const doubaoRequestHeaders = doubao.headers as Record<string, string>;
+  equal(doubaoRequestHeaders['X-Api-Key'], 'new-api-secret', '豆包凭据必须走新版 X-Api-Key 请求头');
+  equal(doubaoRequestHeaders['X-Api-App-Key'], undefined, '豆包旧版 APP ID 头已弃用');
+  equal(doubaoRequestHeaders['X-Api-Access-Key'], undefined, '豆包旧版 Access Key 头已弃用');
+  equal(doubaoRequestHeaders['X-Api-Resource-Id'], 'seed-tts-2.0', '豆包请求必须带 Resource ID');
   assert(Boolean(doubao.headers['X-Api-Request-Id']), '豆包请求必须带独立 Request ID');
-  assert(!JSON.stringify(doubao.payload).includes('access-secret'), '豆包凭据不得进入请求体');
-
-  const doubaoNewAuth = buildDoubaoUpstreamRequest({
-    apiKey: 'new-api-secret',
-    speaker: 'speaker',
-    text: '你好',
-  });
-  equal(doubaoNewAuth.headers['X-Api-Key'], 'new-api-secret', '豆包新版凭据必须使用 X-Api-Key');
-  equal(doubaoNewAuth.headers['X-Api-App-Key'], undefined, '豆包新版请求不得混入旧版 APP ID');
-  equal(doubaoNewAuth.headers['X-Api-Access-Key'], undefined, '豆包新版请求不得混入旧版 Access Key');
-  equal(doubaoNewAuth.headers['X-Api-Resource-Id'], 'seed-tts-2.0', '豆包新版请求仍必须带 Resource ID');
-  assert(!JSON.stringify(doubaoNewAuth.payload).includes('new-api-secret'), '豆包新版凭据不得进入请求体');
+  assert(!JSON.stringify(doubao.payload).includes('new-api-secret'), '豆包凭据不得进入请求体');
+  await expectError(
+    async () => {
+      buildDoubaoUpstreamRequest({ apiKey: '', speaker: 'speaker', text: '你好' });
+    },
+    /豆包 TTS 缺少 API Key/,
+    '豆包旧版凭据已弃用：没有 API Key 必须直接报缺凭据，而不是回落到旧版头',
+  );
   equal(
     parseDoubaoNdjson(JSON.stringify({ code: 0, data: btoa('mp3') }), 1024).length,
     3,
@@ -191,10 +189,11 @@ void (async () => {
     id: 'doubao',
     name: '豆包',
     type: 'doubao',
-    apiKey: '',
+    apiKey: 'new-api-secret',
     defaultVoiceId: 'speaker',
-    appId: 'app-id',
-    accessKey: 'access-secret',
+    // 旧版字段留着但已弃用：用来证明它们既不进请求头也不进请求体。
+    appId: 'stale-app-id',
+    accessKey: 'stale-access-secret',
     resourceId: 'seed-tts-2.0',
   });
   const csrfHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf-test-token' };
@@ -217,16 +216,18 @@ void (async () => {
   const doubaoBody = JSON.parse(String(doubaoCall.init?.body)) as {
     req_params?: { text?: string; speaker?: string; audio_params?: { format?: string }; additions?: string };
   };
-  equal(doubaoCall.url, DOUBAO_TTS_ENDPOINT, '豆包合成必须浏览器直连供应商固定端点');
-  equal(doubaoHeaders['X-Api-App-Key'], 'app-id', '豆包旧版凭据必须放在 X-Api-App-Key');
-  equal(doubaoHeaders['X-Api-Access-Key'], 'access-secret', '豆包旧版凭据必须放在 X-Api-Access-Key');
+  equal(doubaoCall.url, DOUBAO_TTS_PROXY_PATH, '豆包合成必须经酒馆同源 /proxy');
+  equal(doubaoHeaders['X-Api-Key'], 'new-api-secret', '豆包凭据必须走新版 X-Api-Key');
+  equal(doubaoHeaders['X-Api-App-Key'], undefined, '豆包旧版 APP ID 头已弃用，不得再发送');
+  equal(doubaoHeaders['X-Api-Access-Key'], undefined, '豆包旧版 Access Key 头已弃用，不得再发送');
   equal(doubaoHeaders['X-Api-Resource-Id'], 'seed-tts-2.0', '豆包请求必须带 Resource ID');
   assert(Boolean(doubaoHeaders['X-Api-Request-Id']), '豆包请求必须带独立 Request ID');
-  equal(doubaoHeaders['X-CSRF-Token'], undefined, '豆包直连不得携带酒馆会话头（已脱离同源桥接）');
+  equal(doubaoHeaders['X-CSRF-Token'], undefined, '豆包上游请求不得夹带酒馆会话头（/proxy 自行处理）');
   equal(doubaoBody.req_params?.text, '你好', '豆包台词必须放在 req_params.text');
   equal(doubaoBody.req_params?.speaker, 'speaker', '豆包音色必须放在 req_params.speaker');
   equal(doubaoBody.req_params?.audio_params?.format, 'mp3', '豆包必须请求 mp3');
-  assert(!String(doubaoCall.init?.body).includes('access-secret'), '豆包凭据不得进入请求体');
+  assert(!String(doubaoCall.init?.body).includes('new-api-secret'), '豆包凭据不得进入请求体');
+  assert(!String(doubaoCall.init?.body).includes('stale-access-secret'), '已弃用的旧版凭据不得混入请求体');
   equal(doubaoAudio.mimeType, 'audio/mpeg', '豆包 NDJSON 合成结果必须是 audio/mpeg');
   equal(doubaoAudio.blob.type, 'audio/mpeg', '豆包 Blob 必须是 audio/mpeg');
 
@@ -242,7 +243,7 @@ void (async () => {
 
   const probe = await doubaoRegistry.probe(doubaoProfile);
   const doubaoProbeCall = capturedDoubao as unknown as { url: RequestInfo | URL; init?: RequestInit };
-  equal(doubaoProbeCall.url, DOUBAO_TTS_ENDPOINT, '豆包 probe 必须以真实合成收尾');
+  equal(doubaoProbeCall.url, DOUBAO_TTS_PROXY_PATH, '豆包 probe 必须以经 /proxy 的真实合成收尾');
   const doubaoProbeBody = JSON.parse(String(doubaoProbeCall.init?.body)) as {
     req_params?: { text?: string; speaker?: string };
   };
@@ -252,7 +253,7 @@ void (async () => {
     'zh_male_kailangdidi_uranus_bigtts',
     '豆包 probe 必须使用内置豆包音色，避免默认音色串引擎污染结论',
   );
-  equal(probe.mode, 'direct', '豆包 probe 必须报告浏览器直连模式');
+  equal(probe.mode, 'proxy', '豆包 probe 必须报告 /proxy 传输模式');
   equal(probe.checked, 'synthesis', '豆包 probe 必须声明完成真实合成验证');
 
   const doubaoAbortController = new AbortController();
@@ -271,47 +272,43 @@ void (async () => {
   await expectError(() => doubaoAbortProbe, /Abort|取消/, '豆包 probe 必须尊重调用方的取消信号');
   equal(doubaoRequestAborted, true, '豆包 probe 必须把调用方取消透传给上游请求');
 
-  // 传输层迁移的回归闸门：豆包只允许打上游端点，任何同源桥接请求都是回归。
+  // 回归闸门：豆包只允许打 /proxy（前缀固定），任何供应商直连或桥接请求都是回归。
   const doubaoUpstreamOnlyRegistry = createProviderRegistry({
     fetchImpl: async url => {
-      assert(url === DOUBAO_TTS_ENDPOINT, `豆包不得再请求任何非上游端点: ${String(url)}`);
+      assert(url === DOUBAO_TTS_PROXY_PATH, `豆包不得再请求任何非 /proxy 端点: ${String(url)}`);
       return new Response(ndjsonBody({ code: 0, data: btoa('mp3') }), { status: 200 });
     },
   });
   const doubaoUpstreamOnlyProbe = await doubaoUpstreamOnlyRegistry.probe(doubaoProfile);
-  equal(doubaoUpstreamOnlyProbe.mode, 'direct', '豆包 probe 必须完全脱离同源桥接');
+  equal(doubaoUpstreamOnlyProbe.mode, 'proxy', '豆包 probe 必须完全脱离直连与同源桥接');
 
-  const doubaoNewProfile = baseProfile({
-    id: 'doubao-new',
-    name: '豆包新版',
+  // 旧版凭据已弃用：profile 里只留 appId/accessKey 时不能静默回落到旧版头，必须直接报缺 API Key。
+  const doubaoLegacyOnlyProfile = baseProfile({
+    id: 'doubao-legacy',
+    name: '豆包旧版',
     type: 'doubao',
-    apiKey: 'new-api-secret',
-    defaultVoiceId: 'speaker',
+    apiKey: '',
     appId: 'stale-app-id',
     accessKey: 'stale-access-secret',
     resourceId: 'seed-tts-2.0',
+    defaultVoiceId: 'speaker',
   });
-  let capturedDoubaoNew: { url: RequestInfo | URL; init?: RequestInit } | null = null;
-  const doubaoNewRegistry = createProviderRegistry({
-    fetchImpl: async (url, init) => {
-      capturedDoubaoNew = { url, init };
-      return new Response(ndjsonBody({ code: 0, data: btoa('mp3') }), { status: 200 });
+  const doubaoLegacyOnlyRegistry = createProviderRegistry({
+    fetchImpl: async () => {
+      throw new Error('旧版凭据不得发起任何请求');
     },
   });
-  await doubaoNewRegistry.synthesize(doubaoNewProfile, requestFor(doubaoNewProfile));
-  const doubaoNewCall = capturedDoubaoNew as unknown as { url: RequestInfo | URL; init?: RequestInit };
-  const doubaoNewHeaders = doubaoNewCall.init?.headers as Record<string, string>;
-  const doubaoNewBody = JSON.parse(String(doubaoNewCall.init?.body)) as Record<string, unknown>;
-  equal(doubaoNewCall.url, DOUBAO_TTS_ENDPOINT, '豆包新版鉴权同样浏览器直连上游端点');
-  equal(doubaoNewHeaders['X-Api-Key'], 'new-api-secret', '豆包新版凭据必须走 X-Api-Key 请求头');
-  equal(doubaoNewHeaders['X-Api-App-Key'], undefined, '新版鉴权不得混入旧版 APP ID 头');
-  assert(!JSON.stringify(doubaoNewBody).includes('new-api-secret'), '新版 API Key 不得进入请求体');
+  await expectError(
+    () => doubaoLegacyOnlyRegistry.probe(doubaoLegacyOnlyProfile),
+    /豆包 TTS 缺少 API Key/,
+    '只有旧版凭据的 profile 必须直接报缺 API Key',
+  );
 
   const doubaoAbort = new AbortController();
   doubaoAbort.abort();
   const doubaoAbortSynthesizeRegistry = createProviderRegistry({
     fetchImpl: async (_url, init) => {
-      assert(init?.signal === doubaoAbort.signal, '豆包 synthesis 必须原样传递 AbortSignal');
+      assert(init?.signal?.aborted === true, '豆包 synthesis 必须把调用方取消传进 fetch');
       throw new DOMException('Aborted', 'AbortError');
     },
   });
@@ -331,7 +328,7 @@ void (async () => {
   });
   await expectError(
     () => doubaoAuthRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
-    /^豆包 鉴权失败：凭据无效或未授权（HTTP 401）$/,
+    /^豆包 鉴权失败：凭据无效或未授权$/,
     '豆包 401 必须分类为凭据错误，且不回显上游原文或凭据',
   );
 
@@ -361,8 +358,8 @@ void (async () => {
   });
   await expectError(
     () => doubaoNetworkRegistry.probe(doubaoProfile),
-    /豆包 网络错误：无法连接服务/,
-    '豆包网络故障必须分类为网络错误，而不是跨域',
+    /豆包 网络错误：无法连接酒馆 \/proxy/,
+    '豆包网络故障必须给出 /proxy 相关的可读原因',
   );
 
   const oversizedDoubaoRegistry = createProviderRegistry({

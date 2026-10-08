@@ -1,6 +1,16 @@
 export const DOUBAO_TTS_ENDPOINT = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
 export const DEFAULT_DOUBAO_RESOURCE_ID = 'seed-tts-2.0';
 
+/**
+ * 豆包合成必须经酒馆同源 `/proxy`（2026-10-08 在 8000 实测，CDP 抓原始预检响应头）：
+ * 豆包 `Access-Control-Allow-Headers` 放行的是 **旧版** `X-Api-App-Key` / `X-Api-Access-Key`，
+ * **不放行**新版 `X-Api-Key` —— 同一个新版 key 在 Node（无跨域）里 200 出声，在浏览器里必被拦
+ * （`TypeError: Failed to fetch`）。经 `/proxy` 转发不受浏览器跨域限制，新版凭据才可用；
+ * 而本项目已为 Fish 打开了 `enableCorsProxy`，不额外增加安装步骤。
+ * 旧版 APP ID + Access Key 自 v0.2.0 起弃用（界面不再提供，代码不再发送）。
+ */
+export const DOUBAO_TTS_PROXY_PATH = '/proxy/' + DOUBAO_TTS_ENDPOINT;
+
 const MAX_TEXT_LENGTH = 10_000;
 const MAX_CONTEXT_LENGTH = 2_000;
 
@@ -24,9 +34,7 @@ function decodeBase64(value: unknown): Uint8Array {
 }
 
 export type DoubaoRequestInput = {
-  apiKey?: string;
-  appId?: string;
-  accessKey?: string;
+  apiKey: string;
   resourceId?: string;
   requestId?: string;
   speaker: string;
@@ -39,10 +47,7 @@ function createDoubaoRequestId(): string {
 }
 
 export function buildDoubaoUpstreamRequest(input: DoubaoRequestInput) {
-  const apiKey = String(input.apiKey || '').trim();
-  if (apiKey.length > 2_048) throw new Error('豆包 TTS API Key 过长');
-  const appId = apiKey ? '' : requiredText(input.appId, 'APP ID');
-  const accessKey = apiKey ? '' : requiredText(input.accessKey, 'Access Key', 2_048);
+  const apiKey = requiredText(input.apiKey, 'API Key', 2_048);
   const resourceId = requiredText(input.resourceId || DEFAULT_DOUBAO_RESOURCE_ID, 'Resource ID');
   const requestId = requiredText(input.requestId || createDoubaoRequestId(), 'Request ID');
   const speaker = requiredText(input.speaker, 'Speaker ID');
@@ -51,22 +56,15 @@ export function buildDoubaoUpstreamRequest(input: DoubaoRequestInput) {
     .trim()
     .slice(0, MAX_CONTEXT_LENGTH);
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-    'X-Api-Resource-Id': resourceId,
-    'X-Api-Request-Id': requestId,
-  };
-  if (apiKey) {
-    headers['X-Api-Key'] = apiKey;
-  } else {
-    headers['X-Api-App-Key'] = appId;
-    headers['X-Api-Access-Key'] = accessKey;
-  }
-
   return {
-    url: DOUBAO_TTS_ENDPOINT,
-    headers,
+    url: DOUBAO_TTS_PROXY_PATH,
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'X-Api-Key': apiKey,
+      'X-Api-Resource-Id': resourceId,
+      'X-Api-Request-Id': requestId,
+    },
     payload: {
       user: { uid: 'ganggang-voice-stage' },
       req_params: {

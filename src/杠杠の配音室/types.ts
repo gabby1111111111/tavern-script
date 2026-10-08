@@ -13,6 +13,7 @@ export type TtsProviderProfile = {
   apiKey: string;
   model: string;
   defaultVoiceId: string;
+  /** 豆包旧版凭据（v0.2.0 起弃用）：只为兼容已存设置与错误脱敏保留，不再进入任何请求 */
   appId: string;
   accessKey: string;
   resourceId: string;
