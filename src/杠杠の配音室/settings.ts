@@ -24,7 +24,14 @@ export type ScriptVariableApi = {
   ) => ScriptVariables;
 };
 
-const PROVIDER_KINDS: readonly TtsProviderKind[] = ['edge', 'openai-compatible', 'doubao', 'minimax', 'xiaomi-mimo'];
+const PROVIDER_KINDS: readonly TtsProviderKind[] = [
+  'edge',
+  'openai-compatible',
+  'doubao',
+  'minimax',
+  'xiaomi-mimo',
+  'fish',
+];
 const READING_MODES: readonly ReadingMode[] = [
   'full',
   'dialogue-only',

@@ -144,12 +144,13 @@ test('plugin contract registers uncredentialed capabilities/probe and synthesis 
     assert.deepEqual(info, {
         id: 'ganggang-tts-bridge',
         name: 'Ganggang TTS Bridge',
-        description: 'Narrow same-origin bridge for native Doubao TTS synthesis.',
+        description: 'Narrow same-origin bridge for native Doubao TTS and Fish Audio synthesis.',
     });
-    assert.equal(version, '1.0.0');
+    assert.equal(version, '1.1.0');
     assert.deepEqual([...routes.keys()].sort(), [
         'GET /capabilities',
         'POST /doubao/synthesize',
+        'POST /fish/synthesize',
         'POST /probe',
     ]);
 
@@ -159,7 +160,7 @@ test('plugin contract registers uncredentialed capabilities/probe and synthesis 
     assert.deepEqual(responseJson(capabilitiesResponse), capabilities);
     assert.deepEqual(responseJson(capabilitiesResponse), {
         pluginId: 'ganggang-tts-bridge',
-        version: '1.0.0',
+        version: '1.1.0',
         doubao: {
             available: true,
             synthesizePath: '/api/plugins/ganggang-tts-bridge/doubao/synthesize',
@@ -169,6 +170,17 @@ test('plugin contract registers uncredentialed capabilities/probe and synthesis 
             limits: {
                 maxTextCharacters: 10_000,
                 maxContextCharacters: 2_000,
+                maxAudioBytes: 80 * 1024 * 1024,
+                timeoutMs: 45_000,
+            },
+        },
+        fish: {
+            available: true,
+            synthesizePath: '/api/plugins/ganggang-tts-bridge/fish/synthesize',
+            requestContentType: 'application/vnd.ganggang-tts+json',
+            responseContentType: 'audio/mpeg',
+            limits: {
+                maxTextCharacters: 10_000,
                 maxAudioBytes: 80 * 1024 * 1024,
                 timeoutMs: 45_000,
             },

@@ -2,7 +2,7 @@ export const VOICE_SETTINGS_SCHEMA_VERSION = 1;
 
 export type VoiceEditionId = 'custom-only' | 'remote-catalog';
 
-export type TtsProviderKind = 'edge' | 'openai-compatible' | 'doubao' | 'minimax' | 'xiaomi-mimo';
+export type TtsProviderKind = 'edge' | 'openai-compatible' | 'doubao' | 'minimax' | 'xiaomi-mimo' | 'fish';
 
 export type TtsProviderProfile = {
   id: string;
@@ -95,12 +95,22 @@ export type ContextMessage = {
   message: string;
 };
 
+export type ContextWorldbookEntry = {
+  worldbook: string;
+  uid: number;
+  name: string;
+  content: string;
+};
+
 export type CastingContext = {
   characterKey: string;
   characterName: string;
   characterDescription: string;
   characterPersonality: string;
   scenario: string;
+  userName: string;
+  userDescription: string;
+  worldbookEntries: ContextWorldbookEntry[];
   recentMessages: ContextMessage[];
 };
 
@@ -136,6 +146,8 @@ export type SynthesisRequest = {
   voice: VoiceRef;
   signal: AbortSignal;
   contextText?: string;
+  /** 导演指令（如小米 MiMo 的 user 消息台本）；不进入朗读文本 */
+  instruction?: string;
 };
 
 export type SynthesizedAudio = {

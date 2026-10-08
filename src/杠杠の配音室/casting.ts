@@ -1,6 +1,6 @@
 import { buildCastingRequestPayload, sanitizeVoiceOptions } from './context';
 import { saveCastingTable } from './settings';
-import type { CastingContext, CastingRequest, CastingTable, CastEntry, VoiceOption, VoiceRef } from './types';
+import type { CastEntry, CastRole, CastingContext, CastingRequest, CastingTable, VoiceOption, VoiceRef } from './types';
 
 type CastingPrompt = {
   role: 'system' | 'user';
@@ -34,10 +34,12 @@ export type GenerateCastingOptions = {
   voices: VoiceOption[];
   generationId?: string;
   now?: () => number;
-  isInputCurrent?: () => boolean;
+  isInputCurrent?: () => boolean | Promise<boolean>;
   runtime?: Partial<CastingRuntime>;
 };
 
+// 注意：不要在此 schema 中加入 minItems/maxItems/minimum/maximum/enum 等约束关键字——
+// 部分 OpenAI 兼容网关会直接以 400 拒绝它们；生成结果由 parseCastingResult 在代码侧完整校验。
 export const CASTING_JSON_SCHEMA: CastingJsonSchema = {
   name: 'ganggang_voice_casting',
   description: '为当前角色卡选择主要叙述者和角色音色，只能使用请求中列出的音色组合。',
@@ -48,19 +50,17 @@ export const CASTING_JSON_SCHEMA: CastingJsonSchema = {
     properties: {
       entries: {
         type: 'array',
-        minItems: 1,
-        maxItems: 32,
         items: {
           type: 'object',
           additionalProperties: false,
           properties: {
             id: { type: 'string' },
-            role: { type: 'string', enum: ['narrator', 'character', 'fallback'] },
+            role: { type: 'string' },
             displayName: { type: 'string' },
             aliases: { type: 'array', items: { type: 'string' } },
             providerProfileId: { type: 'string' },
             voiceId: { type: 'string' },
-            speed: { type: 'number', minimum: 0.25, maximum: 4 },
+            speed: { type: 'number' },
             emotion: { type: 'string' },
             reason: { type: 'string' },
           },
@@ -116,7 +116,7 @@ function buildCastingPrompt(request: CastingRequest): CastingPrompt[] {
     {
       role: 'system',
       content:
-        '你是配音导演。请根据角色卡和最近聊天，为主要叙述者及角色制作配音表。规范 JSON 根字段必须是 entries；每项必须包含 role、displayName、aliases、providerProfileId、voiceId，role 只能是 narrator、character 或 fallback。必须且只能有一个 narrator，最多一个 fallback；不同角色的 displayName 和 aliases 不能重复。只选择用户提供的 providerProfileId/voiceId 组合；不能创造、改写或猜测任何音色 ID。只返回规范 JSON，不要输出解释。',
+        '你是配音导演。请根据角色卡、用户设定、绑定的世界书条目和最近聊天，为主要叙述者及角色制作配音表。规范 JSON 根字段必须是 entries；每项必须包含 role、displayName、aliases、providerProfileId、voiceId，role 只能是 narrator、character 或 fallback。必须且只能有一个 narrator，最多一个 fallback；不同角色的 displayName 和 aliases 不能重复。只选择用户提供的 providerProfileId/voiceId 组合；不能创造、改写或猜测任何音色 ID。只返回规范 JSON，不要输出解释。',
     },
     {
       role: 'user',
@@ -291,6 +291,45 @@ function validateCastingIdentities(entries: CastEntry[]): void {
   });
 }
 
+let manualEntrySequence = 0;
+
+/** 为手动编辑的配音表生成稳定唯一的条目 id。 */
+export function createManualCastEntry(role: CastRole, voice: VoiceRef, index: number): CastEntry {
+  manualEntrySequence += 1;
+  const rolePrefix = role === 'narrator' ? 'narrator' : role === 'fallback' ? 'fallback' : 'character';
+  return {
+    id: `manual-${rolePrefix}-${Date.now()}-${manualEntrySequence}`,
+    role,
+    displayName: role === 'narrator' ? '旁白' : `角色${index + 1}`,
+    aliases: [],
+    voice: { providerProfileId: voice.providerProfileId, voiceId: voice.voiceId },
+  };
+}
+
+/** 把别名输入框的文本切分为去重后的别名数组。 */
+export function parseAliasInput(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[、,，]/)
+        .map(item => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/** 校验手动编辑后的配音表条目；返回第一条错误文案，合法时返回 null。 */
+export function findCastingEntryError(entries: CastEntry[]): string | null {
+  if (entries.length === 0) return '配音表至少需要一项音色映射';
+  if (entries.some(entry => !entry.displayName.trim())) return '角色名称不能为空';
+  try {
+    validateCastingIdentities(entries);
+    return null;
+  } catch (caught) {
+    return caught instanceof Error ? caught.message : String(caught);
+  }
+}
+
 class StaleCastingInputError extends Error {
   readonly code = 'STALE_CASTING_INPUT';
 
@@ -370,7 +409,7 @@ export async function generateCastingTable(options: GenerateCastingOptions): Pro
   if (options.isInputCurrent) {
     let isCurrent: boolean;
     try {
-      isCurrent = options.isInputCurrent();
+      isCurrent = await Promise.resolve(options.isInputCurrent());
     } catch {
       isCurrent = false;
     }

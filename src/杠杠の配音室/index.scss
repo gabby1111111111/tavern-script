@@ -37,7 +37,7 @@
 
 .ganggang-voice-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border-block: 1px solid var(--SmartThemeBorderColor);
 }
 
@@ -161,11 +161,12 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .ganggang-voice-tab:nth-child(2) {
+  .ganggang-voice-tab:nth-child(2n),
+  .ganggang-voice-tab:last-child {
     border-right: 0;
   }
 
-  .ganggang-voice-tab:nth-child(-n + 2) {
+  .ganggang-voice-tab:nth-child(-n + 4) {
     border-bottom: 1px solid var(--SmartThemeBorderColor);
   }
 
@@ -176,4 +177,30 @@
   .ganggang-voice-recent {
     grid-template-columns: 1fr;
   }
+}
+
+.ganggang-voice-probe-row {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.ganggang-voice-probe-dot {
+  width: 0.72em;
+  height: 0.72em;
+  border-radius: 999px;
+  background: var(--SmartThemeBorderColor);
+}
+
+.ganggang-voice-probe-dot.is-ok {
+  background: #6cc26c;
+}
+
+.ganggang-voice-probe-dot.is-fail {
+  background: #e07a7a;
+}
+
+.ganggang-voice-probe-dot.is-busy {
+  background: var(--voice-accent, #8ed8ff);
 }

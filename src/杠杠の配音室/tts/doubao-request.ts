@@ -79,6 +79,17 @@ export function buildDoubaoUpstreamRequest(input: DoubaoRequestInput) {
   };
 }
 
+/**
+ * 豆包错误码 → 用户可读原因。
+ * `45000000` / `55000000` 是"音色与资源 ID 不配套"的同一族错误码
+ * （2.0 音色混用 1.0 资源，或拿非豆包音色配 `seed-tts-2.0`），与跨域无关 ——
+ * 遇到它们不要往 CORS 方向排查（2026-10-08 8000 实测：拿 Edge 音色配 seed-tts-2.0 即 55000000）。
+ */
+const DOUBAO_ERROR_HINTS: Readonly<Record<number, string>> = {
+  45000000: '音色与资源 ID 不配套（2.0 音色必须配 seed-tts-2.0）',
+  55000000: '音色与资源 ID 不配套（所选音色与当前 Resource ID 不属于同一代）',
+};
+
 export function parseDoubaoNdjson(value: string, maxBytes: number): Uint8Array {
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
@@ -105,8 +116,10 @@ export function parseDoubaoNdjson(value: string, maxBytes: number): Uint8Array {
     }
     if (code === 0 || code === 20_000_000) continue;
     if (Number.isFinite(code) && code > 0) {
+      const hint = DOUBAO_ERROR_HINTS[code] || '';
       const message = String(event.message || event.msg || event.error || '').slice(0, 300);
-      throw new Error(`豆包 TTS 错误 ${code}${message ? `：${message}` : ''}`);
+      const detail = [hint, message].filter(Boolean).join('；');
+      throw new Error(`豆包 TTS 错误 ${code}${detail ? `：${detail}` : ''}`);
     }
   }
 

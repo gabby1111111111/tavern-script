@@ -22,7 +22,7 @@ import {
   setVoiceAuditBuild,
 } from './audit';
 import { createCastingGenerationId, generateCastingTable, isStaleCastingInputError, stopCasting } from './casting';
-import { createCastingInputSignature, readCurrentCastingContext } from './context';
+import { createCastingInputSignature, readCurrentCastingContext, readFullCastingContext } from './context';
 import {
   CUSTOM_ONLY_VOICE_EDITION,
   getBuiltinSoundCatalog,
@@ -58,6 +58,11 @@ type RecentRequest = {
   text: string;
   characterName: string | null;
   voice: VoiceRef;
+};
+
+export type ProviderProbeState = {
+  state: 'idle' | 'busy' | 'ok' | 'fail';
+  message: string;
 };
 
 function errorMessage(error: unknown): string {
@@ -105,6 +110,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   const status = ref('等待朗读');
   const error = ref('');
   const providerBusy = ref(false);
+  const auditionBusy = ref(false);
   const castingBusy = ref(false);
   const soundCatalogBusy = ref(false);
   const soundCatalogCount = ref(0);
@@ -121,6 +127,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   const recentRequests = new Map<string, RecentRequest>();
   const inlineRecentItems = new Map<string, string>();
   const discoveredVoices = new Map<string, { type: TtsProviderKind; voices: VoiceOption[] }>();
+  const providerProbeStatus = ref<Record<string, ProviderProbeState>>({});
   const listeners: EventOnReturn[] = [];
   let settingsTimer: number | null = null;
   let providerController: AbortController | null = null;
@@ -221,6 +228,10 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     markRouteBuilt(runId, 0);
     providerBusy.value = true;
     error.value = '';
+    providerProbeStatus.value = {
+      ...providerProbeStatus.value,
+      [profileId]: { state: 'busy', message: '正在检查…' },
+    };
     status.value = `正在检查 ${profile.name}…`;
     const controller = new AbortController();
     providerController = controller;
@@ -232,6 +243,15 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       refreshKnownVoices();
       const networkVerified = probeResult.unverified !== true;
       markProviderReady(runId, profile.id, networkVerified);
+      providerProbeStatus.value = {
+        ...providerProbeStatus.value,
+        [profileId]: {
+          state: 'ok',
+          message: networkVerified
+            ? `连接成功（真实合成验证），读取到 ${discovered.length} 个音色`
+            : `配置检查通过（未联网验证），读取到 ${discovered.length} 个音色`,
+        },
+      };
       status.value = networkVerified
         ? `${profile.name} 连接检查通过，读取到 ${discovered.length} 个音色`
         : `${profile.name} 配置检查通过（未联网验证），读取到 ${discovered.length} 个音色`;
@@ -239,6 +259,10 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       if (controller.signal.aborted) return;
       markProviderFailed(runId, profile.id);
       error.value = errorMessage(caught);
+      providerProbeStatus.value = {
+        ...providerProbeStatus.value,
+        [profileId]: { state: 'fail', message: errorMessage(caught) },
+      };
       status.value = 'TTS 来源检查失败';
       markVoiceAuditError(runId, caught);
     } finally {
@@ -246,6 +270,75 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         providerController = null;
         providerBusy.value = false;
       }
+    }
+  }
+
+  async function synthesizeAudition(
+    profileId: string,
+    voiceId: string,
+    text: string,
+    options: { instruction?: string; contextText?: string; emotion?: string } = {},
+  ): Promise<void> {
+    const profile = settings.value.profiles.find(item => item.id === profileId && item.enabled);
+    if (!profile) {
+      error.value = '试音引用的 TTS 来源不存在或已禁用';
+      return;
+    }
+    const trimmed = text.trim();
+    if (!trimmed) {
+      error.value = '例句为空，请先输入要试听的文本';
+      return;
+    }
+    const normalizedVoice = String(voiceId || profile.defaultVoiceId || '').trim();
+    if (!normalizedVoice) {
+      error.value = '请先选择或填写音色';
+      return;
+    }
+    stopReadingSequence();
+    auditionBusy.value = true;
+    error.value = '';
+    status.value = `正在用 ${profile.name} 试音…`;
+    const runId = beginVoiceAudit('audition');
+    markContentExtracted(runId, 0);
+    markRouteBuilt(runId, 0);
+    const voice: VoiceRef = {
+      providerProfileId: profile.id,
+      voiceId: normalizedVoice,
+      ...(options.emotion ? { emotion: options.emotion } : {}),
+    };
+    try {
+      const item = await recentStore.generate({ textPreview: trimmed, characterName: '试音', voice }, async ({ signal }) =>
+        registry.synthesize(profile, {
+          text: trimmed,
+          voice,
+          signal,
+          ...(options.contextText ? { contextText: options.contextText } : {}),
+          ...(options.instruction ? { instruction: options.instruction } : {}),
+        }),
+      );
+      if (item.status === 'failed') {
+        markProviderFailed(runId, profile.id);
+        markVoiceAuditError(runId, item.error ?? '试音失败');
+        error.value = item.error || '试音失败';
+        status.value = '试音失败';
+        return;
+      }
+      if (item.status !== 'ready' || !item.blob) {
+        status.value = '试音已取消';
+        return;
+      }
+      markProviderReady(runId, profile.id, true);
+      await recentStore.play(item.id);
+      markAudioPlayed(runId, item.id);
+      status.value = `试音完成（${profile.name}）`;
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') return;
+      markProviderFailed(runId, profile.id);
+      markVoiceAuditError(runId, caught);
+      error.value = errorMessage(caught);
+      status.value = '试音失败';
+    } finally {
+      auditionBusy.value = false;
     }
   }
 
@@ -257,6 +350,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       doubao: '豆包 TTS',
       minimax: 'MiniMax TTS',
       'xiaomi-mimo': '小米 MiMo TTS',
+      fish: 'Fish Audio TTS',
     };
     settings.value.profiles.push(normalizeProviderProfile({ id, name: name[type], type, enabled: true }, id));
   }
@@ -281,9 +375,9 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     const auditRunId = beginAiCastingAudit(generationId);
     activeCastingGenerationId = generationId;
     try {
-      const captureInput = () => {
+      const captureInput = async () => {
         const recentMessageCount = settings.value.readingDefaults.recentMessageCount;
-        const context = readCurrentCastingContext(recentMessageCount);
+        const context = await readFullCastingContext(recentMessageCount);
         const enabledProfiles = settings.value.profiles
           .filter(profile => profile.enabled)
           .map(profile => ({ id: profile.id, type: profile.type }));
@@ -295,14 +389,14 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
           signature: createCastingInputSignature(context, castingVoices, recentMessageCount, enabledProfiles),
         };
       };
-      const input = captureInput();
+      const input = await captureInput();
       currentCharacterKey.value = input.context.characterKey;
       currentCharacterName.value = input.context.characterName;
       const table = await generateCastingTable({
         context: input.context,
         voices: input.castingVoices,
         generationId,
-        isInputCurrent: () => captureInput().signature === input.signature,
+        isInputCurrent: async () => (await captureInput()).signature === input.signature,
       });
       if (activeCastingGenerationId !== generationId) return;
       settings.value.castingByCharacter = { ...settings.value.castingByCharacter, [table.characterKey]: table };
@@ -935,6 +1029,8 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     status,
     error,
     providerBusy,
+    auditionBusy,
+    providerProbeStatus,
     castingBusy,
     soundCatalogBusy,
     soundCatalogCount,
@@ -949,6 +1045,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     addProfile,
     removeProfile,
     probeAndLoadVoices,
+    synthesizeAudition,
     generateCasting,
     readLatest,
     readSelection,

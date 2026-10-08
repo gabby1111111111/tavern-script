@@ -3,12 +3,13 @@
 一个面向 Tavern
 Helper 的轻量配音脚本：配置多个 TTS 来源，让当前酒馆 AI 自动生成角色配音表，并从消息、单句、选中文字或最近语音直接播放。
 
-> 当前版本：`v0.1.0`。这是首版默认推荐制品，只提供用户自行配置的音效。
+> 当前版本：`v0.2.0`。默认推荐制品，只提供用户自行配置的音效；四家云端引擎零服务端安装。
 
-## 第一版能力
+## 当前版本能力
 
-- Edge、OpenAI-compatible、豆包、MiniMax、小米 MiMo Provider Profile。
-- AI 读取当前角色卡、设置范围内最近聊天和音色目录，生成主要角色配音表。
+- Edge、OpenAI-compatible、豆包、MiniMax、小米 MiMo、Fish Audio Provider Profile。
+- AI 读取当前角色卡、用户 persona 设定、用户与角色卡绑定世界书中当前启用的条目、设置范围内最近聊天和音色目录，生成主要角色配音表；配音表可手动增删角色、编辑名称与别名、互设旁白。
+- 试音台：任选引擎与音色（可手填 voiceId），用各家原生情绪机制试听例句；逐家"测试连接"真实合成验证凭据并给出可读失败原因。
 - 全文、仅对白、指定角色、单一音色、选中文字五种朗读方式。
 - 最近十条语音：播放/暂停、重新生成、下载；刷新后列表消失。
 - 原文旁对白按钮和真实准备/播放/暂停状态。
@@ -22,7 +23,7 @@ Helper 的轻量配音脚本：配置多个 TTS 来源，让当前酒馆 AI 自�
 2. 新建一个 Tavern Helper 后台脚本，粘贴并启用下面的固定版本导入语句：
 
 ```ts
-import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の配音室-v0.1.0/dist/杠杠の配音室/index.js';
+import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の配音室-v0.2.0/dist/杠杠の配音室/index.js';
 ```
 
 3. 在扩展设置中打开“杠杠の配音室”，新增或选择 TTS Profile，填写服务配置。
@@ -34,15 +35,18 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 
 ## Provider 与依赖
 
-| Provider          | 额外依赖或限制                                                          |
-| ----------------- | ----------------------------------------------------------------------- |
-| Edge              | 外部 Edge TTS 插件；本项目不内置                                        |
-| OpenAI-compatible | 对应服务需允许浏览器请求                                                |
-| MiniMax           | 受服务 API/CORS 规则约束                                                |
-| 小米 MiMo         | 配置探针不等于真实联网合成                                              |
-| 豆包              | 安装 `server-plugins/ganggang-tts-bridge` 并重启正确的 SillyTavern 实例 |
+| Provider          | 额外依赖或限制                                                            |
+| ----------------- | ------------------------------------------------------------------------- |
+| Edge              | 外部 Edge TTS 插件；本项目不内置                                          |
+| OpenAI-compatible | 对应服务需允许浏览器请求                                                  |
+| MiniMax           | 浏览器直连；音色为内置精选清单（官方目录接口已改版）                      |
+| 小米 MiMo         | 浏览器直连官方 API；免费档限额以官方为准                                  |
+| 豆包              | 浏览器直连官方 API；新版只填 API Key，旧版填 APP ID + Access Key          |
+| Fish Audio        | 需要酒馆 `enableCorsProxy: true` 并重启；音色市场（`GET /model`）公开直连  |
 
-豆包 bridge 只代理固定豆包 TTS 能力，不是通用代理。
+Fish 的合成请求经酒馆自带的 `/proxy` 同源转发，这是唯一需要用户改配置的引擎；前提是 `enableCorsProxy: true` 且
+`basicAuthMode: false`（否则插件自带的 `Authorization` 头会被 Basic 认证顶掉）。`server-plugins/ganggang-tts-bridge`
+只服务"语音插座"阶段（桌宠、后台服务等非浏览器消费者），v0.2.0 不再需要它。
 
 ## 自定义音效
 
@@ -54,7 +58,7 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 
 ## 隐私与存储
 
-- AI 配音表只在明确点击后发送当前角色卡、设置数量内的最近聊天和可用音色目录。
+- AI 配音表只在明确点击后发送当前角色卡、用户 persona 设定、用户与角色卡绑定世界书中当前启用的条目、设置数量内的最近聊天和可用音色目录。世界书条目按当前启用状态原样发送，不设长度上限。
 - AI 音效计划只在明确点击后发送当前消息、可朗读片段以及音效 ID、名称、分类和说明；音频 URL 不发送给酒馆 AI。
 - API Key 不发送给酒馆 AI，也不得进入 Audit、缓存描述或日志。
 - Profile、凭据、配音表和自定义音效元数据保存在 Tavern Helper 脚本变量中。
@@ -71,9 +75,11 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 
 确认音效已启用，并填写能区分场景的名称、分类和简短说明。AI 只能从这些元数据中选择，不会读取音频 URL 或试听音频内容。
 
-### 豆包 bridge 不可用
+### Fish 报 404 或 402
 
-确认 companion 位于目标 SillyTavern 的 server plugin 目录并重启了正确实例。
+404 说明酒馆没开 `/proxy`：在 `config.yaml` 打开 `enableCorsProxy: true` 并重启酒馆。402 说明请求走了付费模型，
+通常是因为漏了 `model` 请求头；本项目已固定免费档 `s2.1-pro-free`，若你手填过别的模型请改回（免费档不扣钱包，
+402 ≠ 免费档失效）。
 
 ### 为什么最近十条刷新后没了，但第二次生成仍可能更快？
 

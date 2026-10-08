@@ -1,6 +1,6 @@
 import type { SoundEffectEntry, VoiceEditionId } from './types';
 
-export const VOICE_CONSOLE_VERSION = '0.1.0';
+export const VOICE_CONSOLE_VERSION = '0.2.0';
 
 export type SoundCatalogSnapshot = {
   revision: string;

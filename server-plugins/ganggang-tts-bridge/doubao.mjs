@@ -28,6 +28,7 @@ const ALLOWED_REQUEST_FIELDS = new Set([
 const ERROR_CODES = new Set([
     'VALIDATION_ERROR',
     'UPSTREAM_AUTH',
+    'UPSTREAM_QUOTA',
     'UPSTREAM_RATE_LIMIT',
     'UPSTREAM_TIMEOUT',
     'UPSTREAM_ERROR',
@@ -46,7 +47,7 @@ export class DoubaoBridgeError extends Error {
     }
 }
 
-function bridgeError(code, statusCode) {
+export function bridgeError(code, statusCode) {
     return new DoubaoBridgeError(code, statusCode);
 }
 
@@ -58,7 +59,7 @@ function positiveInteger(value, fallback, name) {
     return candidate;
 }
 
-function readStringField(body, field, options = {}) {
+export function readStringField(body, field, options = {}) {
     const { required = false, maxCharacters = 512, trim = true } = options;
     const value = body[field];
     if (value === undefined || value === null) {
@@ -437,7 +438,7 @@ export async function parseDoubaoNdjsonStream(body, options = {}) {
     return Buffer.concat(state.audioChunks, state.audioBytes);
 }
 
-function createAbortContext(req, res, options) {
+export function createAbortContext(req, res, options) {
     const controller = new AbortController();
     let abortCause = null;
 
@@ -478,13 +479,14 @@ function createAbortContext(req, res, options) {
     };
 }
 
-function upstreamStatusError(statusCode) {
+export function upstreamStatusError(statusCode) {
     if (statusCode === 401 || statusCode === 403) return bridgeError('UPSTREAM_AUTH', 502);
+    if (statusCode === 402) return bridgeError('UPSTREAM_QUOTA', 502);
     if (statusCode === 429) return bridgeError('UPSTREAM_RATE_LIMIT', 503);
     return bridgeError('UPSTREAM_ERROR', 502);
 }
 
-function classifyFailure(error, abortContext) {
+export function classifyFailure(error, abortContext) {
     if (error instanceof DoubaoBridgeError) return error;
     if (abortContext?.cause === 'timeout') return bridgeError('UPSTREAM_TIMEOUT', 504);
     if (abortContext?.cause === 'client') return bridgeError('CLIENT_ABORTED', 499);
@@ -500,7 +502,7 @@ function setStatus(res, statusCode) {
     else res.statusCode = statusCode;
 }
 
-function sendJsonError(res, error) {
+export function sendJsonError(res, error) {
     if (!canWriteResponse(res)) return;
     const body = Buffer.from(JSON.stringify({
         error: {
@@ -514,11 +516,11 @@ function sendJsonError(res, error) {
     res.end(body);
 }
 
-function sendAudio(res, audio) {
+export function sendAudio(res, audio, mimeType = 'audio/mpeg') {
     if (!canWriteResponse(res)) return;
     setStatus(res, 200);
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Length', String(audio.length));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.end(audio);

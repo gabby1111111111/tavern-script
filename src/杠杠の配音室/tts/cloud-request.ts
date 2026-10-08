@@ -3,12 +3,30 @@ export const MINIMAX_ENDPOINTS = Object.freeze({
   io: 'https://api.minimax.io/v1/t2a_v2',
 } as const);
 
-export const MINIMAX_VOICE_ENDPOINTS = Object.freeze({
-  cn: 'https://api.minimaxi.com/v1/get_voice',
-  io: 'https://api.minimax.io/v1/get_voice',
-} as const);
-
 export const XIAOMI_MIMO_ENDPOINT = 'https://api.xiaomimimo.com/v1/chat/completions';
+
+export const FISH_TTS_ENDPOINT = 'https://api.fish.audio/v1/tts';
+export const FISH_MODEL_ENDPOINT = 'https://api.fish.audio/model';
+/** Fish 合成必须经酒馆同源 `/proxy`：上游 `POST /v1/tts` 的 CORS 预检 404，浏览器直连必死。 */
+export const FISH_TTS_PROXY_PATH = '/proxy/' + FISH_TTS_ENDPOINT;
+/** 免费档模型。Fish 的模型选择在请求头 `model` 里，漏头会默认走付费模型并报 402。 */
+export const FISH_DEFAULT_MODEL = 's2.1-pro-free';
+
+/**
+ * 把供应商 HTTP 状态映射为面向用户的可读失败原因。
+ * 供应商响应正文只用于识别审核类拒绝，不回显原文。
+ */
+export function classifyProviderHttpStatus(status: number, bodyHead = ''): string {
+  const body = String(bodyHead || '').slice(0, 300);
+  const audited = /审核|敏感|违规|risk|content[_ -]?filter|moderat|policy/i.test(body);
+  if (status === 401 || status === 403) return '鉴权失败：凭据无效或未授权';
+  if (status === 402) return '额度不足';
+  if (status === 429) return '额度不足或请求过于频繁';
+  if (audited) return '内容被审核拒绝';
+  if (status === 400) return '请求无效（参数或音色不被接受）';
+  if (status >= 500) return '服务暂时不可用';
+  return `服务错误 (HTTP ${status})`;
+}
 
 function requiredString(value: unknown, label: string, maxLength = 2_000): string {
   const text = String(value || '').trim();
@@ -80,6 +98,8 @@ export function normalizeMinimaxEmotion(value: unknown): string {
 export type MinimaxRequestInput = {
   platform?: string;
   apiKey: string;
+  /** MiniMax 控制台的 GroupId，t2a_v2 必须作为 URL 查询参数发送 */
+  groupId?: string;
   text: string;
   voiceId: string;
   model?: string;
@@ -92,9 +112,10 @@ export function buildMinimaxRequest(input: MinimaxRequestInput) {
   const platform = String(input.platform || 'cn')
     .trim()
     .toLowerCase() as keyof typeof MINIMAX_ENDPOINTS;
-  const url = MINIMAX_ENDPOINTS[platform];
-  if (!url) throw new Error('MiniMax 平台必须是 cn 或 io');
+  const baseUrl = MINIMAX_ENDPOINTS[platform];
+  if (!baseUrl) throw new Error('MiniMax 平台必须是 cn 或 io');
   const apiKey = requiredString(input.apiKey, 'MiniMax API Key', 4_096);
+  const groupId = requiredString(input.groupId, 'MiniMax Group ID', 64);
   const text = requiredString(input.text, '朗读文本', 20_000);
   const voiceId = requiredString(input.voiceId, 'MiniMax Voice ID', 500);
   const model = requiredString(input.model || 'speech-2.8-hd', 'MiniMax 模型', 200);
@@ -104,7 +125,7 @@ export function buildMinimaxRequest(input: MinimaxRequestInput) {
   const voiceSetting: Record<string, unknown> = { voice_id: voiceId, speed, vol: 1, pitch: 0 };
   if (emotion) voiceSetting.emotion = emotion;
   return {
-    url,
+    url: `${baseUrl}?GroupId=${encodeURIComponent(groupId)}`,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     payload: {
       model,
@@ -138,70 +159,6 @@ export function parseMinimaxResponse(value: unknown, maxBytes: number): Uint8Arr
   }
   if (!audio.length || audio.length > maxBytes) throw new Error('MiniMax 音频为空或过大');
   return audio;
-}
-
-export function buildMinimaxVoiceListRequest(input: { platform?: string; apiKey: string }) {
-  const platform = String(input.platform || 'cn')
-    .trim()
-    .toLowerCase() as keyof typeof MINIMAX_VOICE_ENDPOINTS;
-  const url = MINIMAX_VOICE_ENDPOINTS[platform];
-  if (!url) throw new Error('MiniMax 平台必须是 cn 或 io');
-  const apiKey = requiredString(input.apiKey, 'MiniMax API Key', 4_096);
-  return {
-    url,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    payload: { voice_type: 'all' },
-  };
-}
-
-export type DiscoveredMinimaxVoice = {
-  voiceId: string;
-  name: string;
-  description: string;
-  kind: 'system' | 'voice_cloning' | 'voice_generation';
-};
-
-function normalizeMinimaxVoice(value: any, kind: DiscoveredMinimaxVoice['kind']): DiscoveredMinimaxVoice | null {
-  const voiceId = optionalString(value?.voice_id, 500);
-  if (!voiceId) return null;
-  const description = Array.isArray(value?.description)
-    ? value.description
-        .map((item: unknown) => optionalString(item, 300))
-        .filter(Boolean)
-        .join('；')
-        .slice(0, 1_000)
-    : optionalString(value?.description, 1_000);
-  return {
-    voiceId,
-    name: optionalString(value?.voice_name, 300) || voiceId,
-    description,
-    kind,
-  };
-}
-
-export function parseMinimaxVoiceListResponse(value: unknown, maxVoices = 2_000): DiscoveredMinimaxVoice[] {
-  const data = parseJson(value, 'MiniMax 音色列表');
-  const code = Number(data?.base_resp?.status_code || 0);
-  if (code !== 0) {
-    throw new Error(`MiniMax 服务错误 ${code}: ${String(data?.base_resp?.status_msg || '未知错误').slice(0, 200)}`);
-  }
-  const groups: Array<[DiscoveredMinimaxVoice['kind'], unknown]> = [
-    ['system', data?.system_voice],
-    ['voice_cloning', data?.voice_cloning],
-    ['voice_generation', data?.voice_generation],
-  ];
-  const voices: DiscoveredMinimaxVoice[] = [];
-  const seen = new Set<string>();
-  for (const [kind, items] of groups) {
-    for (const item of Array.isArray(items) ? items : []) {
-      const voice = normalizeMinimaxVoice(item, kind);
-      if (!voice || seen.has(voice.voiceId)) continue;
-      seen.add(voice.voiceId);
-      voices.push(voice);
-      if (voices.length >= maxVoices) return voices;
-    }
-  }
-  return voices;
 }
 
 export type MimoRequestInput = {
@@ -242,4 +199,84 @@ export function parseMimoResponse(value: unknown, maxBytes: number): Uint8Array 
   const audio = decodeBase64(encoded, '小米 MiMo ');
   if (!audio.length || audio.length > maxBytes) throw new Error('小米 MiMo 音频为空或过大');
   return audio;
+}
+
+export function buildFishModelListRequest(input: { page?: number; pageSize?: number } = {}) {
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(input.pageSize) || 100)));
+  const page = Math.min(50, Math.max(1, Math.floor(Number(input.page) || 1)));
+  return { url: `${FISH_MODEL_ENDPOINT}?page_size=${pageSize}&page_number=${page}` };
+}
+
+export type FishSynthesisRequestInput = {
+  apiKey: string;
+  /** 缺省免费档 `s2.1-pro-free`；模型走请求头而不是请求体 */
+  model?: string;
+  voiceId: string;
+  text: string;
+  format?: string;
+};
+
+/**
+ * Fish 合成的 `/proxy` 请求配方（对齐 Fishdialogue `browser-audio.mjs` 的 `ttsRequest()`）：
+ * - URL 必须是**相对路径** `/proxy/` + 完整目标 URL，且不做 encode；
+ * - `Authorization` 与 `model` 都放在请求头，酒馆 `/proxy` 会透传（只剔除 host/origin/cookie 等）；
+ * - 请求体只放文本、音色、格式与延迟档。
+ */
+export function buildFishSynthesisRequest(input: FishSynthesisRequestInput) {
+  const apiKey = requiredString(input.apiKey, 'Fish API Key', 4_096);
+  if (/[\r\n]/.test(apiKey)) throw new Error('Fish API Key 无效');
+  const model = optionalString(input.model, 100) || FISH_DEFAULT_MODEL;
+  if (/[\r\n]/.test(model)) throw new Error('Fish 模型名称无效');
+  const voiceId = requiredString(input.voiceId, 'Fish 音色 ID', 500);
+  const text = requiredString(input.text, '朗读文本', 20_000);
+  const format = normalizeFormat(input.format, 'mp3');
+
+  return {
+    url: FISH_TTS_PROXY_PATH,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      model,
+      'Content-Type': 'application/json',
+    },
+    payload: { text, reference_id: voiceId, format, latency: 'normal' },
+  };
+}
+
+export type DiscoveredFishVoice = {
+  voiceId: string;
+  name: string;
+  description: string;
+};
+
+function normalizeFishVoice(value: any): DiscoveredFishVoice | null {
+  const voiceId = optionalString(value?._id ?? value?.id, 500);
+  if (!voiceId) return null;
+  // 音色市场的标题/描述可能很长：解析目录时截断，不让单条脏数据失败整个目录。
+  const title = String(value?.title || "")
+    .trim()
+    .slice(0, 300);
+  const description = String(value?.description || "")
+    .trim()
+    .slice(0, 500);
+  return {
+    voiceId,
+    name: title || voiceId,
+    description,
+  };
+}
+
+/** Fish 音色市场是公开接口；响应形状按 items/_id/title 宽容解析，兼容数组或 {items:[…]}。 */
+export function parseFishVoiceListResponse(value: unknown, maxVoices = 500): DiscoveredFishVoice[] {
+  const data = parseJson(value, 'Fish 音色列表');
+  const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
+  const voices: DiscoveredFishVoice[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const voice = normalizeFishVoice(item);
+    if (!voice || seen.has(voice.voiceId)) continue;
+    seen.add(voice.voiceId);
+    voices.push(voice);
+    if (voices.length >= maxVoices) break;
+  }
+  return voices;
 }

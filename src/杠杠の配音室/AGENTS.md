@@ -47,8 +47,9 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 | 用户或宿主事件              | 第一入口                                          | 主要管线                                                             | 最终副作用                               |
 | --------------------------- | ------------------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------- |
 | 脚本加载 / 热重载           | `index.ts` → `bootstrap.ts: registerVoiceConsole` | 创建 runtime → `runtime.start`                                       | 挂载面板与 `window.__ganggangVoiceAudit` |
-| 检查 TTS / 读取音色         | `probeAndLoadVoices`                              | Provider Registry → adapter `probe/listVoices`                       | 更新页内音色与 Provider Audit            |
-| 一键 AI 配音表              | `generateCasting`                                 | `readCurrentCastingContext` → `generateCastingTable` → `generateRaw` | 写当前角色卡的 `castingByCharacter`      |
+| 检查 TTS / 读取音色         | `probeAndLoadVoices`                              | Provider Registry → adapter probe（真实合成"你好"）/ listVoices       | 更新页内音色、状态灯与 Provider Audit    |
+| 试音台试听                  | `synthesizeAudition`                              | 试音台标签 → registry synthesize → RecentVoiceStore                   | 样本进入最近 10 条并播放                 |
+| 一键 AI 配音表              | `generateCasting`                                 | `readFullCastingContext` → `generateCastingTable` → `generateRaw`    | 写当前角色卡的 `castingByCharacter`      |
 | 朗读最新消息 / 楼层         | `readLatest/readMessage`                          | `parseSpokenSegments` → `routeSegments` → `playRoutedSegments`       | 严格串行播放并写最近语音                 |
 | 朗读选中文字                | `readSelection`                                   | 定位楼层 → `mapSelectionToSegments` → `routeAndPlay`                 | 朗读映射到的片段                         |
 | 原文旁对白喇叭              | `MessageControlManager.onPlaySegment`             | `readOneSegment` → 路由 → `playRoutedSegments`                       | 生成/复用该行语音                        |
@@ -81,16 +82,17 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 - `message-controls.ts`：楼层按钮 DOM 与图标生命周期。
 - `audit.ts`：无正文、无 URL、无 Key 的验收对象。
 - `tts/providers.ts` 与 `tts` 下 request 模块：Provider adapter 和协议。
-- `server-plugins/ganggang-tts-bridge`：豆包同源窄桥接，不属于浏览器 bundle。
+- `tts/audio-signature.ts`：音频文件魔数识别；`/proxy` 会丢上游 `Content-Type`，这是它的兜底。
+- `server-plugins/ganggang-tts-bridge`：**插座阶段资产**，v0.2.0 起不属于浏览器 bundle，也不参与配音室装配。
 
 ## 出问题先去哪条路找
 
 | 症状                | 第一检查点                                            | 然后检查                                              |
 | ------------------- | ----------------------------------------------------- | ----------------------------------------------------- |
-| 面板没出现          | 角色脚本 loader 的 `localhost:5500` 是否在线并带 CORS | `bootstrap.ts` 挂载、watch bundle、Tavern Helper 监听 |
+| 面板没出现          | 角色脚本 loader 的 `localhost:5501` 是否在线并带 CORS | `bootstrap.ts` 挂载、watch bundle、Tavern Helper 监听 |
 | 正文漏读/对白识别错 | `tts/text.ts` fixtures                                | `reading.ts` 模式过滤                                 |
 | 角色声音分错        | `runtime.routeSegments`                               | 配音表、角色 override、默认路由                       |
-| Provider 失败       | `tts/providers.ts` adapter                            | request builder；豆包再查 bridge                      |
+| Provider 失败       | `tts/providers.ts` adapter                            | request builder；豆包查 NDJSON 错误码，Fish 查 `enableCorsProxy` |
 | 一直 generating     | `prepareSegment` 与 AbortSignal                       | Provider、IndexedDB、代次是否过期                     |
 | Stop 后旧声音回来   | `playback.ts` pending-play race                       | `readingSequence/lifecycleEpoch`                      |
 | 两个声音重叠        | `playRoutedSegments`                                  | `playSoundEffect` 是否先废止旧朗读                    |
@@ -115,16 +117,18 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 
 ## 验证与发布
 
-- 本地实时链是 `pnpm watch` → `dist/杠杠の配音室/index.js` → 带 CORS 的 `http://localhost:5500` 静态服务 →
-  8000 角色脚本 loader；只开 watch 不会自动提供 5500。
+- 本地实时链是 `pnpm watch` → `dist/杠杠の配音室/index.js` → 带 CORS 的 `http://localhost:5501` 静态服务（对中文路径做
+  `encodeURI` 的 302 时间戳跳转，绕过 loader 固定 `?v=` 造成的顽固缓存）→ 8000 角色脚本 loader；只开 watch 不会自动提供 5501。
 - 八组测试：`tests/ganggang-voice-{tts,playback,reading,casting,sound-casting,audit,runtime-lifecycle,editions}.test.ts`。
+  Node 24 下需带 `TS_NODE_COMPILER_OPTIONS='{"module":"commonjs"}'` 运行 `ts-node --files`。
 - Lint 限定本源码目录和配音室测试，不把其他脚本纳入本项目修复。
 - 真实验收读取 `window.__ganggangVoiceAudit`，不回传正文、URL、Key、cookie 或完整设置。
-- 第一版 Tag：`杠杠の配音室-v0.1.0`；不要复用仓库全局自动 bundle Tag。
-- 显式暂存本源码目录、配音室测试、豆包 bridge、目标 dist 和目标文档；禁止 `git add -A`。
-- 本次 `0.1.0` 已明确批准同时上传纯自定义版和内置目录预览版；后续 Release 是否继续附带预览版，必须再次询问 Gabby。
+- 第一版 Tag：`杠杠の配音室-v0.1.0`；第二版 Tag：`杠杠の配音室-v0.2.0`（传输层迁移）。不要复用仓库全局自动 bundle Tag。
+- 显式暂存本源码目录、配音室测试、桥接资产、目标 dist 和目标文档；禁止 `git add -A`。
+- `0.1.0` 已明确批准同时上传纯自定义版和内置目录预览版；后续 Release 是否继续附带预览版，必须再次询问 Gabby。
 - watch 产物是开发 bundle，不能公开发布；生产构建后必须用 exact artifact 完成 8000 实机验收。
 - 纯自定义生产 bundle 必须对所有内置目录标识、请求域名和按钮文案做负向扫描，结果应为零匹配；浏览器 Network 也不得访问相应目录或音频域名。
+- 生产 bundle 还必须对 `ganggang-tts-bridge` 做负向扫描（结果零匹配）：v0.2.0 起桥接不属于浏览器侧。
 - 仓库根 `LICENSE` 当前是指向 Ghostscript subject matter 的 AFPL
   v9 文本，是否清晰适用于本项目尚未确认。发布前必须由维护者选择并确认代码许可证；Agent 不得擅自替换、解释为已授权或在 README 中作确定性承诺。
-- Edge 是外部可选依赖；豆包需要可选 server bridge。
+- Edge 是外部可选依赖；Fish 需要酒馆 `enableCorsProxy: true`（唯一需要用户改配置的引擎），豆包/小米/MiniMax 零安装。

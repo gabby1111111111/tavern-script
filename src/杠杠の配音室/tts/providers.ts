@@ -1,24 +1,34 @@
 import type { SynthesisRequest, SynthesizedAudio, TtsProviderProfile, TtsProviderKind, VoiceOption } from '../types';
-import { DEFAULT_DOUBAO_RESOURCE_ID } from './doubao-request';
+import { detectAudioType } from './audio-signature';
+import { buildDoubaoUpstreamRequest, DEFAULT_DOUBAO_RESOURCE_ID, parseDoubaoNdjson } from './doubao-request';
 import {
+  buildFishModelListRequest,
+  buildFishSynthesisRequest,
   buildMimoRequest,
   buildMinimaxRequest,
-  buildMinimaxVoiceListRequest,
+  classifyProviderHttpStatus,
+  parseFishVoiceListResponse,
   parseMimoResponse,
   parseMinimaxResponse,
-  parseMinimaxVoiceListResponse,
 } from './cloud-request';
-import { getStaticVoiceCatalog, normalizeDiscoveredMinimaxVoices } from './voice-catalog';
+import { getStaticVoiceCatalog, normalizeDiscoveredFishVoices } from './voice-catalog';
 
 export const MAX_TTS_RESPONSE_BYTES = 80 * 1024 * 1024;
-export const DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT = '/api/plugins/ganggang-tts-bridge/doubao/synthesize';
-export const DOUBAO_BRIDGE_CAPABILITIES_ENDPOINT = '/api/plugins/ganggang-tts-bridge/capabilities';
-export const DOUBAO_BRIDGE_REQUEST_CONTENT_TYPE = 'application/vnd.ganggang-tts+json';
+/** 豆包返回 base64 分片流，线上字节数必然大于解码后的音频，用解码上限的 4/3 加余量做线上闸门。 */
+export const MAX_TTS_WIRE_BYTES = Math.ceil((MAX_TTS_RESPONSE_BYTES * 4) / 3) + 4_096;
+/** 酒馆 `/proxy` 自己不设上限，浏览器侧给 Fish 兜 25MB。 */
+export const MAX_PROXY_AUDIO_BYTES = 25 * 1024 * 1024;
+/** Fish 经 `/proxy` 合成的硬超时，避免上游不响应时永远转圈。 */
+export const PROXY_SYNTHESIS_TIMEOUT_MS = 120_000;
+const TTS_RESPONSE_TOO_LARGE = 'TTS response is too large';
 
 export type ProviderProbeResult = {
   ok: true;
-  mode?: 'direct' | 'plugin';
+  /** `direct` 浏览器直连上游；`proxy` 经酒馆同源 `/proxy` 转发；`plugin` 经 SillyTavern server 插件 */
+  mode?: 'direct' | 'plugin' | 'proxy';
   configured?: boolean;
+  /** `synthesis` 表示该 probe 完成了一次真实合成（联网验证）；缺省表示仅配置/目录检查 */
+  checked?: 'synthesis';
   unverified?: boolean;
   voiceCount?: number;
 };
@@ -65,18 +75,33 @@ export function redactProviderSecrets(value: unknown, profile: TtsProviderProfil
   return text;
 }
 
-async function readLimitedBytes(response: Response): Promise<Uint8Array> {
+async function readLimitedBytes(response: Response, maxBytes = MAX_TTS_RESPONSE_BYTES): Promise<Uint8Array> {
   const declaredLength = Number(response.headers?.get?.('content-length') || 0);
-  if (declaredLength > MAX_TTS_RESPONSE_BYTES) throw new Error('TTS response is too large');
+  if (declaredLength > maxBytes) throw new Error(TTS_RESPONSE_TOO_LARGE);
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.length > MAX_TTS_RESPONSE_BYTES) throw new Error('TTS response is too large');
+  if (bytes.length > maxBytes) throw new Error(TTS_RESPONSE_TOO_LARGE);
   return bytes;
+}
+
+/** 把内部英文超限错误翻成带供应商标签的中文原因，避免英文内部标识外泄到界面。 */
+async function readBoundedBytes(response: Response, label: string, maxBytes: number): Promise<Uint8Array> {
+  try {
+    return await readLimitedBytes(response, maxBytes);
+  } catch (error) {
+    if (error instanceof Error && error.message === TTS_RESPONSE_TOO_LARGE) {
+      throw new Error(`${label}数据超过大小限制`, { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function throwResponseError(response: Response, label: string, profile: TtsProviderProfile): Promise<never> {
   const message = await response.text().catch(() => '');
   throw new Error(
-    redactProviderSecrets(`${label} HTTP ${response.status}${message ? ` ${message.slice(0, 300)}` : ''}`, profile),
+    redactProviderSecrets(
+      `${label} ${classifyProviderHttpStatus(response.status, message)}（HTTP ${response.status}）`,
+      profile,
+    ),
   );
 }
 
@@ -114,7 +139,61 @@ async function readStructuredResponse(
 function withRedactedError(error: unknown, profile: TtsProviderProfile): never {
   if (error instanceof DOMException && error.name === 'AbortError') throw error;
   if (typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError') throw error;
+  if (error instanceof TypeError) {
+    throw new Error(redactProviderSecrets(`${profile.name || 'TTS'} 网络错误：无法连接服务`, profile));
+  }
   throw new Error(redactProviderSecrets(error instanceof Error ? error.message : error, profile));
+}
+
+/** probe 用的兜底音色：优先 Profile 默认音色，否则取该 kind 内置目录第一个。 */
+function probeVoiceFor(profile: TtsProviderProfile): string {
+  const explicit = String(profile.defaultVoiceId || '').trim();
+  if (explicit) return explicit;
+  return getStaticVoiceCatalog(profile)[0]?.voiceId || '';
+}
+
+/**
+ * 以一次真实合成（"你好"）作为 probe：验证凭据、额度与连通性。
+ * adapter 内部错误已按"凭据/额度/审核/网络"分类并脱敏；此处补充网络层 TypeError 分类。
+ * 探针自带 45 秒超时，上游不响应时给出可读失败而不是永远转圈。
+ */
+async function probeBySynthesis(
+  profile: TtsProviderProfile,
+  synthesize: (request: SynthesisRequest) => Promise<SynthesizedAudio>,
+  signal?: AbortSignal,
+  voiceIdOverride = "",
+): Promise<ProviderProbeResult> {
+  const voiceId = String(voiceIdOverride || probeVoiceFor(profile)).trim();
+  if (!voiceId) throw new Error(`${profile.name || 'TTS'} 缺少可用的默认音色，无法联网验证`);
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(new Error("timeout")), 45_000);
+  let signal_: AbortSignal = timeoutController.signal;
+  if (signal) {
+    signal_ = typeof AbortSignal.any === "function" ? AbortSignal.any([signal, timeoutController.signal]) : signal;
+  }
+  try {
+    await synthesize({
+      text: "你好",
+      voice: { providerProfileId: profile.id, voiceId },
+      signal: signal_,
+    });
+    return { ok: true, configured: true, checked: "synthesis" };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      if (signal?.aborted) throw error;
+      throw new Error(redactProviderSecrets(`${profile.name || "TTS"} 探针超时（45 秒无响应）`, profile), {
+        cause: error,
+      });
+    }
+    if (error instanceof TypeError) {
+      throw new Error(redactProviderSecrets(`${profile.name || "TTS"} 网络错误：无法连接服务`, profile), {
+        cause: error,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export type OpenAiSpeechPayload = {
@@ -145,119 +224,117 @@ export function buildOpenAiSpeechPayload(profile: TtsProviderProfile, request: S
   };
 }
 
-export function buildDoubaoPayload(profile: TtsProviderProfile, request: SynthesisRequest) {
-  assertProfile(profile, 'doubao');
-  const apiKey = String(profile.apiKey || '').trim();
-  const appId = apiKey ? '' : String(profile.appId || '').trim();
-  const accessKey = apiKey ? '' : String(profile.accessKey || '').trim();
-  const resourceId = String(profile.resourceId || DEFAULT_DOUBAO_RESOURCE_ID).trim();
-  const speaker = String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim();
-  const text = ensureText(request?.text);
-  if (apiKey.length > 2_048 || accessKey.length > 2_048) throw new Error('豆包 TTS 凭据过长');
-  if (!apiKey && (!appId || !accessKey)) throw new Error('豆包 TTS 缺少旧版 APP ID 或 Access Key');
-  if (!resourceId) throw new Error('豆包 TTS 缺少 Resource ID');
-  if (!speaker) throw new Error('豆包 TTS 缺少 Speaker ID');
-  if (text.length > 10_000) throw new Error('豆包 TTS 文本过长');
-  const payload = {
-    apiKey,
-    appId,
-    accessKey,
-    resourceId,
-    speaker,
-    text,
-    contextText: String(request?.contextText || '')
-      .trim()
-      .slice(0, 2_000),
-  };
-  return payload;
+/** 中文标签直接接中文；以 ASCII 结尾的标签补一个空格，避免出现 "Fish音频" 这类粘字。 */
+function withLabel(label: string, text: string): string {
+  return `${label}${/[A-Za-z0-9]$/.test(label) ? ' ' : ''}${text}`;
 }
 
-type DoubaoBridgeErrorCode =
-  | 'VALIDATION_ERROR'
-  | 'UPSTREAM_AUTH'
-  | 'UPSTREAM_RATE_LIMIT'
-  | 'UPSTREAM_TIMEOUT'
-  | 'UPSTREAM_ERROR'
-  | 'INVALID_UPSTREAM_RESPONSE'
-  | 'RESPONSE_TOO_LARGE'
-  | 'CLIENT_ABORTED';
-
-function doubaoBridgeErrorMessage(status: number, code: DoubaoBridgeErrorCode | ''): string {
-  if (status === 404) return '豆包桥接不可用（未安装或版本过旧）';
-  if (code === 'UPSTREAM_AUTH') return '豆包鉴权失败';
-  if (code === 'UPSTREAM_RATE_LIMIT') return '豆包服务繁忙，请稍后重试';
-  if (code === 'UPSTREAM_TIMEOUT') return '豆包服务响应超时';
-  if (status === 413 || code === 'RESPONSE_TOO_LARGE') return '豆包音频超过大小限制';
-  if (status === 400 || code === 'VALIDATION_ERROR') return '豆包请求配置无效';
-  if (code === 'INVALID_UPSTREAM_RESPONSE') return '豆包桥接未返回有效音频';
-  if (status === 499 || code === 'CLIENT_ABORTED') return '豆包请求已取消';
-  return '豆包合成失败';
+/**
+ * `/proxy` 失败分类。酒馆在 `enableCorsProxy: false` 时返回 404 "CORS proxy is disabled"，
+ * 402 在本项目里等同于"漏了 model 请求头 → 走了付费模型"，都要直接点出修法。
+ */
+export function describeProxyFailure(label: string, status: number, bodyHead = ''): string {
+  if (status === 404) {
+    return withLabel(label, '酒馆 /proxy 不可用：请在 config.yaml 打开 enableCorsProxy 并重启酒馆');
+  }
+  if (status === 402) {
+    return withLabel(label, '额度不足：请确认请求头 model 是免费档（默认 s2.1-pro-free）');
+  }
+  if (status === 401 || status === 403) return withLabel(label, '鉴权失败：凭据无效或未授权');
+  if (status === 413) return withLabel(label, '音频超过大小限制');
+  if (status === 400) return withLabel(label, '请求配置无效');
+  return withLabel(label, `${classifyProviderHttpStatus(status, bodyHead)}（HTTP ${status}）`);
 }
 
-async function throwDoubaoBridgeError(response: Response): Promise<never> {
-  let code: DoubaoBridgeErrorCode | '' = '';
+/**
+ * 读取经酒馆 `/proxy` 流回的音频。
+ * 关键点（2026-10-08 在 8000 实测）：`/proxy` 会丢掉上游 `Content-Type`，
+ * 所以 MIME 必须先用文件魔数识别，再退回响应头，否则真音频会被误判成"未返回音频"。
+ */
+async function readProxyAudio(
+  response: Response,
+  label: string,
+  profile: TtsProviderProfile,
+): Promise<SynthesizedAudio> {
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(redactProviderSecrets(describeProxyFailure(label, response.status, body), profile));
+  }
+  const declaredLength = Number(response.headers?.get?.('content-length') || 0);
+  if (declaredLength > MAX_PROXY_AUDIO_BYTES) throw new Error(withLabel(label, '音频超过大小限制'));
+  const reader = response.body?.getReader?.();
+  if (!reader) throw new Error(withLabel(label, '未返回音频'));
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    const contentType = response.headers?.get?.('content-type') || '';
-    if (/application\/json/i.test(contentType)) {
-      const body = (await response.json()) as { error?: { code?: unknown } | unknown };
-      const rawCode =
-        typeof body?.error === 'object' && body.error !== null ? (body.error as { code?: unknown }).code : '';
-      code = String(rawCode || '')
-        .trim()
-        .toUpperCase() as DoubaoBridgeErrorCode;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      total += value.byteLength;
+      if (total > MAX_PROXY_AUDIO_BYTES) throw new Error(withLabel(label, '音频超过大小限制'));
+      chunks.push(value);
     }
-  } catch {
-    // The bridge response body is deliberately not reflected into browser errors.
-  }
-  throw new Error(doubaoBridgeErrorMessage(response.status, code));
-}
-
-async function readDoubaoBridgeAudio(response: Response): Promise<SynthesizedAudio> {
-  if (!response.ok) await throwDoubaoBridgeError(response);
-  const contentType = response.headers?.get?.('content-type') || '';
-  if (!/^audio\/mpeg(?:\s*;|$)/i.test(contentType)) throw new Error('豆包桥接未返回有效音频');
-  let bytes: Uint8Array;
-  try {
-    bytes = await readLimitedBytes(response);
-  } catch (error) {
-    if (error instanceof Error && error.message === 'TTS response is too large') {
-      throw new Error('豆包音频超过大小限制', { cause: error });
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // 已读完或已被上游终止：取消只是收尾，不覆盖真正的失败原因。
     }
-    throw error;
   }
-  if (!bytes.length) throw new Error('豆包桥接返回了空音频');
-  return { blob: blobFromBytes(bytes, 'audio/mpeg'), mimeType: 'audio/mpeg' };
+  if (!total) throw new Error(withLabel(label, '返回了空音频'));
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const declaredType = String(response.headers?.get?.('content-type') || '')
+    .split(';')[0]
+    .trim();
+  const mimeType =
+    detectAudioType(bytes.subarray(0, 32)) || (/^audio\//i.test(declaredType) ? declaredType : '');
+  if (!mimeType) {
+    throw new Error(
+      redactProviderSecrets(withLabel(label, '未返回音频：/proxy 拼法错误、酒馆未登录或上游返回了文本'), profile),
+    );
+  }
+  return { blob: blobFromBytes(bytes, mimeType), mimeType };
 }
 
-async function readDoubaoBridgeCapabilities(response: Response): Promise<void> {
-  if (!response.ok) await throwDoubaoBridgeError(response);
-  let body: {
-    pluginId?: unknown;
-    doubao?: {
-      available?: unknown;
-      synthesizePath?: unknown;
-      requestContentType?: unknown;
-      responseContentType?: unknown;
-    };
-  };
-  try {
-    body = (await response.json()) as typeof body;
-  } catch {
-    throw new Error('豆包桥接版本过旧');
+/** 把调用方取消与硬超时合成同一个 signal；超时用可读原因 abort，而不是静默挂死。 */
+function withSynthesisTimeout(signal: AbortSignal, label: string): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(`${label}合成超时（${PROXY_SYNTHESIS_TIMEOUT_MS / 1000} 秒）`)),
+    PROXY_SYNTHESIS_TIMEOUT_MS,
+  );
+  const combined =
+    typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  return { signal: combined, dispose: () => clearTimeout(timer) };
+}
+
+/**
+ * 豆包 HTTP 层失败分类。`403` 与 `45000000` 在豆包语义里是"音色与资源 ID 不配套"，
+ * 既不是 CORS 问题，也不该报成通用鉴权失败 —— 必须单独点出修法。
+ */
+async function throwDoubaoResponseError(response: Response, profile: TtsProviderProfile): Promise<never> {
+  const body = await response.text().catch(() => '');
+  if (response.status === 403 || body.includes('45000000')) {
+    throw new Error(
+      redactProviderSecrets('豆包 音色与资源 ID 不配套：2.0 音色必须配 X-Api-Resource-Id: seed-tts-2.0', profile),
+    );
   }
-  const supported =
-    body.pluginId === 'ganggang-tts-bridge' &&
-    body.doubao?.available === true &&
-    body.doubao.synthesizePath === DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT &&
-    body.doubao.requestContentType === DOUBAO_BRIDGE_REQUEST_CONTENT_TYPE &&
-    body.doubao.responseContentType === 'audio/mpeg';
-  if (!supported) throw new Error('豆包桥接版本过旧');
+  throw new Error(
+    redactProviderSecrets(`豆包 ${classifyProviderHttpStatus(response.status, body)}（HTTP ${response.status}）`, profile),
+  );
 }
 
 export function buildMinimaxPayload(profile: TtsProviderProfile, request: SynthesisRequest) {
   assertProfile(profile, 'minimax');
   const payload = {
     apiKey: String(profile.apiKey || '').trim(),
+    groupId: String(profile.groupId || '').trim(),
     platform: String(profile.platform || 'cn').trim(),
     model: String(profile.model || 'speech-2.8-hd').trim(),
     voiceId: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
@@ -278,7 +355,8 @@ export function buildMimoPayload(profile: TtsProviderProfile, request: Synthesis
     voiceId: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
     text: ensureText(request?.text),
     format: String(profile.responseFormat || 'wav').trim(),
-    style: String(profile.style || '').trim(),
+    // 导演指令：请求级 instruction（试音台）优先，Profile style 作为常驻兜底
+    style: String(request?.instruction || profile.style || '').trim(),
   };
   buildMimoRequest(payload);
   return payload;
@@ -287,7 +365,6 @@ export function buildMimoPayload(profile: TtsProviderProfile, request: Synthesis
 // Compatibility names retained for the small amount of routing code that was
 // ported from HybridAudiobookStage.  They still return request-only payloads;
 // no credential is ever included in a cache descriptor or synthesis result.
-export const buildDoubaoProxyPayload = buildDoubaoPayload;
 export const buildMinimaxProxyPayload = buildMinimaxPayload;
 export const buildXiaomiMimoProxyPayload = buildMimoPayload;
 
@@ -365,36 +442,43 @@ export function createProviderRegistry({
     },
     doubao: {
       async probe(profile, signal) {
-        buildDoubaoPayload(profile, {
-          text: '配置检查',
-          voice: { providerProfileId: profile.id, voiceId: profile.defaultVoiceId },
-          signal: signal ?? new AbortController().signal,
-        });
-        const response = await fetcher(DOUBAO_BRIDGE_CAPABILITIES_ENDPOINT, {
-          method: 'GET',
-          headers: getSillyTavernHeaders(),
+        // 豆包 HTTP 合成支持浏览器直连（2026-10-08 三重实测 + 真实出声），不再依赖同源桥接。
+        // 探针音色固定用内置豆包目录第一条：默认音色可能是误填的其他引擎音色，音色不匹配会污染凭据验证结论。
+        const result = await probeBySynthesis(
+          profile,
+          request => this.synthesize(profile, request),
           signal,
-        });
-        await readDoubaoBridgeCapabilities(response);
-        return { ok: true, mode: 'plugin', configured: true, unverified: true };
+          getStaticVoiceCatalog(profile)[0]?.voiceId || '',
+        );
+        return { ...result, mode: 'direct' as const };
       },
       async listVoices(profile) {
         assertProfile(profile, 'doubao');
         return getStaticVoiceCatalog(profile);
       },
       async synthesize(profile, request) {
-        const payload = buildDoubaoPayload(profile, request);
+        assertProfile(profile, 'doubao');
         try {
-          const response = await fetcher(DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT, {
+          const upstream = buildDoubaoUpstreamRequest({
+            apiKey: String(profile.apiKey || '').trim(),
+            appId: String(profile.appId || '').trim(),
+            accessKey: String(profile.accessKey || '').trim(),
+            resourceId: String(profile.resourceId || DEFAULT_DOUBAO_RESOURCE_ID).trim(),
+            speaker: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
+            text: ensureText(request?.text),
+            contextText: request?.contextText,
+          });
+          const response = await fetcher(upstream.url, {
             method: 'POST',
-            headers: {
-              ...getSillyTavernHeaders(),
-              'Content-Type': DOUBAO_BRIDGE_REQUEST_CONTENT_TYPE,
-            },
-            body: JSON.stringify(payload),
+            headers: upstream.headers,
+            body: JSON.stringify(upstream.payload),
             signal: request.signal,
           });
-          return await readDoubaoBridgeAudio(response);
+          if (!response.ok) await throwDoubaoResponseError(response, profile);
+          // 响应是连续的 JSON 对象流（base64 音频分片），线上字节数必然大于解码后的音频。
+          const wireBytes = await readBoundedBytes(response, '豆包', MAX_TTS_WIRE_BYTES);
+          const audioBytes = parseDoubaoNdjson(new TextDecoder().decode(wireBytes), MAX_TTS_RESPONSE_BYTES);
+          return { blob: blobFromBytes(audioBytes, 'audio/mpeg'), mimeType: 'audio/mpeg' };
         } catch (error) {
           return withRedactedError(error, profile);
         }
@@ -402,24 +486,13 @@ export function createProviderRegistry({
     },
     minimax: {
       async probe(profile, signal) {
-        const voices = await this.listVoices(profile, signal);
-        return { ok: true, mode: 'direct', configured: true, voiceCount: voices.length };
+        // get_voice 目录接口已改版 404（2026-09-27 实测），probe 改用真实合成验证凭据与额度。
+        const result = await probeBySynthesis(profile, request => this.synthesize(profile, request), signal);
+        return { ...result, mode: 'direct' as const };
       },
-      async listVoices(profile, signal) {
+      async listVoices(profile) {
         assertProfile(profile, 'minimax');
-        try {
-          const upstream = buildMinimaxVoiceListRequest(profile);
-          const response = await fetcher(upstream.url, {
-            method: 'POST',
-            headers: upstream.headers,
-            body: JSON.stringify(upstream.payload),
-            signal,
-          });
-          const bytes = await readStructuredResponse(response, 'MiniMax 音色列表', profile);
-          return normalizeDiscoveredMinimaxVoices(parseMinimaxVoiceListResponse(bytes), profile.id);
-        } catch (error) {
-          return withRedactedError(error, profile);
-        }
+        return getStaticVoiceCatalog(profile);
       },
       async synthesize(profile, request) {
         const payload = buildMinimaxPayload(profile, request);
@@ -441,13 +514,9 @@ export function createProviderRegistry({
       },
     },
     'xiaomi-mimo': {
-      async probe(profile) {
-        buildMimoPayload(profile, {
-          text: '配置检查',
-          voice: { providerProfileId: profile.id, voiceId: profile.defaultVoiceId },
-          signal: new AbortController().signal,
-        });
-        return { ok: true, mode: 'direct', configured: true, unverified: true };
+      async probe(profile, signal) {
+        const result = await probeBySynthesis(profile, request => this.synthesize(profile, request), signal);
+        return { ...result, mode: 'direct' as const };
       },
       async listVoices(profile) {
         assertProfile(profile, 'xiaomi-mimo');
@@ -469,6 +538,62 @@ export function createProviderRegistry({
           return { blob: blobFromBytes(audioBytes, mimeType), mimeType };
         } catch (error) {
           return withRedactedError(error, profile);
+        }
+      },
+    },
+    fish: {
+      async probe(profile, signal) {
+        assertProfile(profile, 'fish');
+        // 上游 `POST /v1/tts` 的 CORS 预检 404，合成只能经酒馆同源 /proxy，所以 probe 直接真实合成"你好"。
+        // 音色优先 Profile 默认，否则回落到公开音色市场第一条（`GET /model` 可浏览器直连）。
+        let voiceId = String(profile.defaultVoiceId || '').trim();
+        if (!voiceId) {
+          const voices = await this.listVoices(profile, signal);
+          voiceId = voices[0]?.voiceId || '';
+        }
+        if (!voiceId) throw new Error('Fish 音色目录为空，请先在 Profile 里填写默认音色 ID');
+        const result = await probeBySynthesis(profile, request => this.synthesize(profile, request), signal, voiceId);
+        return { ...result, mode: 'proxy' as const };
+      },
+      async listVoices(profile, signal) {
+        assertProfile(profile, 'fish');
+        try {
+          const upstream = buildFishModelListRequest();
+          const response = await fetcher(upstream.url, { method: 'GET', signal });
+          const bytes = await readStructuredResponse(response, 'Fish 音色列表', profile);
+          return normalizeDiscoveredFishVoices(parseFishVoiceListResponse(bytes), profile.id);
+        } catch (error) {
+          return withRedactedError(error, profile);
+        }
+      },
+      async synthesize(profile, request) {
+        assertProfile(profile, 'fish');
+        const timeout = withSynthesisTimeout(request.signal, 'Fish');
+        try {
+          const upstream = buildFishSynthesisRequest({
+            apiKey: String(profile.apiKey || '').trim(),
+            model: String(profile.model || '').trim(),
+            voiceId: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
+            text: ensureText(request?.text),
+            format: String(profile.responseFormat || 'mp3').trim(),
+          });
+          const response = await fetcher(upstream.url, {
+            method: 'POST',
+            headers: upstream.headers,
+            body: JSON.stringify(upstream.payload),
+            signal: timeout.signal,
+          });
+          return await readProxyAudio(response, 'Fish', profile);
+        } catch (error) {
+          if (error instanceof TypeError) {
+            throw new Error(
+              redactProviderSecrets('Fish 网络错误：无法连接酒馆 /proxy（检查酒馆是否运行、页面是否已登录）', profile),
+              { cause: error },
+            );
+          }
+          return withRedactedError(error, profile);
+        } finally {
+          timeout.dispose();
         }
       },
     },

@@ -1,6 +1,9 @@
 import {
+  createManualCastEntry,
+  findCastingEntryError,
   generateCastingTable,
   isStaleCastingInputError,
+  parseAliasInput,
   parseCastingResult,
   stopCasting,
 } from '../src/杠杠の配音室/casting';
@@ -9,6 +12,7 @@ import {
   createCastingInputSignature,
   deriveCharacterKey,
   readCurrentCastingContext,
+  readFullCastingContext,
   sanitizeVoiceOptions,
 } from '../src/杠杠の配音室/context';
 import {
@@ -31,7 +35,7 @@ import {
   markVoiceAuditError,
   voiceAudit,
 } from '../src/杠杠の配音室/audit';
-import type { VoiceOption } from '../src/杠杠の配音室/types';
+import type { CastEntry, VoiceOption } from '../src/杠杠の配音室/types';
 import type { ScriptVariables } from '../src/杠杠の配音室/settings';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -164,6 +168,77 @@ const runCastingTests = async (): Promise<void> => {
   equal(context.recentMessages.length, 3, '上下文应只包含最近消息');
   assert(!JSON.stringify(context).includes('should-not-be-copied'), '上下文不能复制整张角色卡原始 JSON');
 
+  const longWorldbookContent = '长'.repeat(25_000);
+  const fullContext = await readFullCastingContext(3, {
+    getCharData: () => ({ name: '小葵', avatar: 'aoi-avatar.png' }),
+    getCurrentCharacterName: () => '小葵',
+    getCurrentCharacterId: () => 'aoi-avatar.png',
+    getLastMessageId: () => 11,
+    getChatMessages: () => [],
+    getCurrentPersonaName: () => '阿月',
+    getPersona: () => ({ name: '阿月', description: '旅行中的旁听者', lorebook: 'user-book' }),
+    getCharWorldbookNames: () => ({ primary: 'char-book', additional: ['extra-book', ''] }),
+    getWorldbook: async (name: string) => {
+      if (name === 'char-book') {
+        return [
+          { uid: 0, name: '设定A', enabled: true, content: longWorldbookContent },
+          { uid: 1, name: '停用条目', enabled: false, content: '停用内容不应出现' },
+          { uid: 2, name: '空条目', enabled: true, content: '   ' },
+        ];
+      }
+      if (name === 'extra-book') return [{ uid: 5, name: '设定B', enabled: true, content: '附加内容' }];
+      if (name === 'user-book') return [{ uid: 9, name: '用户设定', enabled: true, content: '用户背景' }];
+      return [];
+    },
+  });
+  equal(fullContext.userName, '阿月', '完整上下文应包含用户 persona 名称');
+  equal(fullContext.userDescription, '旅行中的旁听者', '完整上下文应包含用户设定描述');
+  equal(
+    fullContext.worldbookEntries.map(entry => [entry.worldbook, entry.uid]),
+    [
+      ['char-book', 0],
+      ['extra-book', 5],
+      ['user-book', 9],
+    ],
+    '世界书条目顺序应为 char primary → char additional → persona，且只保留启用条目',
+  );
+  equal(
+    fullContext.worldbookEntries[0].content.length,
+    25_000,
+    '世界书条目内容不设上限、不得截断',
+  );
+  assert(
+    !JSON.stringify(fullContext.worldbookEntries).includes('停用内容不应出现'),
+    '未启用条目不能进入配音上下文',
+  );
+
+  const personaFallbackContext = await readFullCastingContext(1, {
+    getCharData: () => null,
+    getCurrentCharacterName: () => '角色',
+    getCurrentCharacterId: () => '',
+    getLastMessageId: () => 0,
+    getChatMessages: () => [],
+    getCurrentPersonaName: () => null,
+  });
+  equal(personaFallbackContext.userName, '', '没有 persona 时用户名应为空字符串');
+  equal(personaFallbackContext.worldbookEntries, [], '没有 persona 与角色世界书时条目应为空');
+
+  const tolerantContext = await readFullCastingContext(1, {
+    getCharData: () => null,
+    getCurrentCharacterName: () => '角色',
+    getCurrentCharacterId: () => '',
+    getLastMessageId: () => 0,
+    getChatMessages: () => [],
+    getCurrentPersonaName: () => '阿月',
+    getPersona: () => ({ name: '阿月', description: '', lorebook: 'broken-book' }),
+    getCharWorldbookNames: () => ({ primary: 'broken-book', additional: [] }),
+    getWorldbook: async () => {
+      throw new Error('世界书读取失败');
+    },
+  });
+  equal(tolerantContext.userName, '阿月', '世界书读取失败不应影响 persona 资料进入上下文');
+  equal(tolerantContext.worldbookEntries, [], 'getWorldbook 抛错时对应世界书应被跳过而不中断');
+
   const voiceOptions: VoiceOption[] = [
     { providerProfileId: 'doubao-1', voiceId: 'speaker-a', name: '清亮女声', locale: 'zh-CN', tags: ['bright'] },
     { providerProfileId: 'edge-1', voiceId: 'en-US-AriaNeural', name: 'Aria' },
@@ -213,6 +288,15 @@ const runCastingTests = async (): Promise<void> => {
   assert(
     createCastingInputSignature(context, voiceOptions.slice(0, 1), 3, signatureProfiles) !== baseSignature,
     '可用音色目录变化必须使配音表输入过期',
+  );
+  assert(
+    createCastingInputSignature(
+      { ...fullContext, worldbookEntries: fullContext.worldbookEntries.slice(1) },
+      voiceOptions,
+      3,
+      signatureProfiles,
+    ) !== createCastingInputSignature(fullContext, voiceOptions, 3, signatureProfiles),
+    '世界书条目变化必须使配音表输入过期',
   );
 
   const validModelResult = JSON.stringify({
@@ -378,6 +462,26 @@ const runCastingTests = async (): Promise<void> => {
     staleRejected = isStaleCastingInputError(caught);
   }
   assert(staleRejected, '生成返回时输入已变化必须丢弃旧配音表');
+  inputCurrent = true;
+  let asyncStaleRejected = false;
+  try {
+    await generateCastingTable({
+      context,
+      voices: voiceOptions,
+      generationId: 'casting-stale-async',
+      isInputCurrent: async () => inputCurrent,
+      runtime: {
+        generateRaw: async () => {
+          inputCurrent = false;
+          return validModelResult;
+        },
+        stopGenerationById: () => true,
+      },
+    });
+  } catch (caught) {
+    asyncStaleRejected = isStaleCastingInputError(caught);
+  }
+  assert(asyncStaleRejected, 'isInputCurrent 返回 Promise 时同样必须丢弃过期配音表');
   const compactGenerated = await generateCastingTable({
     context,
     voices: voiceOptions,
@@ -412,6 +516,24 @@ const runCastingTests = async (): Promise<void> => {
     assert(capturedPromptText.includes(field), `prompt 必须明确要求 ${field}`);
   });
   assert(!capturedPromptText.includes('secret-key'), 'prompt 不能包含 TTS API key');
+  let fullCapturedConfig: unknown;
+  await generateCastingTable({
+    context: fullContext,
+    voices: voiceOptions,
+    generationId: 'casting-full-1',
+    runtime: {
+      generateRaw: async config => {
+        fullCapturedConfig = config;
+        return validModelResult;
+      },
+      stopGenerationById: () => true,
+    },
+  });
+  const fullPromptText = JSON.stringify((fullCapturedConfig as { ordered_prompts?: unknown[] }).ordered_prompts ?? []);
+  assert(fullPromptText.includes('阿月'), 'prompt 应包含用户 persona 名称');
+  assert(fullPromptText.includes('旅行中的旁听者'), 'prompt 应包含用户设定描述');
+  assert(fullPromptText.includes('用户背景'), 'prompt 应包含启用的世界书条目内容');
+  assert(!fullPromptText.includes('停用内容不应出现'), 'prompt 不得包含未启用的世界书条目');
   assert(
     stopCasting('casting-test-1', { stopGenerationById: id => (stoppedId = id) === id, generateRaw: async () => '' }),
     '应能停止指定配音表生成',
@@ -530,6 +652,41 @@ const runCastingTests = async (): Promise<void> => {
         voiceOptions,
       ),
     'Gemini narrator 选择请求外 pair 时必须拒绝',
+  );
+
+  equal(parseAliasInput(' 小甲 、小乙，小丙 , 小甲 '), ['小甲', '小乙', '小丙'], '别名输入应切分、trim 并去重');
+  equal(parseAliasInput('  '), [], '纯空白别名输入应得到空数组');
+  const manualA = createManualCastEntry('character', { providerProfileId: 'doubao-1', voiceId: 'speaker-a' }, 1);
+  const manualB = createManualCastEntry('fallback', { providerProfileId: 'edge-1', voiceId: 'en-US-AriaNeural' }, 2);
+  assert(manualA.id !== manualB.id, '手动条目 id 必须唯一');
+  equal(manualA.displayName, '角色2', '手动条目应带占位名称');
+  equal(manualA.voice, { providerProfileId: 'doubao-1', voiceId: 'speaker-a' }, '手动条目应保留给定音色');
+  const entryFixture = (role: 'narrator' | 'character' | 'fallback', displayName: string, aliases: string[] = []): CastEntry => ({
+    id: `fixture-${role}-${displayName}`,
+    role,
+    displayName,
+    aliases,
+    voice: { providerProfileId: 'doubao-1', voiceId: 'speaker-a' },
+  });
+  equal(
+    findCastingEntryError([entryFixture('narrator', '旁白'), entryFixture('character', '角色甲')]),
+    null,
+    '合法的手动编辑应通过校验',
+  );
+  assert(findCastingEntryError([]) !== null, '空配音表必须报错');
+  assert(findCastingEntryError([entryFixture('character', '角色甲')]) !== null, '缺少旁白必须报错');
+  assert(
+    findCastingEntryError([
+      entryFixture('narrator', '旁白'),
+      entryFixture('character', '角色甲'),
+      entryFixture('fallback', '角色甲'),
+    ]) !== null,
+    '手动编辑造成重名时必须报错',
+  );
+  assert(findCastingEntryError([entryFixture('narrator', '  ')]) !== null, '名称为空白时必须报错');
+  assert(
+    findCastingEntryError([entryFixture('narrator', '旁白'), entryFixture('character', '角色甲', ['旁白'])]) !== null,
+    '别名与其他角色名称冲突时必须报错',
   );
 
   saveCastingTable(table, variableApi);

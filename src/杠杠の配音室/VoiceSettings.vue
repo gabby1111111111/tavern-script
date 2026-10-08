@@ -63,6 +63,7 @@
                 <option value="doubao">豆包</option>
                 <option value="minimax">MiniMax</option>
                 <option value="xiaomi-mimo">小米 MiMo</option>
+                <option value="fish">Fish Audio</option>
               </select>
             </label>
             <label v-if="profile.type === 'openai-compatible'" class="ganggang-voice-field">
@@ -74,8 +75,12 @@
               <input v-model="profile.apiKey" type="password" autocomplete="off" />
             </label>
             <p v-if="profile.type === 'doubao'" class="ganggang-voice-hint">
-              新版控制台只填 API Key；旧版请留空 API Key，再填写 APP ID 和 Access Key。请求由 SillyTavern
-              同源桥接转发，连接测试只验证桥接能力，不会联网校验凭据。
+              新版控制台只填 API Key；旧版请留空 API Key，再填写 APP ID 和 Access Key。请求由浏览器直连豆包
+              语音合成接口；连接测试会真实合成一句"你好"来验证凭据（消耗极少量额度）。
+            </p>
+            <p v-if="profile.type === 'fish'" class="ganggang-voice-hint">
+              Fish 合成经酒馆自带的 /proxy 转发：请先在 config.yaml 打开 enableCorsProxy 并重启酒馆。音色市场
+              （GET /model）不需要该开关；模型留空时使用免费档 s2.1-pro-free。
             </p>
             <label v-if="profile.type === 'doubao'" class="ganggang-voice-field">
               <span>APP ID（旧版）</span>
@@ -95,6 +100,10 @@
                 <option value="cn">中国大陆</option>
                 <option value="io">国际站</option>
               </select>
+            </label>
+            <label v-if="profile.type === 'minimax'" class="ganggang-voice-field">
+              <span>Group ID</span>
+              <input v-model.trim="profile.groupId" type="text" autocomplete="off" placeholder="控制台 → 账户管理 → 基本信息" />
             </label>
             <label v-if="profile.type !== 'edge' && profile.type !== 'doubao'" class="ganggang-voice-field">
               <span>模型</span>
@@ -134,7 +143,7 @@
           <div class="ganggang-voice-card-header">
             <div>
               <strong>{{ currentCharacterName || '当前角色卡' }}</strong>
-              <p class="ganggang-voice-hint">只发送角色设定、最近聊天和音色元数据，不发送任何 TTS 密钥。</p>
+              <p class="ganggang-voice-hint">发送角色设定、用户 persona 设定、绑定世界书的启用条目、最近聊天和音色元数据，不发送任何 TTS 密钥。</p>
             </div>
             <button class="menu_button" type="button" :disabled="castingBusy" @click="runtime.generateCasting">
               {{ castingBusy ? 'AI 正在选声…' : '一键 AI 配音' }}
@@ -146,7 +155,11 @@
           <div v-for="entry in currentCasting.entries" :key="entry.id" class="ganggang-voice-grid">
             <label class="ganggang-voice-field">
               <span>{{ roleLabel(entry.role) }}</span>
-              <input v-model.trim="entry.displayName" type="text" />
+              <input :value="entry.displayName" type="text" @change="setEntryDisplayName(entry, $event)" />
+            </label>
+            <label class="ganggang-voice-field">
+              <span>别名（顿号分隔）</span>
+              <input :value="entry.aliases.join('、')" type="text" @change="setEntryAliases(entry, $event)" />
             </label>
             <label class="ganggang-voice-field">
               <span>来源</span>
@@ -169,6 +182,15 @@
               </select>
             </label>
             <p v-if="entry.reason" class="ganggang-voice-hint">{{ entry.reason }}</p>
+            <div class="ganggang-voice-actions">
+              <button v-if="entry.role !== 'narrator'" class="menu_button" type="button" @click="promoteToNarrator(entry)">
+                设为旁白
+              </button>
+              <button class="menu_button" type="button" @click="removeCastEntry(entry)">删除</button>
+            </div>
+          </div>
+          <div class="ganggang-voice-actions">
+            <button class="menu_button" type="button" @click="addCastEntry">新增角色</button>
           </div>
         </article>
         <p v-else class="ganggang-voice-hint">还没有本角色卡的配音表。先读取音色，再点“一键 AI 配音”。</p>
@@ -303,6 +325,99 @@
         </article>
       </template>
 
+      <template v-else-if="activeTab === 'audition'">
+        <article class="ganggang-voice-card">
+          <div class="ganggang-voice-grid">
+            <label class="ganggang-voice-field">
+              <span>引擎来源</span>
+              <select v-model="auditionProfileId">
+                <option v-for="profile in enabledProfiles" :key="profile.id" :value="profile.id">
+                  {{ profile.name || profile.id }}
+                </option>
+              </select>
+            </label>
+            <label class="ganggang-voice-field">
+              <span>音色（可手填 voiceId）</span>
+              <input
+                v-model.trim="auditionVoiceId"
+                type="text"
+                list="ganggang-voice-options"
+                :placeholder="auditionProfile ? `留空则用默认音色 ${auditionProfile.defaultVoiceId || '（未设置）'}` : '留空则用默认音色'"
+              />
+            </label>
+          </div>
+          <p class="ganggang-voice-hint">
+            已读取 {{ auditionProfile ? voicesFor(auditionProfile.id).length : 0 }} 个候选音色；不在列表里的 voiceId
+            可直接手填。
+          </p>
+
+          <label class="ganggang-voice-field">
+            <span>例句</span>
+            <textarea v-model="auditionText" rows="3"></textarea>
+          </label>
+
+          <label v-if="auditionProfileType === 'xiaomi-mimo'" class="ganggang-voice-field">
+            <span>导演台本（user 指令，可留空）</span>
+            <textarea v-model="auditionInstruction" rows="3" placeholder="角色：… 场景：… 指导：…"></textarea>
+          </label>
+          <label v-else-if="auditionProfileType === 'doubao'" class="ganggang-voice-field">
+            <span>导演指令 context_texts（可留空，不计费）</span>
+            <input v-model.trim="auditionContextText" type="text" placeholder="用黏人撒娇的语气，尾音上扬…" />
+          </label>
+          <label v-else-if="auditionProfileType === 'minimax'" class="ganggang-voice-field">
+            <span>情绪档位</span>
+            <select v-model="auditionEmotion">
+              <option value="">不指定</option>
+              <option value="happy">happy · 开心</option>
+              <option value="sad">sad · 难过</option>
+              <option value="angry">angry · 生气</option>
+              <option value="neutral">neutral · 平静</option>
+            </select>
+          </label>
+          <p v-else-if="auditionProfileType === 'fish'" class="ganggang-voice-hint">
+            Fish 用 FAS2 情绪标签：把 [happy]、[slight pause] 等直接写进例句即可。
+          </p>
+          <p v-else class="ganggang-voice-hint">当前来源没有原生情绪控制；情绪例句请换用小米/豆包/MiniMax/Fish。</p>
+
+          <div class="ganggang-voice-actions">
+            <button class="menu_button" type="button" :disabled="auditionBusy" @click="startAudition">
+              {{ auditionBusy ? '合成中…' : '试听' }}
+            </button>
+            <span class="ganggang-voice-hint">样本会进入"最近 10 条"，可重播/下载。</span>
+          </div>
+        </article>
+
+        <article class="ganggang-voice-card">
+          <div class="ganggang-voice-card-header">
+            <strong>测试连接</strong>
+            <button
+              class="menu_button"
+              type="button"
+              :disabled="providerBusy"
+              @click="probeAllEnabledProfiles"
+            >
+              全部测试
+            </button>
+          </div>
+          <p class="ganggang-voice-hint">
+            对每个启用的来源真实合成一句"你好"，验证凭据与额度（消耗极少量额度）。
+          </p>
+          <div v-for="profile in enabledProfiles" :key="`probe-${profile.id}`" class="ganggang-voice-probe-row">
+            <span :class="probeDotClass(profile.id)"></span>
+            <strong>{{ profile.name || profile.id }}</strong>
+            <button
+              class="menu_button"
+              type="button"
+              :disabled="providerBusy"
+              @click="runtime.probeAndLoadVoices(profile.id)"
+            >
+              {{ probeStateFor(profile.id) === 'busy' ? '测试中…' : '测试连接' }}
+            </button>
+            <span class="ganggang-voice-hint">{{ probeMessageFor(profile.id) || '未测试' }}</span>
+          </div>
+        </article>
+      </template>
+
       <template v-else>
         <div class="ganggang-voice-card-header">
           <span class="ganggang-voice-hint">最多 10 条；刷新网页即清空。</span>
@@ -338,9 +453,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
+import { createManualCastEntry, findCastingEntryError, parseAliasInput } from './casting';
 import type { VoiceRuntime } from './runtime';
-import type { CastRole, RecentVoiceStatus, VoiceOption } from './types';
+import type { CastEntry, CastRole, RecentVoiceStatus, VoiceOption } from './types';
 
 const props = defineProps<{ runtime: VoiceRuntime }>();
 const runtime = props.runtime;
@@ -361,6 +477,7 @@ const currentCharacterName = runtime.currentCharacterName;
 const tabs = [
   { value: 'sources', label: 'TTS 来源' },
   { value: 'casting', label: 'AI 配音表' },
+  { value: 'audition', label: '试音台' },
   { value: 'reading', label: '朗读方式' },
   { value: 'recent', label: '最近 10 条' },
 ] as const;
@@ -402,6 +519,100 @@ function roleLabel(role: CastRole): string {
   return '角色';
 }
 
+function currentCastingEntries(): CastEntry[] | null {
+  const table = currentCasting.value;
+  return table ? table.entries : null;
+}
+
+function applyCastingEntries(next: CastEntry[]): boolean {
+  const table = currentCasting.value;
+  if (!table) return false;
+  const problem = findCastingEntryError(next);
+  if (problem) {
+    error.value = problem;
+    return false;
+  }
+  table.entries = next;
+  error.value = '';
+  return true;
+}
+
+function setEntryDisplayName(entry: CastEntry, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const next = input.value.trim();
+  if (next === entry.displayName) {
+    input.value = entry.displayName;
+    return;
+  }
+  const previous = entry.displayName;
+  entry.displayName = next;
+  const entries = currentCastingEntries();
+  if (!entries || !applyCastingEntries(entries)) {
+    entry.displayName = previous;
+    input.value = previous;
+  }
+}
+
+function setEntryAliases(entry: CastEntry, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const next = parseAliasInput(input.value);
+  if (next.join('、') === entry.aliases.join('、')) {
+    input.value = entry.aliases.join('、');
+    return;
+  }
+  const previous = entry.aliases;
+  entry.aliases = next;
+  const entries = currentCastingEntries();
+  if (!entries || !applyCastingEntries(entries)) {
+    entry.aliases = previous;
+    input.value = previous.join('、');
+  }
+}
+
+function removeCastEntry(entry: CastEntry): void {
+  if (entry.role === 'narrator') {
+    error.value = '旁白是配音表必需身份，不能删除。';
+    return;
+  }
+  const entries = currentCastingEntries();
+  if (!entries) return;
+  if (entries.length <= 1) {
+    error.value = '配音表至少需要保留一项音色映射。';
+    return;
+  }
+  applyCastingEntries(entries.filter(item => item.id !== entry.id));
+}
+
+function promoteToNarrator(entry: CastEntry): void {
+  const entries = currentCastingEntries();
+  if (!entries || entry.role === 'narrator') return;
+  const next = entries.map(item => {
+    if (item.id === entry.id) return { ...item, role: 'narrator' as const };
+    if (item.role === 'narrator') return { ...item, role: 'character' as const };
+    return item;
+  });
+  applyCastingEntries(next);
+}
+
+function addCastEntry(): void {
+  const entries = currentCastingEntries();
+  if (!entries) return;
+  const profile = enabledProfiles.value[0];
+  const voice = profile ? voicesFor(profile.id)[0] : null;
+  if (!profile || !voice) {
+    error.value = '请先在 TTS 来源里启用来源并读取至少一个音色。';
+    return;
+  }
+  const taken = new Set(
+    entries.flatMap(item => [item.displayName, ...item.aliases].map(name => name.trim().toLowerCase())),
+  );
+  let ordinal = entries.length + 1;
+  while (taken.has(`角色${ordinal}`.toLowerCase())) ordinal += 1;
+  const entry = createManualCastEntry('character', { providerProfileId: profile.id, voiceId: voice.voiceId }, ordinal - 1);
+  entry.displayName = `角色${ordinal}`;
+  applyCastingEntries([...entries, entry]);
+}
+
 function recentStatus(value: RecentVoiceStatus): string {
   const labels: Record<RecentVoiceStatus, string> = {
     generating: '生成中',
@@ -412,5 +623,67 @@ function recentStatus(value: RecentVoiceStatus): string {
     cancelled: '已取消',
   };
   return labels[value];
+}
+
+const DEFAULT_AUDITION_TEXT =
+  '你还在生气吗……我错啦，真的。晚上请你吃火锅，好不好嘛？我还给你带了那家的栗子，就是……在路上被压扁了几个。';
+const auditionProfileId = ref('');
+const auditionVoiceId = ref('');
+const auditionText = ref(DEFAULT_AUDITION_TEXT);
+const auditionInstruction = ref('');
+const auditionContextText = ref('');
+const auditionEmotion = ref('');
+const auditionProfile = computed(() => {
+  const list = enabledProfiles.value;
+  return list.find(profile => profile.id === auditionProfileId.value) ?? list[0] ?? null;
+});
+const auditionProfileType = computed(() => auditionProfile.value?.type ?? '');
+
+watch(
+  () => enabledProfiles.value.map(profile => profile.id).join('\u0000'),
+  () => {
+    if (!enabledProfiles.value.some(profile => profile.id === auditionProfileId.value)) {
+      auditionProfileId.value = enabledProfiles.value[0]?.id ?? '';
+    }
+  },
+  { immediate: true },
+);
+
+function probeStateFor(profileId: string): string {
+  return runtime.providerProbeStatus.value[profileId]?.state ?? 'idle';
+}
+
+const PROBE_DOT_CLASSES: Record<string, string> = {
+  idle: 'ganggang-voice-probe-dot',
+  busy: 'ganggang-voice-probe-dot is-busy',
+  ok: 'ganggang-voice-probe-dot is-ok',
+  fail: 'ganggang-voice-probe-dot is-fail',
+};
+
+function probeDotClass(profileId: string): string {
+  return PROBE_DOT_CLASSES[probeStateFor(profileId)] ?? PROBE_DOT_CLASSES.idle;
+}
+
+function probeMessageFor(profileId: string): string {
+  return runtime.providerProbeStatus.value[profileId]?.message ?? '';
+}
+
+async function probeAllEnabledProfiles(): Promise<void> {
+  // probeAndLoadVoices 是单飞设计（新探测会废止旧探测），必须顺序执行。
+  for (const profile of enabledProfiles.value) {
+    await runtime.probeAndLoadVoices(profile.id);
+  }
+}
+
+async function startAudition(): Promise<void> {
+  const profile = auditionProfile.value;
+  if (!profile) {
+    return;
+  }
+  await runtime.synthesizeAudition(profile.id, auditionVoiceId.value, auditionText.value, {
+    instruction: auditionInstruction.value.trim() || undefined,
+    contextText: auditionContextText.value.trim() || undefined,
+    emotion: auditionEmotion.value || undefined,
+  });
 }
 </script>

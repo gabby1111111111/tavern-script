@@ -1,5 +1,5 @@
 import type { TtsProviderProfile, VoiceOption } from '../types';
-import type { DiscoveredMinimaxVoice } from './cloud-request';
+import type { DiscoveredFishVoice } from './cloud-request';
 
 type CatalogVoice = Omit<VoiceOption, 'providerProfileId'>;
 
@@ -23,6 +23,11 @@ const EDGE_VOICES: ReadonlyArray<CatalogVoice> = [
 ];
 
 const DOUBAO_VOICE_ROWS: ReadonlyArray<readonly [string, string, 'Male' | 'Female']> = [
+  ['开朗弟弟', 'zh_male_kailangdidi_uranus_bigtts', 'Male'],
+  ['vivi 2.0', 'zh_female_vv_uranus_bigtts', 'Female'],
+  ['温柔男友', 'ICL_uranus_zh_male_wenrounanyou_tob', 'Male'],
+  ['撒娇男友', 'ICL_uranus_zh_male_sajiaonanyou_tob', 'Male'],
+  ['粘人男友', 'ICL_uranus_zh_male_nianrennanyou_tob', 'Male'],
   ['傲气凌人', 'ICL_uranus_zh_male_aoqilingren_tob', 'Male'],
   ['傲娇公子', 'ICL_uranus_zh_male_aojiaogongzi_tob', 'Male'],
   ['病娇弟弟', 'ICL_uranus_zh_male_bingjiaodidi_tob', 'Male'],
@@ -67,9 +72,18 @@ const MIMO_VOICES: ReadonlyArray<CatalogVoice> = [
   { voiceId: 'Dean', name: 'Dean', locale: 'en-US', gender: 'Male' },
 ];
 
+// MiniMax 的 get_voice 目录接口已改版 404（2026-09-27 实测），v1 采用内置精选清单。
+const MINIMAX_VOICES: ReadonlyArray<CatalogVoice> = [
+  { voiceId: 'male-qn-qingse', name: '青涩青年', locale: 'zh-CN', gender: 'Male' },
+  { voiceId: 'male-qn-jingying', name: '精英青年', locale: 'zh-CN', gender: 'Male' },
+  { voiceId: 'male-qn-badao', name: '霸道少爷', locale: 'zh-CN', gender: 'Male' },
+  { voiceId: 'male-qn-daxuesheng', name: '男大学生', locale: 'zh-CN', gender: 'Male' },
+];
+
 export const EDGE_VOICE_CATALOG: ReadonlyArray<CatalogVoice> = EDGE_VOICES;
 export const DOUBAO_VOICE_CATALOG: ReadonlyArray<CatalogVoice> = DOUBAO_VOICES;
 export const MIMO_VOICE_CATALOG: ReadonlyArray<CatalogVoice> = MIMO_VOICES;
+export const MINIMAX_VOICE_CATALOG: ReadonlyArray<CatalogVoice> = MINIMAX_VOICES;
 
 function normalizeVoice(value: CatalogVoice, providerProfileId: string): VoiceOption {
   return { providerProfileId, ...value };
@@ -86,10 +100,10 @@ function includeProfileDefaultVoice(catalog: ReadonlyArray<CatalogVoice>, profil
   return result;
 }
 
-export function normalizeDiscoveredMinimaxVoices(
-  voices: DiscoveredMinimaxVoice[],
+export function normalizeDiscoveredFishVoices(
+  voices: DiscoveredFishVoice[],
   providerProfileId: string,
-  limit = 2_000,
+  limit = 500,
 ): VoiceOption[] {
   const result: VoiceOption[] = [];
   const seen = new Set<string>();
@@ -103,14 +117,12 @@ export function normalizeDiscoveredMinimaxVoices(
       normalizeVoice(
         {
           voiceId,
-          name:
-            String(value?.name || voiceId)
-              .trim()
-              .slice(0, 300) || voiceId,
+          name: String(value?.name || voiceId)
+            .trim()
+            .slice(0, 300) || voiceId,
           description: String(value?.description || '')
             .trim()
             .slice(0, 1_000),
-          tags: value?.kind ? [value.kind] : undefined,
         },
         providerProfileId,
       ),
@@ -125,6 +137,7 @@ export function getStaticVoiceCatalog(profile: TtsProviderProfile): VoiceOption[
   if (profile.type === 'edge') return includeProfileDefaultVoice(EDGE_VOICE_CATALOG, profile);
   if (profile.type === 'doubao') return includeProfileDefaultVoice(DOUBAO_VOICE_CATALOG, profile);
   if (profile.type === 'xiaomi-mimo') return includeProfileDefaultVoice(MIMO_VOICE_CATALOG, profile);
+  if (profile.type === 'minimax') return includeProfileDefaultVoice(MINIMAX_VOICE_CATALOG, profile);
   if (profile.defaultVoiceId) {
     return [
       normalizeVoice(
