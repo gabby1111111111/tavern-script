@@ -31,7 +31,10 @@ export function normalizeFishRequest(body) {
 
     const apiKey = readStringField(body, 'apiKey', { required: true, maxCharacters: MAX_API_KEY_CHARACTERS });
     const text = readStringField(body, 'text', { required: true, maxCharacters: MAX_TEXT_CHARACTERS });
-    const referenceId = readStringField(body, 'referenceId', { required: true, maxCharacters: 500 });
+    const referenceId = readStringField(body, 'referenceId', {
+        required: true,
+        maxCharacters: MAX_REFERENCE_ID_CHARACTERS,
+    });
     const format = readStringField(body, 'format', { maxCharacters: 8 }) || 'mp3';
     if (format !== 'mp3' && format !== 'wav') throw bridgeError('VALIDATION_ERROR', 400);
     // Fish 的模型选择在请求头 model 里；缺省 s2.1-pro-free（免费档，不扣 API credit）
@@ -44,10 +47,13 @@ export function normalizeFishRequest(body) {
 
 export function buildFishUpstreamRequest(body) {
     const input = normalizeFishRequest(body);
+    const mimeType = input.format === 'wav' ? 'audio/wav' : 'audio/mpeg';
     return {
         url: FISH_TTS_ENDPOINT,
+        // 响应回传用的 MIME：和 Accept 用同一个值算一次，免得上游请求体被当作 MIME 来源。
+        mimeType,
         headers: {
-            Accept: input.format === 'wav' ? 'audio/wav' : 'audio/mpeg',
+            Accept: mimeType,
             'Content-Type': 'application/json',
             Authorization: `Bearer ${input.apiKey}`,
             model: input.model,
@@ -101,7 +107,7 @@ export function createFishBridge(options = {}) {
             if (!audio.length) throw bridgeError('INVALID_UPSTREAM_RESPONSE', 502);
             if (abortContext.cause === 'timeout') throw bridgeError('UPSTREAM_TIMEOUT', 504);
             if (abortContext.cause === 'client') throw bridgeError('CLIENT_ABORTED', 499);
-            sendAudio(res, audio, inputMimeType(upstreamRequest));
+            sendAudio(res, audio, upstreamRequest.mimeType);
         } catch (error) {
             if (error instanceof DoubaoBridgeError) abortContext?.abort('internal');
             sendJsonError(res, classifyFailure(error, abortContext));
@@ -111,8 +117,4 @@ export function createFishBridge(options = {}) {
     }
 
     return Object.freeze({ synthesize });
-}
-
-function inputMimeType(upstreamRequest) {
-    return upstreamRequest.payload.format === 'wav' ? 'audio/wav' : 'audio/mpeg';
 }

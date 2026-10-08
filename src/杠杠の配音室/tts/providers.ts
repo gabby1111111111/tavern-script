@@ -20,7 +20,19 @@ export const MAX_TTS_WIRE_BYTES = Math.ceil((MAX_TTS_RESPONSE_BYTES * 4) / 3) + 
 export const MAX_PROXY_AUDIO_BYTES = 25 * 1024 * 1024;
 /** Fish 经 `/proxy` 合成的硬超时，避免上游不响应时永远转圈。 */
 export const PROXY_SYNTHESIS_TIMEOUT_MS = 120_000;
-const TTS_RESPONSE_TOO_LARGE = 'TTS response is too large';
+/** probe 的硬超时：比合成超时短，让"检查 TTS"在凭据/网络有问题时能较快给出可读结果。 */
+export const PROBE_TIMEOUT_MS = 45_000;
+
+/**
+ * 内部信号错误：响应超过大小闸门。
+ * 用类型而不是比对错误文案，避免以后改文案时把判定悄悄弄坏。
+ */
+class TtsResponseTooLargeError extends Error {
+  constructor() {
+    super('TTS response is too large');
+    this.name = 'TtsResponseTooLargeError';
+  }
+}
 
 export type ProviderProbeResult = {
   ok: true;
@@ -77,18 +89,18 @@ export function redactProviderSecrets(value: unknown, profile: TtsProviderProfil
 
 async function readLimitedBytes(response: Response, maxBytes = MAX_TTS_RESPONSE_BYTES): Promise<Uint8Array> {
   const declaredLength = Number(response.headers?.get?.('content-length') || 0);
-  if (declaredLength > maxBytes) throw new Error(TTS_RESPONSE_TOO_LARGE);
+  if (declaredLength > maxBytes) throw new TtsResponseTooLargeError();
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.length > maxBytes) throw new Error(TTS_RESPONSE_TOO_LARGE);
+  if (bytes.length > maxBytes) throw new TtsResponseTooLargeError();
   return bytes;
 }
 
-/** 把内部英文超限错误翻成带供应商标签的中文原因，避免英文内部标识外泄到界面。 */
+/** 把内部超限信号翻成带供应商标签的中文原因，避免英文内部标识外泄到界面。 */
 async function readBoundedBytes(response: Response, label: string, maxBytes: number): Promise<Uint8Array> {
   try {
     return await readLimitedBytes(response, maxBytes);
   } catch (error) {
-    if (error instanceof Error && error.message === TTS_RESPONSE_TOO_LARGE) {
+    if (error instanceof TtsResponseTooLargeError) {
       throw new Error(`${label}数据超过大小限制`, { cause: error });
     }
     throw error;
@@ -165,34 +177,29 @@ async function probeBySynthesis(
 ): Promise<ProviderProbeResult> {
   const voiceId = String(voiceIdOverride || probeVoiceFor(profile)).trim();
   if (!voiceId) throw new Error(`${profile.name || 'TTS'} 缺少可用的默认音色，无法联网验证`);
-  const timeoutController = new AbortController();
-  const timer = setTimeout(() => timeoutController.abort(new Error("timeout")), 45_000);
-  let signal_: AbortSignal = timeoutController.signal;
-  if (signal) {
-    signal_ = typeof AbortSignal.any === "function" ? AbortSignal.any([signal, timeoutController.signal]) : signal;
-  }
+  const timeout = withTimeout(signal, PROBE_TIMEOUT_MS, `${profile.name || 'TTS'} 探针超时（45 秒无响应）`);
   try {
     await synthesize({
-      text: "你好",
+      text: '你好',
       voice: { providerProfileId: profile.id, voiceId },
-      signal: signal_,
+      signal: timeout.signal,
     });
-    return { ok: true, configured: true, checked: "synthesis" };
+    return { ok: true, configured: true, checked: 'synthesis' };
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      if (signal?.aborted) throw error;
-      throw new Error(redactProviderSecrets(`${profile.name || "TTS"} 探针超时（45 秒无响应）`, profile), {
+    if (signal?.aborted) throw error;
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(redactProviderSecrets(`${profile.name || 'TTS'} 探针超时（45 秒无响应）`, profile), {
         cause: error,
       });
     }
     if (error instanceof TypeError) {
-      throw new Error(redactProviderSecrets(`${profile.name || "TTS"} 网络错误：无法连接服务`, profile), {
+      throw new Error(redactProviderSecrets(`${profile.name || 'TTS'} 网络错误：无法连接服务`, profile), {
         cause: error,
       });
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    timeout.dispose();
   }
 }
 
@@ -263,7 +270,11 @@ async function postViaProxy(
   fetcher: FetchLike,
   describe: (label: string, status: number, bodyHead: string) => string = describeProxyFailure,
 ): Promise<Response> {
-  const timeout = withSynthesisTimeout(signal, label);
+  const timeout = withTimeout(
+    signal,
+    PROXY_SYNTHESIS_TIMEOUT_MS,
+    withLabel(label, `合成超时（${PROXY_SYNTHESIS_TIMEOUT_MS / 1000} 秒）`),
+  );
   try {
     const response = await fetcher(upstream.url, {
       method: 'POST',
@@ -341,16 +352,30 @@ async function readProxyAudio(
   return { blob: blobFromBytes(bytes, mimeType), mimeType };
 }
 
-/** 把调用方取消与硬超时合成同一个 signal；超时用可读原因 abort，而不是静默挂死。 */
-function withSynthesisTimeout(signal: AbortSignal, label: string): { signal: AbortSignal; dispose: () => void } {
+/**
+ * 把调用方取消与 N 毫秒硬超时合成一个 signal：两条路径都会让上游请求中止，
+ * 超时用可读原因 abort，而不是静默挂死。
+ * 这里不依赖 `AbortSignal.any`（缺失时会丢一半语义），改为手动转发调用方取消。
+ */
+function withTimeout(
+  signal: AbortSignal | undefined,
+  ms: number,
+  message: string,
+): { signal: AbortSignal; dispose: () => void } {
   const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(new Error(`${label}合成超时（${PROXY_SYNTHESIS_TIMEOUT_MS / 1000} 秒）`)),
-    PROXY_SYNTHESIS_TIMEOUT_MS,
-  );
-  const combined =
-    typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-  return { signal: combined, dispose: () => clearTimeout(timer) };
+  const timer = setTimeout(() => controller.abort(new Error(message)), ms);
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener('abort', abortFromCaller, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abortFromCaller);
+    },
+  };
 }
 
 /**

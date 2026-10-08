@@ -123,6 +123,7 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 - 八组测试：`tests/ganggang-voice-{tts,playback,reading,casting,sound-casting,audit,runtime-lifecycle,editions}.test.ts`。
   Node 24 下需带 `TS_NODE_COMPILER_OPTIONS='{"module":"commonjs"}'` 运行 `ts-node --files`。
 - Lint 限定本源码目录和配音室测试，不把其他脚本纳入本项目修复。
+- 每个版本在 `docs/releases/vX.Y.Z.md` 留发布记录（Step 级验收、运行时证据、已知边界与遗留）；发版时与 tag 同批提交。
 - 真实验收读取 `window.__ganggangVoiceAudit`，不回传正文、URL、Key、cookie 或完整设置。
 - 第一版 Tag：`杠杠の配音室-v0.1.0`；第二版 Tag：`杠杠の配音室-v0.2.0`（传输层迁移）。不要复用仓库全局自动 bundle Tag。
 - 显式暂存本源码目录、配音室测试、桥接资产、目标 dist 和目标文档；禁止 `git add -A`。

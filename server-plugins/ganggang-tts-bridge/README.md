@@ -33,4 +33,4 @@ node --check server-plugins/ganggang-tts-bridge/fish.mjs
 node --test server-plugins/ganggang-tts-bridge/tests/doubao.test.mjs server-plugins/ganggang-tts-bridge/tests/fish.test.mjs
 ```
 
-当前 bridge package 独立版本为 `1.0.0`（含 fish 通道的构建对应部署实例上的 `1.1.0`），配音室产品版本为 `0.2.0`；两者分别版本化。
+当前 bridge package 独立版本为 `1.1.0`（与 `index.mjs` 的 `version` / `capabilities.version` 一致），配音室产品版本为 `0.2.0`；两者分别版本化。

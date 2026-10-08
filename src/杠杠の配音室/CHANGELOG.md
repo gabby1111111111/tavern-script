@@ -18,7 +18,7 @@
 
 - **传输层迁移：全部引擎零插件安装。** 豆包与 Fish 的**合成**统一经酒馆自带 `/proxy` 同源转发；小米与 MiniMax 维持原有直连。浏览器侧不再请求 `ganggang-tts-bridge`。
 - **豆包改走 `/proxy` 并弃用旧版凭据**：豆包的 CORS 预检 `Access-Control-Allow-Headers` 只放行旧版 `X-Api-App-Key`/`X-Api-Access-Key`，**不放行**新版 `X-Api-Key`（2026-10-08 在 8000 实抓预检响应头；同一个新版 key 在 Node 里 200 出声、在浏览器里必被拦）。因此合成改经 `/proxy`，只支持新版 API Key，界面不再提供 APP ID / Access Key 输入。
-- `ganggang-tts-bridge` 整体退出 v0.2.0 运行时依赖（降级为"语音插座"阶段资产）：桥接代码与其 44 个用例保留在仓库，但不再随配音室装配。
+- `ganggang-tts-bridge` 整体退出 v0.2.0 运行时依赖（降级为"语音插座"阶段资产）：桥接代码与其 44 个用例（38 个豆包 + 6 个 fish，fish 通道为 2026-10-07 新增）保留在仓库，但不再随配音室装配。
 - Fish 请求把模型放在**请求头** `model`（缺省 `s2.1-pro-free`）：漏该头会默认走付费模型并返回 402，与免费档额度无关。
 - `/proxy` 会丢掉上游 `Content-Type`，因此音频 MIME 改为"文件魔数优先、响应头兜底"识别（ID3/MP3 帧同步/RIFF-WAVE/OggS/fLaC）；`/proxy` 音频另设 25MB 上限与 120 秒硬超时，豆包非 2xx 与网络失败也走同一套可读文案。
 - provider 失败文案本地化：404 → 提示打开 `enableCorsProxy` 并重启酒馆；402 → 提示确认请求头 `model` 是免费档；403 / 45000000 / 55000000 → 统一点明"音色与资源 ID 不配套"（拿非配套音色去配 `seed-tts-2.0` 即此族）。
