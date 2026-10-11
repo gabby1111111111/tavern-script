@@ -238,7 +238,14 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     try {
       const probeResult = await registry.probe(profile, controller.signal);
       const discovered = await registry.listVoices(profile, controller.signal);
-      if (controller.signal.aborted || providerController !== controller) return;
+      if (controller.signal.aborted || providerController !== controller) {
+        // 被更新的探测取代：把状态灯从 busy 归位，别让旧行永远转圈
+        providerProbeStatus.value = {
+          ...providerProbeStatus.value,
+          [profileId]: { state: 'idle', message: '已取消（被更新的探测取代）' },
+        };
+        return;
+      }
       discoveredVoices.set(profile.id, { type: profile.type, voices: discovered });
       refreshKnownVoices();
       const networkVerified = probeResult.unverified !== true;
@@ -256,7 +263,13 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         ? `${profile.name} 连接检查通过，读取到 ${discovered.length} 个音色`
         : `${profile.name} 配置检查通过（未联网验证），读取到 ${discovered.length} 个音色`;
     } catch (caught) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || providerController !== controller) {
+        providerProbeStatus.value = {
+          ...providerProbeStatus.value,
+          [profileId]: { state: 'idle', message: '已取消（被更新的探测取代）' },
+        };
+        return;
+      }
       markProviderFailed(runId, profile.id);
       error.value = errorMessage(caught);
       providerProbeStatus.value = {
