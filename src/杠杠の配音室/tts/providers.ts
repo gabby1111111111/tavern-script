@@ -357,7 +357,7 @@ async function readProxyAudio(
  * 超时用可读原因 abort，而不是静默挂死。
  * 这里不依赖 `AbortSignal.any`（缺失时会丢一半语义），改为手动转发调用方取消。
  */
-function withTimeout(
+export function withTimeout(
   signal: AbortSignal | undefined,
   ms: number,
   message: string,

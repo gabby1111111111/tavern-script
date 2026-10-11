@@ -81,12 +81,17 @@ export type SoundEffectEntry = {
   volume: number;
 };
 
+export type TasteProfile = {
+  styleNotes: string;
+};
+
 export type VoiceSettingsData = {
   schemaVersion: typeof VOICE_SETTINGS_SCHEMA_VERSION;
   profiles: TtsProviderProfile[];
   castingByCharacter: Record<string, CastingTable>;
   readingDefaults: ReadingDefaults;
   soundEffects: SoundEffectEntry[];
+  tasteProfile: TasteProfile;
 };
 
 export type ContextMessage = {
@@ -196,6 +201,7 @@ export type VoiceAudit = {
     network_verified: boolean | null;
   };
   ai_casting: { status: VoiceAuditStatus; count: number; generation_id: string | null };
+  ai_audition: { status: VoiceAuditStatus; count: number; generation_id: string | null };
   sound_catalog: {
     status: VoiceAuditStatus;
     count: number;

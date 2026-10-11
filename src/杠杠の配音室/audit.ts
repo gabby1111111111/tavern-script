@@ -2,6 +2,7 @@ import { CUSTOM_ONLY_VOICE_EDITION } from './edition';
 import type { VoiceAudit, VoiceAuditStatus, VoiceCleanupReason, VoiceEditionId } from './types';
 
 const SAFE_CASTING_GENERATION_ID = /^ganggang-casting-\d+-\d+$/;
+const SAFE_AUDITION_GENERATION_ID = /^ganggang-audition-\d+-\d+$/;
 const SAFE_CLEANUP_REASONS = new Set<VoiceCleanupReason>([
   'user-stop',
   'replacement',
@@ -26,6 +27,10 @@ function status(value: VoiceAuditStatus = 'idle'): VoiceAuditStatus {
 }
 
 function emptyAiCastingAudit(): VoiceAudit['ai_casting'] {
+  return { status: 'idle', count: 0, generation_id: null };
+}
+
+function emptyAiAuditionAudit(): VoiceAudit['ai_audition'] {
   return { status: 'idle', count: 0, generation_id: null };
 }
 
@@ -62,6 +67,11 @@ function safeCastingGenerationId(generationId: string): string | null {
   return SAFE_CASTING_GENERATION_ID.test(value) ? value : null;
 }
 
+function safeAuditionGenerationId(generationId: string): string | null {
+  const value = typeof generationId === 'string' ? generationId.trim() : '';
+  return SAFE_AUDITION_GENERATION_ID.test(value) ? value : null;
+}
+
 function safeAuditVersion(version: string): string {
   const value = typeof version === 'string' ? version.trim() : '';
   return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value) ? value.slice(0, 32) : 'unknown';
@@ -81,6 +91,7 @@ function createAudit(): VoiceAudit {
     route_built: { status: status(), count: 0 },
     provider_ready: { status: status(), profile_id: null, network_verified: null },
     ai_casting: emptyAiCastingAudit(),
+    ai_audition: emptyAiAuditionAudit(),
     sound_catalog: { status: status(), count: 0, sfx_count: 0, ambience_count: 0 },
     sound_effect: { status: status() },
     playback_timeline: emptyPlaybackTimelineAudit(),
@@ -108,6 +119,7 @@ export function beginVoiceAudit(action: string): number {
   voiceAudit.route_built = { status: 'pending', count: 0 };
   voiceAudit.provider_ready = { status: 'pending', profile_id: null, network_verified: null };
   voiceAudit.ai_casting = emptyAiCastingAudit();
+  voiceAudit.ai_audition = emptyAiAuditionAudit();
   voiceAudit.sound_catalog = { status: 'idle', count: 0, sfx_count: 0, ambience_count: 0 };
   voiceAudit.sound_effect = { status: 'idle' };
   voiceAudit.playback_timeline = emptyPlaybackTimelineAudit();
@@ -126,6 +138,25 @@ export function beginAiCastingAudit(generationId: string): number {
     generation_id: safeCastingGenerationId(generationId),
   };
   return runId;
+}
+
+export function beginAiAuditionAudit(generationId: string): number {
+  const runId = beginVoiceAudit('ai-audition');
+  voiceAudit.ai_audition = {
+    status: 'pending',
+    count: 0,
+    generation_id: safeAuditionGenerationId(generationId),
+  };
+  return runId;
+}
+
+export function markAiAudition(runId: number, nextStatus: VoiceAuditStatus, count = 0): void {
+  if (!isCurrentAuditRun(runId)) return;
+  voiceAudit.ai_audition = {
+    status: nextStatus,
+    count: auditCount(count),
+    generation_id: voiceAudit.ai_audition.generation_id,
+  };
 }
 
 export function markAiCasting(runId: number, nextStatus: AiCastingStatus, count = 0): void {

@@ -410,6 +410,82 @@
         </article>
       </template>
 
+      <template v-else-if="activeTab === 'casting-room'">
+        <article class="ganggang-voice-card">
+          <div class="ganggang-voice-grid">
+            <label class="ganggang-voice-field">
+              <span>目标角色（配音表条目或新名）</span>
+              <input
+                v-model.trim="castingRoomRoleName"
+                type="text"
+                list="ganggang-casting-room-roles"
+                placeholder="如：邹峥 / 叙述者"
+              />
+            </label>
+            <datalist id="ganggang-casting-room-roles">
+              <option v-for="roleName in castingRoomRoleOptions" :key="roleName" :value="roleName"></option>
+            </datalist>
+            <label class="ganggang-voice-field">
+              <span>候选数量上限</span>
+              <input v-model.number="castingRoomLimit" type="number" min="1" max="12" step="1" />
+            </label>
+          </div>
+          <label class="ganggang-voice-field">
+            <span>口味档案（AI 提名与例句生成都会参考）</span>
+            <textarea v-model="castingRoomTasteNotes" rows="2"></textarea>
+          </label>
+          <div class="ganggang-voice-actions">
+            <button
+              class="menu_button"
+              type="button"
+              :disabled="castingRoomBusy"
+              @click="startCastingRoom"
+            >
+              {{ castingRoomBusy ? 'AI 海选中…' : '开始 AI 海选' }}
+            </button>
+            <span class="ganggang-voice-hint">
+              提名 ≤ {{ castingRoomLimit }} 个候选并逐个合成例句；小米/Fish 免费，豆包/MiniMax 按字符小额计费。
+            </span>
+          </div>
+          <p v-if="castingRoomPhaseText" class="ganggang-voice-hint">{{ castingRoomPhaseText }}</p>
+        </article>
+
+        <article v-if="castingRoomCandidates.length" class="ganggang-voice-card">
+          <div class="ganggang-voice-card-header">
+            <strong>候选试音（例句：{{ runtime.castingRoom.exampleLine }}）</strong>
+          </div>
+          <div v-for="(candidate, index) in castingRoomCandidates" :key="`${candidate.providerProfileId}-${candidate.voiceId}`" class="ganggang-voice-grid">
+            <label class="ganggang-voice-field">
+              <span>#{{ index + 1 }} · {{ profileName(candidate.providerProfileId) }}</span>
+              <input :value="candidate.voiceId" type="text" readonly />
+            </label>
+            <label class="ganggang-voice-field">
+              <span>提名理由</span>
+              <input :value="candidate.reason" type="text" readonly />
+            </label>
+            <div class="ganggang-voice-actions">
+              <button
+                class="menu_button"
+                type="button"
+                :disabled="candidate.status !== 'ready'"
+                @click="playCastingRoomSample(candidate)"
+              >
+                试听
+              </button>
+              <button
+                class="menu_button"
+                type="button"
+                :disabled="candidate.status !== 'ready' || castingRoomBusy"
+                @click="pinCastingRoomChoice(candidate)"
+              >
+                定角
+              </button>
+              <span class="ganggang-voice-hint">{{ candidateStatusText(candidate) }}</span>
+            </div>
+          </div>
+        </article>
+      </template>
+
       <template v-else>
         <div class="ganggang-voice-card-header">
           <span class="ganggang-voice-hint">最多 10 条；刷新网页即清空。</span>
@@ -447,7 +523,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { createManualCastEntry, findCastingEntryError, parseAliasInput } from './casting';
-import type { VoiceRuntime } from './runtime';
+import type { CastingRoomCandidateView, VoiceRuntime } from './runtime';
 import type { CastEntry, CastRole, RecentVoiceStatus, VoiceOption } from './types';
 
 const props = defineProps<{ runtime: VoiceRuntime }>();
@@ -469,6 +545,7 @@ const currentCharacterName = runtime.currentCharacterName;
 const tabs = [
   { value: 'sources', label: 'TTS 来源' },
   { value: 'casting', label: 'AI 配音表' },
+  { value: 'casting-room', label: '选角间' },
   { value: 'audition', label: '试音台' },
   { value: 'reading', label: '朗读方式' },
   { value: 'recent', label: '最近 10 条' },
@@ -619,6 +696,56 @@ function recentStatus(value: RecentVoiceStatus): string {
 
 const DEFAULT_AUDITION_TEXT =
   '你还在生气吗……我错啦，真的。晚上请你吃火锅，好不好嘛？我还给你带了那家的栗子，就是……在路上被压扁了几个。';
+const castingRoomRoleName = ref('');
+const castingRoomLimit = ref(8);
+const castingRoomTasteNotes = ref(runtime.settings.value.tasteProfile.styleNotes);
+const castingRoomCandidates = computed(() => runtime.castingRoom.value.candidates);
+const castingRoomPhaseText = computed(() => {
+  const room = runtime.castingRoom.value;
+  if (room.phase === 'idle') return '';
+  if (room.phase === 'nominating') return 'AI 正在阅读人设与音色目录，提名候选并生成例句…';
+  if (room.phase === 'synthesizing') return `批量出样中（${room.progress.done}/${room.progress.total}）…`;
+  if (room.phase === 'failed') return '本轮海选没有可用样本，请查看错误提示后重试。';
+  if (room.phase === 'done') return `海选完成：${room.progress.total} 个候选已出样，试听后点"定角"。`;
+  return '';
+});
+const castingRoomRoleOptions = computed(() => {
+  const names = new Set<string>();
+  for (const table of Object.values(runtime.settings.value.castingByCharacter)) {
+    for (const entry of table.entries) {
+      if (entry.displayName.trim()) names.add(entry.displayName.trim());
+    }
+  }
+  if (runtime.currentCharacterName.value.trim()) names.add(runtime.currentCharacterName.value.trim());
+  return [...names];
+});
+
+function startCastingRoom(): void {
+  const roleName = castingRoomRoleName.value.trim() || runtime.currentCharacterName.value.trim();
+  if (!roleName) {
+    return;
+  }
+  castingRoomRoleName.value = roleName;
+  runtime.settings.value.tasteProfile.styleNotes = castingRoomTasteNotes.value.trim();
+  void runtime.generateCastingCandidates(roleName, castingRoomLimit.value);
+}
+
+function playCastingRoomSample(candidate: { recentItemId?: string }): void {
+  if (candidate.recentItemId) {
+    void runtime.playRecent(candidate.recentItemId);
+  }
+}
+
+function pinCastingRoomChoice(candidate: CastingRoomCandidateView): void {
+  runtime.pinCastingChoice(candidate);
+}
+
+function candidateStatusText(candidate: { status: string; error?: string }): string {
+  if (candidate.status === 'ready') return '可试听';
+  if (candidate.status === 'synthesizing') return '合成中…';
+  if (candidate.status === 'pending') return '排队中';
+  return candidate.error || '合成失败';
+}
 const auditionProfileId = ref('');
 const auditionVoiceId = ref('');
 const auditionText = ref(DEFAULT_AUDITION_TEXT);
@@ -640,6 +767,11 @@ watch(
   },
   { immediate: true },
 );
+
+// 切换引擎时清空手填音色——上一家的 voiceId 对新引擎无效（会 400）
+watch(auditionProfileId, () => {
+  auditionVoiceId.value = '';
+});
 
 function probeStateFor(profileId: string): string {
   return runtime.providerProbeStatus.value[profileId]?.state ?? 'idle';

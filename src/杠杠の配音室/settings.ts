@@ -4,6 +4,7 @@ import type {
   ReadingDefaults,
   ReadingMode,
   SoundEffectEntry,
+  TasteProfile,
   TtsProviderKind,
   TtsProviderProfile,
   VoiceRef,
@@ -67,13 +68,26 @@ export const DEFAULT_READING_DEFAULTS: ReadingDefaults = {
   recentMessageCount: 10,
 };
 
+export const DEFAULT_TASTE_PROFILE: TasteProfile = {
+  styleNotes: '干净、温和、低唤起；拒绝拖长音与播音腔。',
+};
+
 export const DEFAULT_VOICE_SETTINGS: VoiceSettingsData = {
   schemaVersion: VOICE_SETTINGS_SCHEMA_VERSION,
   profiles: [DEFAULT_PROFILE],
   castingByCharacter: {},
   readingDefaults: DEFAULT_READING_DEFAULTS,
   soundEffects: [],
+  tasteProfile: DEFAULT_TASTE_PROFILE,
 };
+
+export function normalizeTasteProfile(value: unknown): TasteProfile {
+  const record = isRecord(value) ? value : {};
+  return {
+    styleNotes: stringValue(record.styleNotes, DEFAULT_TASTE_PROFILE.styleNotes).trim().slice(0, 2_000) ||
+      DEFAULT_TASTE_PROFILE.styleNotes,
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -275,6 +289,7 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettingsData {
     castingByCharacter,
     readingDefaults: normalizeReadingDefaults(record.readingDefaults),
     soundEffects,
+    tasteProfile: normalizeTasteProfile(record.tasteProfile),
   };
 }
 
@@ -286,6 +301,7 @@ function serializeVoiceSettings(settings: VoiceSettingsData): ScriptVariables {
     castingByCharacter: normalized.castingByCharacter,
     readingDefaults: normalized.readingDefaults,
     soundEffects: normalized.soundEffects,
+    tasteProfile: normalized.tasteProfile,
   };
 }
 

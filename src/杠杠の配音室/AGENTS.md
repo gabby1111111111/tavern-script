@@ -50,6 +50,8 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 | 检查 TTS / 读取音色         | `probeAndLoadVoices`                              | Provider Registry → adapter probe（真实合成"你好"）/ listVoices       | 更新页内音色、状态灯与 Provider Audit    |
 | 试音台试听                  | `synthesizeAudition`                              | 试音台标签 → registry synthesize → RecentVoiceStore                   | 样本进入最近 10 条并播放                 |
 | 一键 AI 配音表              | `generateCasting`                                 | `readFullCastingContext` → `generateCastingTable` → `generateRaw`    | 写当前角色卡的 `castingByCharacter`      |
+| 选角间 AI 海选             | `generateCastingCandidates` → `runCastingRoomBatch` | `readFullCastingContext` → `castingRoomPrompt` → `generateRaw`（json_schema）→ 顺序批量出样 | 候选网格（页面内存）+ 样本进最近 10 条 |
+| 选角间定角               | `pinCastingChoice`                                | 网格候选 → 匹配/新建配音表条目 → `saveCastingTable`                | 配音表条目 voice 即时生效（深 watch 落盘） |
 | 朗读最新消息 / 楼层         | `readLatest/readMessage`                          | `parseSpokenSegments` → `routeSegments` → `playRoutedSegments`       | 严格串行播放并写最近语音                 |
 | 朗读选中文字                | `readSelection`                                   | 定位楼层 → `mapSelectionToSegments` → `routeAndPlay`                 | 朗读映射到的片段                         |
 | 原文旁对白喇叭              | `MessageControlManager.onPlaySegment`             | `readOneSegment` → 路由 → `playRoutedSegments`                       | 生成/复用该行语音                        |
