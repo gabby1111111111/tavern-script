@@ -64,7 +64,7 @@ const runCastingRoomTests = async (): Promise<void> => {
   for (const keyword of ['minItems', 'maxItems', 'minimum', 'maximum', '"enum"']) {
     assert(!serialized.includes(keyword), `schema 不得包含约束关键字 ${keyword}（gemini 网关 400 坑）`);
   }
-  equal(CASTING_ROOM_MAX_CANDIDATES, 12, '候选硬上限应为 12');
+  equal(CASTING_ROOM_MAX_CANDIDATES, 10, '候选硬上限应为 10（与 recentStore maxEntries 对齐）');
 
   const raw = {
     candidates: [

@@ -427,7 +427,7 @@
             </datalist>
             <label class="ganggang-voice-field">
               <span>候选数量上限</span>
-              <input v-model.number="castingRoomLimit" type="number" min="1" max="12" step="1" />
+              <input v-model.number="castingRoomLimit" type="number" min="1" max="10" step="1" />
             </label>
           </div>
           <label class="ganggang-voice-field">
@@ -452,7 +452,7 @@
 
         <article v-if="castingRoomCandidates.length" class="ganggang-voice-card">
           <div class="ganggang-voice-card-header">
-            <strong>候选试音（例句：{{ runtime.castingRoom.exampleLine }}）</strong>
+            <strong>候选试音（例句：{{ castingRoomExampleLine }}）</strong>
           </div>
           <div v-for="(candidate, index) in castingRoomCandidates" :key="`${candidate.providerProfileId}-${candidate.voiceId}`" class="ganggang-voice-grid">
             <label class="ganggang-voice-field">
@@ -699,6 +699,8 @@ const DEFAULT_AUDITION_TEXT =
 const castingRoomRoleName = ref('');
 const castingRoomLimit = ref(8);
 const castingRoomTasteNotes = ref(runtime.settings.value.tasteProfile.styleNotes);
+const castingRoomBusy = runtime.castingRoomBusy;
+const castingRoomExampleLine = computed(() => runtime.castingRoom.value.exampleLine);
 const castingRoomCandidates = computed(() => runtime.castingRoom.value.candidates);
 const castingRoomPhaseText = computed(() => {
   const room = runtime.castingRoom.value;

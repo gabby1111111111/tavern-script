@@ -38,7 +38,7 @@ export type CastingRoomResult = {
   exampleLine: string;
 };
 
-export const CASTING_ROOM_MAX_CANDIDATES = 12;
+export const CASTING_ROOM_MAX_CANDIDATES = 10;
 export const CASTING_ROOM_MAX_REASON_LENGTH = 300;
 export const CASTING_ROOM_MAX_EXAMPLE_LENGTH = 200;
 
