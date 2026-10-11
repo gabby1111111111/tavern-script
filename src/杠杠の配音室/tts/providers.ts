@@ -270,17 +270,12 @@ async function postViaProxy(
   fetcher: FetchLike,
   describe: (label: string, status: number, bodyHead: string) => string = describeProxyFailure,
 ): Promise<Response> {
-  const timeout = withTimeout(
-    signal,
-    PROXY_SYNTHESIS_TIMEOUT_MS,
-    withLabel(label, `合成超时（${PROXY_SYNTHESIS_TIMEOUT_MS / 1000} 秒）`),
-  );
   try {
     const response = await fetcher(upstream.url, {
       method: 'POST',
       headers: upstream.headers,
       body: JSON.stringify(upstream.payload),
-      signal: timeout.signal,
+      signal,
     });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
@@ -295,8 +290,6 @@ async function postViaProxy(
       );
     }
     throw error;
-  } finally {
-    timeout.dispose();
   }
 }
 
@@ -527,17 +520,20 @@ export function createProviderRegistry({
             text: ensureText(request?.text),
             contextText: request?.contextText,
           });
+          // P1-2：超时覆盖 fetch + body 读取全程（/proxy 响应体可能 trickle）
+          const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, '豆包 合成超时（120 秒）');
           const response = await postViaProxy(
             upstream,
             '豆包',
             profile,
-            request.signal,
+            timeout.signal,
             fetcher,
             describeDoubaoProxyFailure,
           );
           // 响应是连续的 JSON 对象流（base64 音频分片），线上字节数必然大于解码后的音频。
           const wireBytes = await readBoundedBytes(response, '豆包', MAX_TTS_WIRE_BYTES);
           const audioBytes = parseDoubaoNdjson(new TextDecoder().decode(wireBytes), MAX_TTS_RESPONSE_BYTES);
+          timeout.dispose();
           return { blob: blobFromBytes(audioBytes, 'audio/mpeg'), mimeType: 'audio/mpeg' };
         } catch (error) {
           return withRedactedError(error, profile);
@@ -636,8 +632,11 @@ export function createProviderRegistry({
             text: ensureText(request?.text),
             format: String(profile.responseFormat || 'mp3').trim(),
           });
-          const response = await postViaProxy(upstream, 'Fish', profile, request.signal, fetcher);
-          return await readProxyAudio(response, 'Fish', profile);
+          const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, 'Fish 合成超时（120 秒）');
+          const response = await postViaProxy(upstream, 'Fish', profile, timeout.signal, fetcher);
+          const audio = await readProxyAudio(response, 'Fish', profile);
+          timeout.dispose();
+          return audio;
         } catch (error) {
           return withRedactedError(error, profile);
         }
