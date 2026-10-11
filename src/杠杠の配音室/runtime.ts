@@ -23,7 +23,7 @@ import {
   markVoiceAuditError,
   setVoiceAuditBuild,
 } from './audit';
-import { buildCastingRoomPrompt, CASTING_ROOM_MAX_CANDIDATES, findCastingEntryError, parseCastingRoomResult, type CastingRoomCandidate } from './casting-room';
+import { castingRoomPrompt, CASTING_ROOM_JSON_SCHEMA, CASTING_ROOM_MAX_CANDIDATES, findCastingEntryError, parseCastingRoomResult, type CastingRoomCandidate } from './casting-room';
 import { createCastingGenerationId, generateCastingTable, isStaleCastingInputError, stopCasting } from './casting';
 import { createCastingInputSignature, readCurrentCastingContext, readFullCastingContext } from './context';
 import {
@@ -462,7 +462,11 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     }
   }
 
+  let activeAuditionGenerationId: string | null = null;
+  let castingRoomAbortController: AbortController | null = null;
+
   async function generateCastingCandidates(targetRoleName: string, limit = CASTING_ROOM_MAX_CANDIDATES): Promise<void> {
+    if (castingRoomBusy.value) return;
     const roleName = targetRoleName.trim();
     if (!roleName) {
       error.value = '请先选择或填写要海选的角色名';
@@ -481,6 +485,8 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     status.value = `AI 正在为「${roleName}」提名候选音色…`;
     const generationId = `ganggang-audition-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const auditRunId = beginAiAuditionAudit(generationId);
+    activeAuditionGenerationId = generationId;
+    const characterKeyAtStart = currentCharacterKey.value;
     try {
       const context = readFullCastingContext(settings.value.readingDefaults.recentMessageCount);
       const enabledIds = new Set(
@@ -493,7 +499,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         castingRoom.value.phase = 'failed';
         return;
       }
-      const orderedPrompts = buildCastingRoomPrompt(
+      const orderedPrompts = castingRoomPrompt(
         context,
         voiceCatalog,
         settings.value.tasteProfile.styleNotes,
@@ -521,18 +527,39 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       error.value = errorMessage(caught);
       status.value = 'AI 海选提名失败';
       castingRoom.value.phase = 'failed';
+      activeAuditionGenerationId = null;
       return;
     }
-    await runCastingRoomBatch(auditRunId);
+    // P2-1：切聊天后 currentCharacterKey 会变，角色名可能已不属于新表——中断剩余候选
+    if (currentCharacterKey.value !== characterKeyAtStart) {
+      markAiAudition(auditRunId, 'cancelled');
+      status.value = '海选期间角色卡已切换，本次候选已丢弃';
+      castingRoom.value.phase = 'failed';
+      activeAuditionGenerationId = null;
+      return;
+    }
+    await runCastingRoomBatch(auditRunId, characterKeyAtStart);
+    activeAuditionGenerationId = null;
   }
 
-  async function runCastingRoomBatch(auditRunId: number): Promise<void> {
+  function stopCastingRoom(): void {
+    castingRoomAbortController?.abort(new Error('用户停止'));
+  }
+
+  async function runCastingRoomBatch(auditRunId: number, characterKeyAtStart: string): Promise<void> {
     const room = castingRoom.value;
     if (!room.candidates.length) return;
     room.phase = 'synthesizing';
     room.progress = { done: 0, total: room.candidates.length };
+    castingRoomAbortController = new AbortController();
     let readyCount = 0;
     for (const candidate of room.candidates) {
+      if (castingRoomAbortController.signal.aborted || currentCharacterKey.value !== characterKeyAtStart) {
+        candidate.status = 'failed';
+        candidate.error = '已取消（角色卡切换或用户停止）';
+        room.progress.done += 1;
+        continue;
+      }
       candidate.status = 'synthesizing';
       const profile = settings.value.profiles.find(item => item.id === candidate.providerProfileId && item.enabled);
       if (!profile) {
@@ -543,7 +570,11 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       }
       status.value = `正在合成候选（${room.progress.done + 1}/${room.candidates.length}）：${profile.name}…`;
       try {
-        const timeout = withTimeout(undefined, 90_000, `${profile.name} 试音样本合成超时（90 秒）`);
+        const timeout = withTimeout(
+          castingRoomAbortController?.signal,
+          90_000,
+          `${profile.name} 试音样本合成超时（90 秒）`,
+        );
         const item = await recentStore.generate(
           {
             textPreview: room.exampleLine,
@@ -574,6 +605,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     }
     markAiAudition(auditRunId, readyCount > 0 ? 'success' : 'fail', readyCount);
     room.phase = readyCount > 0 ? 'done' : 'failed';
+    castingRoomAbortController = null;
     status.value =
       readyCount > 0
         ? `AI 海选完成：${readyCount}/${room.candidates.length} 个候选出样成功，请试听并定角`
@@ -625,7 +657,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       entries,
     });
     error.value = '';
-    status.value = `已定角：「${roleName}」 → ${candidate.voiceId}（朗读即时生效）`;
+    status.value = `已定角：「${roleName}」 → ${candidate.voiceId}（仅当前角色卡「${currentCharacterName.value}」的朗读生效）`;
   }
 
   function routeSegments(segments: SpokenSegment[], mode = settings.value.readingDefaults.mode): RoutedSegment[] {
