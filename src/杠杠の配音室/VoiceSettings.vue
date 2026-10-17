@@ -1,63 +1,61 @@
 <!-- eslint-disable better-tailwindcss/no-unknown-classes -->
 <template>
   <section class="ganggang-voice-panel" data-testid="ganggang-voice-panel">
-    <header class="ganggang-voice-header">
-      <div>
-        <h3 class="ganggang-voice-title">杠杠の配音室</h3>
-        <p class="ganggang-voice-subtitle">配好一次，让 AI 认人选声；语音只留在当前页面。</p>
+    <div class="inline-drawer">
+      <div class="inline-drawer-toggle inline-drawer-header">
+        <b>杠杠の配音室 v{{ VOICE_CONSOLE_VERSION }}</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
-      <button
-        class="menu_button"
-        data-testid="ganggang-voice-stop"
-        type="button"
-        title="停止当前声音"
-        @click="runtime.stopAll"
-      >
-        停止
-      </button>
-    </header>
 
-    <nav class="ganggang-voice-tabs" aria-label="配音室功能">
-      <button
-        v-for="tab in tabs"
-        :key="tab.value"
-        class="ganggang-voice-tab"
-        :class="{ 'is-active': activeTab === tab.value }"
-        :data-testid="`ganggang-voice-tab-${tab.value}`"
-        type="button"
-        @click="activeTab = tab.value"
-      >
-        {{ tab.label }}
-      </button>
-    </nav>
+      <div class="inline-drawer-content">
+        <nav class="ganggang-voice-tabs" role="tablist" aria-label="配音室功能">
+          <button
+            v-for="tab in tabs"
+            :key="tab.value"
+            class="ganggang-voice-tab"
+            :class="{ 'is-active': activeTab === tab.value }"
+            :data-testid="`ganggang-voice-tab-${tab.value}`"
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === tab.value"
+            @click="activeTab = tab.value"
+          >
+            {{ tab.label }}
+          </button>
+        </nav>
 
-    <div class="ganggang-voice-content">
+        <div class="ganggang-voice-content">
       <p v-if="status" class="ganggang-voice-status">{{ status }}</p>
       <p v-if="error" class="ganggang-voice-status is-error">{{ error }}</p>
 
       <template v-if="activeTab === 'sources'">
-        <div class="ganggang-voice-actions">
-          <button class="menu_button" type="button" @click="runtime.addProfile('openai-compatible')">新增来源</button>
-          <span class="ganggang-voice-hint">API Key 会保存到本脚本变量；不会发给配音表 AI。</span>
+        <div class="ganggang-voice-toolbar">
+          <select id="ganggang-voice-profile-select" v-model="selectedProfileId" class="text_pole" aria-label="TTS 来源">
+            <option v-for="profile in settings.profiles" :key="profile.id" :value="profile.id">
+              {{ profile.name || '未命名来源' }}
+            </option>
+          </select>
+          <div class="ganggang-voice-actions">
+            <button class="menu_button" type="button" title="新建来源" @click="addSourceProfile">＋</button>
+            <button class="menu_button" type="button" title="保存来源" @click="saveSourceProfile">✓</button>
+            <button class="menu_button" type="button" title="删除来源" @click="removeSourceProfile">×</button>
+          </div>
         </div>
 
-        <article v-for="profile in settings.profiles" :key="profile.id" class="ganggang-voice-card">
-          <div class="ganggang-voice-card-header">
-            <label class="checkbox_label">
-              <input v-model="profile.enabled" type="checkbox" />
-              <span>{{ profile.name || '未命名来源' }}</span>
-            </label>
-            <button class="menu_button" type="button" @click="runtime.removeProfile(profile.id)">删除</button>
-          </div>
+        <article v-if="selectedProfile" class="ganggang-voice-card">
+          <label class="checkbox_label">
+            <input v-model="selectedProfile.enabled" type="checkbox" />
+            <span>启用这个来源</span>
+          </label>
 
           <div class="ganggang-voice-grid">
             <label class="ganggang-voice-field">
               <span>名称</span>
-              <input v-model.trim="profile.name" type="text" />
+              <input v-model.trim="selectedProfile.name" class="text_pole" type="text" />
             </label>
             <label class="ganggang-voice-field">
               <span>TTS 来源</span>
-              <select v-model="profile.type">
+              <select v-model="selectedProfile.type" class="text_pole">
                 <option value="edge">Edge TTS 插件</option>
                 <option value="openai-compatible">OpenAI 兼容</option>
                 <option value="doubao">豆包</option>
@@ -66,48 +64,40 @@
                 <option value="fish">Fish Audio</option>
               </select>
             </label>
-            <label v-if="profile.type === 'openai-compatible'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type === 'openai-compatible'" class="ganggang-voice-field">
               <span>语音接口地址</span>
-              <input v-model.trim="profile.endpoint" type="url" placeholder="https://…/audio/speech" />
+              <input v-model.trim="selectedProfile.endpoint" class="text_pole" type="url" placeholder="https://…/audio/speech" />
             </label>
-            <label v-if="profile.type !== 'edge'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type !== 'edge'" class="ganggang-voice-field">
               <span>API Key</span>
-              <input v-model="profile.apiKey" type="password" autocomplete="off" />
+              <input v-model="selectedProfile.apiKey" class="text_pole" type="password" autocomplete="off" />
             </label>
-            <p v-if="profile.type === 'doubao'" class="ganggang-voice-hint">
-              豆包合成经酒馆自带的 /proxy 转发（浏览器跨域不放行新版 X-Api-Key 头）：请先在 config.yaml 打开
-              enableCorsProxy 并重启酒馆。旧版 APP ID + Access Key 已弃用，只填新版 API Key。
-            </p>
-            <p v-if="profile.type === 'fish'" class="ganggang-voice-hint">
-              Fish 合成经酒馆自带的 /proxy 转发：请先在 config.yaml 打开 enableCorsProxy 并重启酒馆。音色市场
-              （GET /model）不需要该开关；模型留空时使用免费档 s2.1-pro-free。
-            </p>
-            <label v-if="profile.type === 'doubao'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type === 'doubao'" class="ganggang-voice-field">
               <span>Resource ID</span>
-              <input v-model.trim="profile.resourceId" type="text" placeholder="seed-tts-2.0" />
+              <input v-model.trim="selectedProfile.resourceId" class="text_pole" type="text" placeholder="seed-tts-2.0" />
             </label>
-            <label v-if="profile.type === 'minimax'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type === 'minimax'" class="ganggang-voice-field">
               <span>平台</span>
-              <select v-model="profile.platform">
+              <select v-model="selectedProfile.platform" class="text_pole">
                 <option value="cn">中国大陆</option>
                 <option value="io">国际站</option>
               </select>
             </label>
-            <label v-if="profile.type === 'minimax'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type === 'minimax'" class="ganggang-voice-field">
               <span>Group ID</span>
-              <input v-model.trim="profile.groupId" type="text" autocomplete="off" placeholder="控制台 → 账户管理 → 基本信息" />
+              <input v-model.trim="selectedProfile.groupId" class="text_pole" type="text" autocomplete="off" placeholder="控制台 → 账户管理 → 基本信息" />
             </label>
-            <label v-if="profile.type !== 'edge' && profile.type !== 'doubao'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type !== 'edge' && selectedProfile.type !== 'doubao'" class="ganggang-voice-field">
               <span>模型</span>
-              <input v-model.trim="profile.model" type="text" />
+              <input v-model.trim="selectedProfile.model" class="text_pole" type="text" />
             </label>
             <label class="ganggang-voice-field">
               <span>默认音色 ID</span>
-              <input v-model.trim="profile.defaultVoiceId" type="text" list="ganggang-voice-options" />
+              <input v-model.trim="selectedProfile.defaultVoiceId" class="text_pole" type="text" list="ganggang-voice-options" />
             </label>
-            <label v-if="profile.type === 'edge'" class="ganggang-voice-field">
+            <label v-if="selectedProfile.type === 'edge'" class="ganggang-voice-field">
               <span>合成语速</span>
-              <input v-model.number="profile.edgeRate" type="number" min="-100" max="100" step="5" />
+              <input v-model.number="selectedProfile.edgeRate" class="text_pole" type="number" min="-100" max="100" step="5" />
             </label>
           </div>
 
@@ -116,13 +106,14 @@
               class="menu_button"
               type="button"
               :disabled="providerBusy"
-              @click="runtime.probeAndLoadVoices(profile.id)"
+              @click="runtime.probeAndLoadVoices(selectedProfile.id)"
             >
               {{ providerBusy ? '读取中…' : '检查并读取音色' }}
             </button>
-            <span class="ganggang-voice-hint">已读取 {{ voicesFor(profile.id).length }} 个音色</span>
+            <span class="ganggang-voice-hint">已读取 {{ voicesFor(selectedProfile.id).length }} 个音色</span>
           </div>
         </article>
+        <p v-else class="ganggang-voice-hint">还没有 TTS 来源，点上面的「＋」新建一个。</p>
         <datalist id="ganggang-voice-options">
           <option v-for="voice in voices" :key="`${voice.providerProfileId}:${voice.voiceId}`" :value="voice.voiceId">
             {{ voice.name }}
@@ -147,15 +138,15 @@
           <div v-for="entry in currentCasting.entries" :key="entry.id" class="ganggang-voice-grid">
             <label class="ganggang-voice-field">
               <span>{{ roleLabel(entry.role) }}</span>
-              <input :value="entry.displayName" type="text" @change="setEntryDisplayName(entry, $event)" />
+              <input class="text_pole" :value="entry.displayName" type="text" @change="setEntryDisplayName(entry, $event)" />
             </label>
             <label class="ganggang-voice-field">
               <span>别名（顿号分隔）</span>
-              <input :value="entry.aliases.join('、')" type="text" @change="setEntryAliases(entry, $event)" />
+              <input class="text_pole" :value="entry.aliases.join('、')" type="text" @change="setEntryAliases(entry, $event)" />
             </label>
             <label class="ganggang-voice-field">
               <span>来源</span>
-              <select v-model="entry.voice.providerProfileId">
+              <select v-model="entry.voice.providerProfileId" class="text_pole">
                 <option v-for="profile in enabledProfiles" :key="profile.id" :value="profile.id">
                   {{ profile.name }}
                 </option>
@@ -163,7 +154,7 @@
             </label>
             <label class="ganggang-voice-field">
               <span>音色</span>
-              <select v-model="entry.voice.voiceId">
+              <select v-model="entry.voice.voiceId" class="text_pole">
                 <option
                   v-for="voice in voicesFor(entry.voice.providerProfileId)"
                   :key="voice.voiceId"
@@ -193,7 +184,7 @@
           <div class="ganggang-voice-grid">
             <label class="ganggang-voice-field">
               <span>朗读方式</span>
-              <select v-model="settings.readingDefaults.mode">
+              <select v-model="settings.readingDefaults.mode" class="text_pole">
                 <option value="full">旁白 + 对白</option>
                 <option value="dialogue-only">只读对白</option>
                 <option value="single-voice">全文单音色</option>
@@ -203,11 +194,11 @@
             </label>
             <label v-if="settings.readingDefaults.mode === 'character-only'" class="ganggang-voice-field">
               <span>角色名</span>
-              <input v-model.trim="settings.readingDefaults.characterName" type="text" />
+              <input v-model.trim="settings.readingDefaults.characterName" class="text_pole" type="text" />
             </label>
             <label v-if="settings.readingDefaults.mode === 'single-voice'" class="ganggang-voice-field">
               <span>单音色</span>
-              <select :value="singleVoiceKey" @change="setSingleVoice">
+              <select class="text_pole" :value="singleVoiceKey" @change="setSingleVoice">
                 <option value="">请选择</option>
                 <option v-for="voice in voices" :key="voiceKey(voice)" :value="voiceKey(voice)">
                   {{ voice.name }} · {{ profileName(voice.providerProfileId) }}
@@ -284,26 +275,26 @@
             </label>
             <label class="ganggang-voice-field">
               <span>名称</span>
-              <input v-model.trim="effect.name" type="text" />
+              <input v-model.trim="effect.name" class="text_pole" type="text" />
             </label>
             <label class="ganggang-voice-field">
               <span>播放种类</span>
-              <select v-model="effect.kind">
+              <select v-model="effect.kind" class="text_pole">
                 <option value="sfx">短音效（可进入整段朗读）</option>
                 <option value="ambience">环境音（独立播放）</option>
               </select>
             </label>
             <label class="ganggang-voice-field">
               <span>分类</span>
-              <input v-model.trim="effect.category" type="text" placeholder="门 / 脚步 / 环境" />
+              <input v-model.trim="effect.category" class="text_pole" type="text" placeholder="门 / 脚步 / 环境" />
             </label>
             <label class="ganggang-voice-field">
               <span>音频 URL</span>
-              <input v-model.trim="effect.url" type="url" />
+              <input v-model.trim="effect.url" class="text_pole" type="url" />
             </label>
             <label class="ganggang-voice-field">
               <span>给 AI 的说明</span>
-              <textarea v-model.trim="effect.description" rows="2" placeholder="例如：木门缓慢推开的吱呀声"></textarea>
+              <textarea v-model.trim="effect.description" class="text_pole" rows="2" placeholder="例如：木门缓慢推开的吱呀声"></textarea>
             </label>
             <label class="ganggang-voice-field">
               <span>试听音量</span>
@@ -322,7 +313,7 @@
           <div class="ganggang-voice-grid">
             <label class="ganggang-voice-field">
               <span>引擎来源</span>
-              <select v-model="auditionProfileId">
+              <select v-model="auditionProfileId" class="text_pole">
                 <option v-for="profile in enabledProfiles" :key="profile.id" :value="profile.id">
                   {{ profile.name || profile.id }}
                 </option>
@@ -331,7 +322,8 @@
             <label class="ganggang-voice-field">
               <span>音色（可手填 voiceId）</span>
               <input
-                v-model.trim="auditionVoiceId"
+v-model.trim="auditionVoiceId"
+                class="text_pole"
                 type="text"
                 list="ganggang-voice-options"
                 :placeholder="auditionProfile ? `留空则用默认音色 ${auditionProfile.defaultVoiceId || '（未设置）'}` : '留空则用默认音色'"
@@ -345,20 +337,20 @@
 
           <label class="ganggang-voice-field">
             <span>例句</span>
-            <textarea v-model="auditionText" rows="3"></textarea>
+            <textarea v-model="auditionText" class="text_pole" rows="3"></textarea>
           </label>
 
           <label v-if="auditionProfileType === 'xiaomi-mimo'" class="ganggang-voice-field">
             <span>导演台本（user 指令，可留空）</span>
-            <textarea v-model="auditionInstruction" rows="3" placeholder="角色：… 场景：… 指导：…"></textarea>
+            <textarea v-model="auditionInstruction" class="text_pole" rows="3" placeholder="角色：… 场景：… 指导：…"></textarea>
           </label>
           <label v-else-if="auditionProfileType === 'doubao'" class="ganggang-voice-field">
             <span>导演指令 context_texts（可留空，不计费）</span>
-            <input v-model.trim="auditionContextText" type="text" placeholder="用黏人撒娇的语气，尾音上扬…" />
+            <input v-model.trim="auditionContextText" class="text_pole" type="text" placeholder="用黏人撒娇的语气，尾音上扬…" />
           </label>
           <label v-else-if="auditionProfileType === 'minimax'" class="ganggang-voice-field">
             <span>情绪档位</span>
-            <select v-model="auditionEmotion">
+            <select v-model="auditionEmotion" class="text_pole">
               <option value="">不指定</option>
               <option value="happy">happy · 开心</option>
               <option value="sad">sad · 难过</option>
@@ -416,7 +408,8 @@
             <label class="ganggang-voice-field">
               <span>目标角色（配音表条目或新名）</span>
               <input
-                v-model.trim="castingRoomRoleName"
+v-model.trim="castingRoomRoleName"
+                class="text_pole"
                 type="text"
                 list="ganggang-casting-room-roles"
                 placeholder="如：邹峥 / 叙述者"
@@ -427,62 +420,109 @@
             </datalist>
             <label class="ganggang-voice-field">
               <span>候选数量上限</span>
-              <input v-model.number="castingRoomLimit" type="number" min="1" max="10" step="1" />
+              <input v-model.number="castingRoomLimit" class="text_pole" type="number" min="1" max="10" step="1" />
             </label>
           </div>
-          <label class="ganggang-voice-field">
-            <span>口味档案（AI 提名与例句生成都会参考）</span>
-            <textarea v-model="castingRoomTasteNotes" rows="2"></textarea>
+<label class="ganggang-voice-field">
+            <span>口味档案(AI 提名与例句生成都会参考)</span>
+            <textarea
+v-model="castingRoomTasteNotes"
+              class="text_pole"
+              rows="2"
+              placeholder="如:干净、温和、低唤起;拒绝拖长音与播音腔。"
+            ></textarea>
           </label>
           <div class="ganggang-voice-actions">
             <button
-              class="menu_button"
+              class="menu_button ganggang-voice-primary"
               type="button"
               :disabled="castingRoomBusy"
               @click="startCastingRoom"
             >
-              {{ castingRoomBusy ? 'AI 海选中…' : '开始 AI 海选' }}
+              {{ castingRoomBusy ? 'AI 海选中...' : '开始 AI 海选' }}
             </button>
             <span class="ganggang-voice-hint">
-              提名 ≤ {{ castingRoomLimit }} 个候选并逐个合成例句；小米/Fish 免费，豆包/MiniMax 按字符小额计费。
+              提名 ≤ {{ castingRoomLimit }} 个候选并逐个合成例句;小米/Fish 免费,豆包/MiniMax 按字符小额计费。
             </span>
           </div>
           <p v-if="castingRoomPhaseText" class="ganggang-voice-hint">{{ castingRoomPhaseText }}</p>
         </article>
 
-        <article v-if="castingRoomCandidates.length" class="ganggang-voice-card">
+        <!-- 空态:还没海选过时的极简引导。 -->
+        <article
+          v-if="!castingRoomBusy && castingRoomCandidates.length === 0"
+          class="ganggang-voice-card ganggang-voice-empty"
+        >
+          <p class="ganggang-voice-hint">
+            先填目标角色(或直接从配音表条目里选),再点「开始 AI 海选」;AI 会读完人设挑候选,逐个出样给你试听。
+          </p>
+        </article>
+
+<article v-if="castingRoomCandidates.length" class="ganggang-voice-card">
           <div class="ganggang-voice-card-header">
-            <strong>候选试音（例句：{{ castingRoomExampleLine }}）</strong>
+            <strong>候选试音(例句:{{ castingRoomExampleLine }})</strong>
           </div>
-          <div v-for="(candidate, index) in castingRoomCandidates" :key="`${candidate.providerProfileId}-${candidate.voiceId}`" class="ganggang-voice-grid">
-            <label class="ganggang-voice-field">
-              <span>#{{ index + 1 }} · {{ profileName(candidate.providerProfileId) }}</span>
-              <input :value="candidate.voiceId" type="text" readonly />
-            </label>
-            <label class="ganggang-voice-field">
-              <span>提名理由</span>
-              <input :value="candidate.reason" type="text" readonly />
-            </label>
-            <div class="ganggang-voice-actions">
-              <button
-                class="menu_button"
-                type="button"
-                :disabled="candidate.status !== 'ready'"
-                @click="playCastingRoomSample(candidate)"
-              >
-                试听
-              </button>
-              <button
-                class="menu_button"
-                type="button"
-                :disabled="candidate.status !== 'ready' || castingRoomBusy"
-                @click="pinCastingRoomChoice(candidate)"
-              >
-                定角
-              </button>
-              <span class="ganggang-voice-hint">{{ candidateStatusText(candidate) }}</span>
-            </div>
-          </div>
+          <ul class="ganggang-voice-candidates">
+            <li
+              v-for="(candidate, index) in castingRoomCandidates"
+              :key="`${candidate.providerProfileId}-${candidate.voiceId}`"
+              class="ganggang-voice-cand"
+              :class="{
+                'is-cast': isCandidatePinned(candidate),
+                'is-failed': candidate.status === 'failed',
+              }"
+            >
+              <div class="ganggang-voice-cand-row1">
+                <span class="ganggang-voice-cand-num">{{ String(index + 1).padStart(2, '0') }}</span>
+                <span
+                  class="ganggang-voice-cand-engine"
+                  :class="{
+                    'engine-doubao': profileType(candidate.providerProfileId) === 'doubao',
+                    'engine-minimax': profileType(candidate.providerProfileId) === 'minimax',
+                    'engine-xiaomi-mimo': profileType(candidate.providerProfileId) === 'xiaomi-mimo',
+                    'engine-fish': profileType(candidate.providerProfileId) === 'fish',
+                  }"
+                >
+                  {{ profileName(candidate.providerProfileId) }}
+                </span>
+                <span
+                  class="ganggang-voice-cand-status"
+                  :class="{
+                    'st-ready': candidate.status === 'ready',
+                    'st-busy': candidate.status === 'synthesizing',
+                    'st-queue': candidate.status === 'pending',
+                    'st-fail': candidate.status === 'failed',
+                  }"
+                >
+                  {{ candidateStatusText(candidate) }}
+                </span>
+                <span v-if="isCandidatePinned(candidate)" class="ganggang-voice-cand-flag">已定角</span>
+                <span class="ganggang-voice-cand-actions">
+                  <button
+                    class="menu_button ganggang-voice-primary"
+                    type="button"
+                    :disabled="candidate.status !== 'ready'"
+                    @click="playCastingRoomSample(candidate)"
+                  >
+                    ▶ 试听
+                  </button>
+                  <button
+                    class="menu_button"
+                    type="button"
+                    :disabled="candidate.status !== 'ready' || castingRoomBusy"
+                    @click="pinCastingRoomChoice(candidate)"
+                  >
+                    定角
+                  </button>
+                </span>
+              </div>
+              <div class="ganggang-voice-cand-voice">{{ candidate.voiceId }}</div>
+              <p v-if="candidate.reason" class="ganggang-voice-cand-reason">{{ candidate.reason }}</p>
+              <p v-if="candidate.status === 'failed'" class="ganggang-voice-cand-error">
+                {{ candidate.error || '合成失败' }}
+              </p>
+            </li>
+          </ul>
         </article>
       </template>
 
@@ -516,6 +556,8 @@
         </ul>
         <p v-if="recentVoices.length === 0" class="ganggang-voice-hint">这一页还没有生成语音。</p>
       </template>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -523,6 +565,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { createManualCastEntry, findCastingEntryError, parseAliasInput } from './casting';
+import { VOICE_CONSOLE_VERSION } from './edition';
 import type { CastingRoomCandidateView, VoiceRuntime } from './runtime';
 import type { CastEntry, CastRole, RecentVoiceStatus, VoiceOption } from './types';
 
@@ -553,6 +596,35 @@ const tabs = [
 type TabValue = (typeof tabs)[number]['value'];
 const activeTab = ref<TabValue>('sources');
 const enabledProfiles = computed(() => settings.value.profiles.filter(profile => profile.enabled));
+const selectedProfileId = ref(settings.value.profiles[0]?.id ?? '');
+const selectedProfile = computed(
+  () =>
+    settings.value.profiles.find(profile => profile.id === selectedProfileId.value) ??
+    settings.value.profiles[0] ??
+    null,
+);
+watch(
+  () => settings.value.profiles.map(profile => profile.id).join('|'),
+  () => {
+    if (!settings.value.profiles.some(profile => profile.id === selectedProfileId.value)) {
+      selectedProfileId.value = settings.value.profiles[0]?.id ?? '';
+    }
+  },
+);
+
+function addSourceProfile(): void {
+  selectedProfileId.value = runtime.addProfile('openai-compatible');
+}
+
+function saveSourceProfile(): void {
+  runtime.saveSettings();
+}
+
+function removeSourceProfile(): void {
+  if (!selectedProfile.value) return;
+  runtime.removeProfile(selectedProfile.value.id);
+  selectedProfileId.value = settings.value.profiles[0]?.id ?? '';
+}
 const currentCasting = computed(() => settings.value.castingByCharacter[runtime.currentCharacterKey.value] ?? null);
 const singleVoiceKey = computed(() => {
   const voice = settings.value.readingDefaults.singleVoice;
@@ -702,6 +774,7 @@ const castingRoomTasteNotes = ref(runtime.settings.value.tasteProfile.styleNotes
 const castingRoomBusy = runtime.castingRoomBusy;
 const castingRoomExampleLine = computed(() => runtime.castingRoom.value.exampleLine);
 const castingRoomCandidates = computed(() => runtime.castingRoom.value.candidates);
+const castingRoomProgress = computed(() => runtime.castingRoom.value.progress);
 const castingRoomPhaseText = computed(() => {
   const room = runtime.castingRoom.value;
   if (room.phase === 'idle') return '';
@@ -744,9 +817,34 @@ function pinCastingRoomChoice(candidate: CastingRoomCandidateView): void {
 
 function candidateStatusText(candidate: { status: string; error?: string }): string {
   if (candidate.status === 'ready') return '可试听';
-  if (candidate.status === 'synthesizing') return '合成中…';
+  if (candidate.status === 'synthesizing') return '合成中';
   if (candidate.status === 'pending') return '排队中';
-  return candidate.error || '合成失败';
+  return '失败';
+}
+
+function profileType(profileId: string): string {
+  return settings.value.profiles.find(profile => profile.id === profileId)?.type ?? 'openai-compatible';
+}
+
+/** 该候选的引擎+音色是否就是当前配音表条目已定的那一个。 */
+function isCandidatePinned(candidate: CastingRoomCandidateView): boolean {
+  const roleName = runtime.castingRoom.value.roleName.trim();
+  if (!roleName) return false;
+  const normalized = roleName.toLocaleLowerCase();
+  const isNarrator = normalized === '旁白' || normalized === 'narrator';
+  const table = runtime.settings.value.castingByCharacter[runtime.currentCharacterKey.value];
+  if (!table) return false;
+  const entry = table.entries.find(item =>
+    isNarrator
+      ? item.role === 'narrator'
+      : item.role === 'character' &&
+        [item.displayName, ...item.aliases].some(alias => alias.trim().toLocaleLowerCase() === normalized),
+  );
+  return (
+    !!entry?.voice &&
+    entry.voice.providerProfileId === candidate.providerProfileId &&
+    entry.voice.voiceId === candidate.voiceId
+  );
 }
 const auditionProfileId = ref('');
 const auditionVoiceId = ref('');

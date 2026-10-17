@@ -126,7 +126,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   const settings = ref(loadVoiceSettings());
   const voices = ref<VoiceOption[]>([]);
   const recentVoices = ref<RecentVoiceItem[]>([]);
-  const status = ref('等待朗读');
+  const status = ref('');
   const error = ref('');
   const providerBusy = ref(false);
   const auditionBusy = ref(false);
@@ -382,7 +382,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     }
   }
 
-  function addProfile(type: TtsProviderKind): void {
+  function addProfile(type: TtsProviderKind): string {
     const id = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const name: Record<TtsProviderKind, string> = {
       edge: 'Edge TTS',
@@ -393,6 +393,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       fish: 'Fish Audio TTS',
     };
     settings.value.profiles.push(normalizeProviderProfile({ id, name: name[type], type, enabled: true }, id));
+    return id;
   }
 
   function removeProfile(profileId: string): void {
@@ -571,12 +572,13 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         continue;
       }
       status.value = `正在合成候选（${room.progress.done + 1}/${room.candidates.length}）：${profile.name}…`;
+      // timeout 必须在 try 外:finally 里要 dispose,而 const 是块级作用域,写在 try 内 finally 取不到。
+      const timeout = withTimeout(
+        castingRoomAbortController?.signal,
+        90_000,
+        `${profile.name} 试音样本合成超时(90 秒)`,
+      );
       try {
-        const timeout = withTimeout(
-          castingRoomAbortController?.signal,
-          90_000,
-          `${profile.name} 试音样本合成超时（90 秒）`,
-        );
         const item = await recentStore.generate(
           {
             textPreview: room.exampleLine,
@@ -1278,6 +1280,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     edition,
     builtinSoundCatalogPresentation,
     settings,
+    saveSettings: persistSettings,
     voices,
     recentVoices,
     status,

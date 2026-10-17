@@ -1,78 +1,81 @@
+/* 配音室沿用同系列(生图机/调音台)的酒馆原生 inline-drawer 视觉语言:
+   折叠标题交给酒馆,标签是横向下划线式,主按钮用强调色描边而不是实底。 */
 .ganggang-voice-panel {
-  --voice-accent: #8ed8ff;
-  --voice-accent-soft: color-mix(in srgb, var(--voice-accent) 18%, transparent);
-  margin: 10px 0;
-  border: 1px solid var(--SmartThemeBorderColor);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 92%, transparent);
-  color: var(--SmartThemeBodyColor);
-  overflow: hidden;
+  /* 面板在酒馆扩展抽屉里只有 ~332px 宽,所有排版都按这个实际容器来,不要用视口媒体查询。 */
+  --voice-accent: var(--SmartThemeQuoteColor, #8ab4f8);
+  --voice-accent-soft: color-mix(in srgb, var(--voice-accent) 16%, transparent);
+  /* 本主题 --SmartThemeBorderColor 可能是全透明;分隔线一律从文字色派生,保证可见。 */
+  --voice-hair: color-mix(in srgb, var(--SmartThemeBodyColor, #ddd) 16%, transparent);
+  --voice-hair-strong: color-mix(in srgb, var(--SmartThemeBodyColor, #ddd) 28%, transparent);
+  --voice-surface: color-mix(in srgb, var(--SmartThemeBlurTintColor, #171717) 92%, #000 8%);
+  --voice-ok: #6cc26c;
+  --voice-fail: #e07a7a;
+  --voice-warn: #d9a44a;
+  color: var(--SmartThemeBodyColor, inherit);
 }
 
 .ganggang-voice-panel * {
   box-sizing: border-box;
 }
 
-.ganggang-voice-header {
-  display: flex;
+/* 铁律:面板里所有按钮不折行、不被压成竖排单字(332px 窄栏里最容易出这个毛病)。 */
+.ganggang-voice-panel button {
+  white-space: nowrap;
+}
+
+/* 来源选择工具条:与生图机"画图预设"一致(下拉框 + 增删改按钮)。 */
+.ganggang-voice-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  background: linear-gradient(135deg, var(--voice-accent-soft), transparent 68%);
+  gap: 0.65em;
 }
 
-.ganggang-voice-title {
-  margin: 0;
-  font-size: calc(var(--mainFontSize) * 1.05);
-  font-weight: 700;
-}
-
-.ganggang-voice-subtitle,
 .ganggang-voice-hint {
   margin: 4px 0 0;
   color: var(--SmartThemeEmColor);
   font-size: calc(var(--mainFontSize) * 0.82);
 }
 
+/* 标签:与生图机/调音台一致的横向下划线式;6 个标签在 332px 里横向滚动。 */
 .ganggang-voice-tabs {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  border-block: 1px solid var(--SmartThemeBorderColor);
+  display: flex;
+  gap: 0.35em;
+  margin-bottom: 0.75em;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--voice-hair);
 }
 
 .ganggang-voice-tab {
-  min-height: 42px;
+  flex: 0 0 auto;
+  padding: 0.45em 0.75em;
   border: 0;
-  border-right: 1px solid var(--SmartThemeBorderColor);
+  border-bottom: 2px solid transparent;
   border-radius: 0;
   background: transparent;
   color: inherit;
-}
-
-.ganggang-voice-tab:last-child {
-  border-right: 0;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .ganggang-voice-tab.is-active {
+  border-bottom-color: var(--voice-accent);
   color: var(--voice-accent);
-  background: var(--voice-accent-soft);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .ganggang-voice-content {
   display: grid;
-  gap: 12px;
-  padding: 14px;
+  gap: 0.65em;
 }
 
 .ganggang-voice-card {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--SmartThemeBorderColor);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 74%, transparent);
+  gap: 0.65em;
+  padding: 0.65em;
+  border: 1px solid var(--voice-hair);
+  border-radius: 0.45em;
+  background: var(--voice-surface);
 }
 
 .ganggang-voice-card-header,
@@ -80,7 +83,7 @@
 .ganggang-voice-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.5em;
 }
 
 .ganggang-voice-card-header {
@@ -91,15 +94,43 @@
   flex-wrap: wrap;
 }
 
+/* 窄栏里按钮不许被旁边的长提示挤扁(否则「新增来源」四字竖排)。 */
+.ganggang-voice-actions > .menu_button,
+.ganggang-voice-card-header > .menu_button,
+.ganggang-voice-actions > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.ganggang-voice-actions > .ganggang-voice-hint {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+/* 抽屉只有 ~332px:两列网格在窄栏里换回单列,靠容器查询而不是视口宽度。 */
+.ganggang-voice-panel {
+  container-type: inline-size;
+}
+
+@container (max-width: 380px) {
+  .ganggang-voice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ganggang-voice-recent {
+    grid-template-columns: 1fr;
+  }
+}
+
 .ganggang-voice-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 0.65em;
 }
 
 .ganggang-voice-field {
   display: grid;
-  gap: 5px;
+  gap: 0.3em;
   min-width: 0;
 }
 
@@ -116,7 +147,7 @@
 
 .ganggang-voice-list {
   display: grid;
-  gap: 8px;
+  gap: 0.5em;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -125,7 +156,7 @@
 .ganggang-voice-recent {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 0.5em;
   align-items: center;
 }
 
@@ -153,54 +184,169 @@
 .ganggang-voice-dialogue,
 .ganggang-voice-sound-effect {
   border-radius: 999px;
-  color: var(--voice-accent, #8ed8ff);
-}
-
-@media (max-width: 700px) {
-  .ganggang-voice-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .ganggang-voice-tab:nth-child(2n),
-  .ganggang-voice-tab:last-child {
-    border-right: 0;
-  }
-
-  .ganggang-voice-tab:nth-child(-n + 4) {
-    border-bottom: 1px solid var(--SmartThemeBorderColor);
-  }
-
-  .ganggang-voice-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .ganggang-voice-recent {
-    grid-template-columns: 1fr;
-  }
+  color: var(--voice-accent);
 }
 
 .ganggang-voice-probe-row {
   display: grid;
   grid-template-columns: auto auto auto minmax(0, 1fr);
-  gap: 8px;
+  gap: 0.5em;
   align-items: center;
+}
+
+.ganggang-voice-probe-row > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ganggang-voice-probe-row > .menu_button {
+  flex: 0 0 auto;
+}
+
+.ganggang-voice-empty {
+  border-style: dashed;
+}
+
+.ganggang-voice-empty > .ganggang-voice-hint {
+  margin: 0;
 }
 
 .ganggang-voice-probe-dot {
   width: 0.72em;
   height: 0.72em;
   border-radius: 999px;
-  background: var(--SmartThemeBorderColor);
+  background: var(--voice-hair-strong);
 }
 
 .ganggang-voice-probe-dot.is-ok {
-  background: #6cc26c;
+  background: var(--voice-ok);
 }
 
 .ganggang-voice-probe-dot.is-fail {
-  background: #e07a7a;
+  background: var(--voice-fail);
 }
 
 .ganggang-voice-probe-dot.is-busy {
-  background: var(--voice-accent, #8ed8ff);
+  background: var(--voice-accent);
 }
+
+/* ---------- 选角间候选卡(4 行单列,332px 抽屉内) ---------- */
+.ganggang-voice-candidates {
+  display: grid;
+  gap: 0.65em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ganggang-voice-cand {
+  display: grid;
+  gap: 0.3em;
+  padding: 0.6em 0.65em;
+  border: 1px solid var(--voice-hair);
+  border-radius: 0.45em;
+  background: var(--voice-surface);
+}
+
+.ganggang-voice-cand.is-failed .ganggang-voice-cand-voice,
+.ganggang-voice-cand.is-failed .ganggang-voice-cand-reason {
+  opacity: 0.55;
+}
+
+.ganggang-voice-cand-row1 {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.35em;
+}
+
+.ganggang-voice-cand-num {
+  flex: 0 0 auto;
+  font-family: var(--monoFont, monospace);
+  font-size: calc(var(--mainFontSize) * 1.06);
+  font-weight: 700;
+  color: var(--voice-accent);
+}
+
+.ganggang-voice-cand-engine,
+.ganggang-voice-cand-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: calc(var(--mainFontSize) * 0.78);
+  white-space: nowrap;
+}
+
+.ganggang-voice-cand-engine {
+  color: var(--SmartThemeEmColor);
+}
+
+.ganggang-voice-cand-status {
+  font-family: var(--monoFont, monospace);
+  font-weight: 600;
+}
+
+.ganggang-voice-cand-status.st-ready { color: var(--voice-ok); }
+.ganggang-voice-cand-status.st-busy { color: var(--voice-accent); }
+.ganggang-voice-cand-status.st-queue { color: var(--SmartThemeEmColor); }
+.ganggang-voice-cand-status.st-fail { color: var(--voice-fail); }
+
+.ganggang-voice-cand-flag {
+  flex: 0 0 auto;
+  color: var(--voice-accent);
+  font-size: calc(var(--mainFontSize) * 0.76);
+  font-weight: 600;
+}
+
+/* 按钮推到行尾,永不收缩、永不竖排。 */
+.ganggang-voice-cand-actions {
+  display: inline-flex;
+  gap: 0.35em;
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+}
+
+.ganggang-voice-cand-actions > .menu_button {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  font-size: calc(var(--mainFontSize) * 0.76);
+  white-space: nowrap;
+}
+
+.ganggang-voice-cand-voice {
+  overflow: hidden;
+  color: var(--SmartThemeEmColor);
+  font-family: var(--monoFont, monospace);
+  font-size: calc(var(--mainFontSize) * 0.74);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ganggang-voice-cand-reason {
+  margin: 0;
+  color: var(--SmartThemeEmColor);
+  font-size: calc(var(--mainFontSize) * 0.85);
+  line-height: 1.5;
+}
+
+.ganggang-voice-cand-error {
+  margin: 0;
+  color: var(--voice-fail);
+  font-family: var(--monoFont, monospace);
+  font-size: calc(var(--mainFontSize) * 0.76);
+}
+
+/* 主操作(烧钱/关键)用强调色描边,和同系列 primary 按钮一致。 */
+.ganggang-voice-panel .ganggang-voice-primary {
+  border-color: var(--voice-accent);
+  color: var(--voice-accent);
+  font-weight: 600;
+}
+
+.ganggang-voice-panel .ganggang-voice-primary:disabled {
+  opacity: 0.35;
+}
+
