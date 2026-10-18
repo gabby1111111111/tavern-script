@@ -1,12 +1,12 @@
-# 杠杠の调音台 v0.3.2
+# 杠杠の调音台 v0.4.0
 
-一个运行在 SillyTavern / Tavern Helper 中的 BGM 与环境音后台脚本。它根据正文 AI 输出的控制标记自动搜索、播放并维护音频。
+一个运行在 SillyTavern / Tavern Helper 中的 BGM 后台脚本。它根据正文 AI 输出的控制标记自动搜索、播放并维护音频。
 
-当前稳定版本为 v0.3.2，公开安装请使用固定标签 `杠杠の调音台-v0.3.2`。
+当前稳定版本为 v0.4.0，公开安装请使用固定标签 `杠杠の调音台-v0.4.0`。
 
-> **本版本备注：B 站环境音模块为闲置状态、不可用。** B 站取播放地址的接口已不再返回
-> 音频（搜索仍能返回 BV 号），因此环境音解析不出可播放音频。**BGM 不受影响，可正常使用。**
-> 请在"环境音"中关闭该模块，直到上游接口恢复。
+> **本版本已移除环境音模块。** B 站取播放地址的接口不再返回音频，环境音在 v0.3.2 已
+> 标记为闲置，本版本将相关代码、设置与界面一并删除。**BGM 功能不受影响。**
+> 原环境音实现保留在 tag `杠杠の调音台-v0.3.2`，日后若有可用音源可取回。
 
 ## 安装
 
@@ -15,15 +15,14 @@
 新建一个 Tavern Helper 后台脚本，填入固定版本导入语句：
 
 ```ts
-import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の调音台-v0.3.2/dist/杠杠の调音台/index.js';
+import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠の调音台-v0.4.0/dist/杠杠の调音台/index.js';
 ```
 
-加载后，在扩展设置中应看到标题为"杠杠の调音台 v0.3.2"的设置抽屉。
+加载后，在扩展设置中应看到标题为"杠杠の调音台 v0.4.0"的设置抽屉。
 
 ## 功能
 
 - BGM 可使用完全随机模式，或从指定网易云歌单中抽取候选歌曲。
-- 环境音根据正文地点从 Bilibili 搜索白噪音，并支持备用 BV 号。
 - 提示词支持新建、选择、保存和删除多套方案；修改从下一轮 AI 回复开始生效。
 - 可设置"隔几楼出歌"：`0` 表示每个新正常 AI 回复都发送出歌提示，`1` 表示第 1、3、5 楼发送，依此类推。
 - 可选"Swipe 新回答也出歌"；Swipe 资格通过 floor ledger 管理，不再依赖 MESSAGE_SWIPED 事件顺序。
@@ -32,19 +31,14 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 ## 使用
 
 1. 在"BGM"中开启模块并选择歌曲来源。
-2. 在"环境音"中按需开启环境音，并填写备用 BV 号。
-3. 在"提示词"中选择现有方案，或新建、编辑并保存自己的方案。
-4. 在"更多"中调整播放列表、候选数量、出歌间隔和 Swipe 行为。
+2. 在"提示词"中选择现有方案，或新建、编辑并保存自己的方案。
+3. 在"更多"中调整播放列表、候选数量、出歌间隔和 Swipe 行为。
 
 ## 已知限制
 
-- **环境音（B 站）为闲置状态，不可用。**
-  B 站搜索接口仍能返回 BV 号，但取播放地址的接口已不再返回音频
-  （恒为 `url: '' / br: -1 / size: 0`），因此环境音每轮都会解析失败。
-  代码保留等待上游恢复，恢复判据是 B 站 `types=url` 能返回非空 `url` 且 `size > 0`。
-  在此期间请在"环境音"中关闭该模块。
 - BGM 使用网易云音源；实测约 96% 的曲目可取到完整播放地址，
   少数冷门或版权受限曲目本轮会跳过，正文生成不会因此中断。
+- 环境音已移除，不再提供地点白噪音。
 - 远程音乐接口、跨域代理或浏览器自动播放策略不可用时，本轮音频可能无法播放；正文生成不会因此中断。
 
 ## 数据与安全
@@ -61,6 +55,6 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
   - `pnpm exec ts-node .../tests/ganggang-mixer-swipe-eligibility.test.ts`
 - ESLint：`pnpm exec eslint "src/杠杠の调音台" "tests/ganggang-bgm-settings.test.ts" "tests/ganggang-mixer-vs-image-cadence.test.ts" "tests/ganggang-mixer-swipe-eligibility.test.ts"`
 - 生产构建：`pnpm build`
-- 真实运行时可通过 `window.__ganggangConsoleAudit` 核对提示注入、标记解析、音乐查询、播放列表、环境音和播放结果。
+- 真实运行时可通过 `window.__ganggangConsoleAudit` 核对提示注入、标记解析、音乐查询、播放列表和播放结果。
 
-进一步阅读：[变更记录](CHANGELOG.md) · [v0.3.2 发布说明](docs/releases/v0.3.2.md)
+进一步阅读：[变更记录](CHANGELOG.md) · [v0.4.0 发布说明](docs/releases/v0.4.0.md)

@@ -4,14 +4,9 @@ import { ref, watch } from 'vue';
 import { z } from 'zod';
 import { DEFAULT_NETEASE_PLAYLISTS } from './bgm-playlist';
 
-export const GANGGANG_MIXER_VERSION = '0.3.2';
+export const GANGGANG_MIXER_VERSION = '0.4.0';
 
 export const DEFAULT_BGM_INJECTION_LOCATION = '需要 BGM 时，必须在正文内容之前单独输出一行 <杠杠-BGM=歌曲名-歌手> 标记。';
-
-export const DEFAULT_AMBIENT_PROMPT_CONTENT = [
-  '1. 必须在 <content> 标签的正文内容之前单独输出一行 <杠杠-环境音=白噪音-地点> 标记，必须在 <content> 标签外部。',
-  '2. 上一轮的地点是 {{current_ambient_location}}；如果现在地点不变，请原样输出 <杠杠-环境音=白噪音-{{current_ambient_location}}> 标记，否则输出的地点改成新地点。',
-].join('\n');
 
 export const DEFAULT_BGM_PROMPT_CONTENT = [
   '你正在正常生成角色回复正文。除非用户明确要求不要配 BGM，否则每次正常回复必须按当前正文氛围追加一条歌曲 BGM。',
@@ -29,7 +24,6 @@ export const DEFAULT_BGM_REQUIRED_LIST = '{{required_candidates}}';
 
 export const BGM_PROMPT_FIELD_KEYS = [
   'bgm_injection_location',
-  'ambient_prompt_content',
   'bgm_prompt_content',
   'bgm_forbidden_list_prompt',
   'bgm_required_list_prompt',
@@ -39,7 +33,6 @@ export type BgmPromptField = (typeof BGM_PROMPT_FIELD_KEYS)[number];
 
 const BgmPromptFields = z.object({
   bgm_injection_location: z.string(),
-  ambient_prompt_content: z.string(),
   bgm_prompt_content: z.string(),
   bgm_forbidden_list_prompt: z.string(),
   bgm_required_list_prompt: z.string(),
@@ -61,7 +54,6 @@ export const DEFAULT_BGM_PROMPT_PRESET: BgmPromptPreset = {
   id: DEFAULT_BGM_PROMPT_PRESET_ID,
   name: DEFAULT_BGM_PROMPT_PRESET_NAME,
   bgm_injection_location: DEFAULT_BGM_INJECTION_LOCATION,
-  ambient_prompt_content: DEFAULT_AMBIENT_PROMPT_CONTENT,
   bgm_prompt_content: DEFAULT_BGM_PROMPT_CONTENT,
   bgm_forbidden_list_prompt: DEFAULT_BGM_FORBIDDEN_LIST,
   bgm_required_list_prompt: DEFAULT_BGM_REQUIRED_LIST,
@@ -336,14 +328,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readBgmPromptFields(value: unknown, fallback: BgmPromptFields = DEFAULT_BGM_PROMPT_PRESET): BgmPromptFields {
   const record = isRecord(value) ? value : {};
-  const fallbackAmbient = fallback.ambient_prompt_content.trim() ? fallback.ambient_prompt_content : DEFAULT_AMBIENT_PROMPT_CONTENT;
-  const fields = { ...fallback, ambient_prompt_content: fallbackAmbient };
+  const fields = { ...fallback };
   for (const key of BGM_PROMPT_FIELD_KEYS) {
     if (typeof record[key] !== 'string') continue;
-    if (key === 'ambient_prompt_content' && !record[key].trim()) {
-      fields[key] = DEFAULT_AMBIENT_PROMPT_CONTENT;
-      continue;
-    }
     fields[key] = record[key];
   }
   return fields;
@@ -500,13 +487,11 @@ const PlaylistEntry = z.object({
 
 const ModuleEnabled = z.object({
   bgm: z.boolean().default(true),
-  ambient: z.boolean().default(false),
 });
 
 const BgmSettings = z
   .object({
     bgm_injection_location: z.string().default(DEFAULT_BGM_INJECTION_LOCATION),
-    ambient_prompt_content: z.string().default(DEFAULT_AMBIENT_PROMPT_CONTENT),
     bgm_prompt_content: z.string().default(DEFAULT_BGM_PROMPT_CONTENT),
     bgm_forbidden_list_prompt: z.string().default(DEFAULT_BGM_FORBIDDEN_LIST),
     bgm_required_list_prompt: z.string().default(DEFAULT_BGM_REQUIRED_LIST),
@@ -516,7 +501,6 @@ const BgmSettings = z
      generate_on_swipe: z.boolean().default(true),
      playlist_limit: z.coerce.number().int().min(1).max(20).default(5),
     playlist_sample_count: z.coerce.number().int().min(1).max(20).default(5),
-    ambient_fallback_bv_ids: z.array(z.string()).default([]),
     debug_mode: z.boolean().default(false),
     module_enabled: ModuleEnabled.prefault({}),
     source_mode: z.enum(['random', 'netease_playlist']).default('random'),

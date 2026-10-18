@@ -1,7 +1,6 @@
 import { createPinia } from 'pinia';
 import { createApp, watch } from 'vue';
 import { createScriptIdDiv, teleportStyle } from '@util/script';
-import { resolveBilibiliAmbientAudio } from './ambient-audio';
 import BgmSettings from './BgmSettings.vue';
 import {
   getNeteaseCandidatesForGeneration,
@@ -56,15 +55,7 @@ type MarkerScanner = {
   getState: () => { generationId: number; resolved: boolean; action: BgmAction | null };
 };
 
-type AmbientAction = { title: string; location: string };
-type AmbientMarkerScanner = {
-  pushSnapshot: (fullText: string) => AmbientAction | null;
-  finish: () => AmbientAction | null;
-  getState: () => { generationId: number; resolved: boolean; action: AmbientAction | null };
-};
-
 const markerPattern = /<杠杠-BGM=([^<>\r\n]+)>/i;
-const ambientMarkerPattern = /<杠杠-环境音=([^<>\r\n]+)>/i;
 
 function parseBgmMarkerBody(body: string): BgmAction | null {
   const content = body.trim();
@@ -109,56 +100,6 @@ function createMarkerScanner(generationId: number, onAction: (action: BgmAction)
     },
     finish() {
       return action ?? resolve({ type: 'none' });
-    },
-    getState() {
-      void latestText;
-      return { generationId, resolved, action };
-    },
-  };
-}
-
-function parseAmbientMarkerBody(body: string): AmbientAction | null {
-  const title = body.trim();
-  const prefix = '白噪音-';
-  if (!title.startsWith(prefix)) return null;
-
-  const location = title.slice(prefix.length).trim();
-  if (!location) return null;
-  return { title, location };
-}
-
-function createAmbientMarkerScanner(
-  generationId: number,
-  onAction: (action: AmbientAction) => void,
-): AmbientMarkerScanner {
-  let latestText = '';
-  let resolved = false;
-  let action: AmbientAction | null = null;
-
-  const resolve = (next: AmbientAction) => {
-    resolved = true;
-    action = next;
-    onAction(next);
-    return next;
-  };
-
-  return {
-    pushSnapshot(fullText) {
-      if (resolved || typeof fullText !== 'string') return null;
-      latestText = fullText;
-
-      const prefix = latestText.slice(0, 128);
-      if (/^\s*<杠杠-环境音=/i.test(prefix) && !prefix.includes('>')) return null;
-
-      const match = latestText.match(ambientMarkerPattern);
-      if (!match) return null;
-
-      const parsed = parseAmbientMarkerBody(match[1]);
-      if (!parsed) return null;
-      return resolve(parsed);
-    },
-    finish() {
-      return action;
     },
     getState() {
       void latestText;
@@ -219,22 +160,10 @@ function getCurrentBgmTitles() {
     .filter(Boolean);
 }
 
-function getCurrentAmbientTitle() {
-  const currentAudio = getCurrentAudio('ambient');
-  return typeof currentAudio.title === 'string' ? currentAudio.title.trim() : '';
-}
-
-function getAmbientLocationFromTitle(title: string) {
-  const prefix = '白噪音-';
-  return title.startsWith(prefix) ? title.slice(prefix.length).trim() : '';
-}
-
 type PromptTemplateValues = {
   current_bgm_playlist: string;
   required_candidates: string;
   playlist_id: string;
-  current_ambient_location: string;
-  current_ambient_title: string;
 };
 
 function renderPromptTemplate(template: string, values: PromptTemplateValues) {
@@ -259,7 +188,6 @@ function createAudioPromptContent(
   titles: string[],
   sourceContext: BgmSourceContext,
   sourceError: string | null,
-  currentAmbientTitle: string,
   includeBgmPrompt = isBgmEnabled(),
 ) {
   const currentPlaylist = titles.length
@@ -281,8 +209,6 @@ function createAudioPromptContent(
     current_bgm_playlist: currentPlaylist,
     required_candidates: requiredCandidates,
     playlist_id: sourceContext.playlistId ?? '（无）',
-    current_ambient_location: getAmbientLocationFromTitle(currentAmbientTitle) || '（无）',
-    current_ambient_title: currentAmbientTitle || '（当前没有正在播放的环境音）',
   };
   const promptContent = ['<杠杠の调音台>'];
 
@@ -315,14 +241,6 @@ function createAudioPromptContent(
     }
   }
 
-  if (isAmbientEnabled()) {
-    promptContent.push(
-      '【模块二：环境音】',
-      '【环境音要求】',
-      renderPromptTemplate(bgmSettingsStore.settings.ambient_prompt_content, values).trim(),
-    );
-  }
-
   promptContent.push('</杠杠の调音台>');
   return promptContent.join('\n');
 }
@@ -345,10 +263,6 @@ let generationId = 0;
 let activeScanner: MarkerScanner | null = null;
 let activeMusicGenerationId = 0;
 let activeGenerationSourceContext: BgmSourceContext | null = null;
-let ambientGenerationId = 0;
-let activeAmbientScanner: AmbientMarkerScanner | null = null;
-let activeAmbientGenerationId = 0;
-let activeAmbientRequestController: AbortController | null = null;
 let bgmPromptCadenceState: BgmPromptCadenceState = createBgmPromptCadenceState(
   bgmSettingsStore.settings.bgm_prompt_interval,
 );
@@ -434,16 +348,6 @@ type RuntimeAudit = {
     cadence_reason: string | null;
     error: string | null;
   };
-  ambient: {
-    status: 'pending' | 'success' | 'fail' | 'skipped';
-    matched: boolean;
-    location: string | null;
-    current_location: string | null;
-    search_attempts: number;
-    source: 'search' | 'fallback' | null;
-    bvid: string | null;
-    error: string | null;
-  };
   audio_played: { status: 'pending' | 'success' | 'fail'; error: string | null };
   prompt_injection: {
     status: 'pending' | 'success' | 'fail';
@@ -483,16 +387,6 @@ const runtimeAudit: RuntimeAudit = {
     swipe_skipped: false,
     decision: null,
     cadence_reason: null,
-    error: null,
-  },
-  ambient: {
-    status: 'skipped',
-    matched: false,
-    location: null,
-    current_location: null,
-    search_attempts: 0,
-    source: null,
-    bvid: null,
     error: null,
   },
   audio_played: { status: 'pending', error: null },
@@ -560,12 +454,8 @@ function isBgmEnabled() {
   return bgmSettingsStore.settings.module_enabled.bgm;
 }
 
-function isAmbientEnabled() {
-  return bgmSettingsStore.settings.module_enabled.ambient;
-}
-
 function isAnyAudioEnabled() {
-  return isBgmEnabled() || isAmbientEnabled();
+  return isBgmEnabled();
 }
 
 function clearBgmPromptInjections() {
@@ -642,12 +532,10 @@ function installCurrentBgmPlaylistPrompt(
           : '尚未指定网易云歌单 ID';
       }
     }
-    const currentAmbientTitle = isAmbientEnabled() ? getCurrentAmbientTitle() : '';
     const content = createAudioPromptContent(
       titles,
       sourceContext,
       sourceError,
-      currentAmbientTitle,
       bgmPromptIncluded,
     );
     bgmPromptRuntime.uninjectPlaylist = injectPrompts(
@@ -789,20 +677,8 @@ function resetBgmGeneration(preservePending = false) {
   cancelBgmTransition();
 }
 
-function abortActiveAmbientRequest() {
-  activeAmbientRequestController?.abort();
-  activeAmbientRequestController = null;
-}
-
-function resetAmbientGeneration() {
-  activeAmbientGenerationId = 0;
-  activeAmbientScanner = null;
-  abortActiveAmbientRequest();
-}
-
 function resetAudioGenerationState() {
   resetBgmGeneration();
-  resetAmbientGeneration();
 }
 
 function waitForBgmFadeStep() {
@@ -900,12 +776,11 @@ async function playBgmAudioWithFade(runId: number, audio: Audio) {
   }
 }
 
-function pauseAudioSafely(type: 'bgm' | 'ambient') {
+function pauseAudioSafely(type: 'bgm') {
   try {
     pauseAudio(type);
   } catch (error) {
-    const moduleName = type === 'bgm' ? 'BGM' : '环境音';
-    debugWarn(`<杠杠-${moduleName}> 暂停失败音频时出错`, { message: errorText(error) });
+    debugWarn('<杠杠-BGM> 暂停失败音频时出错', { message: errorText(error) });
   }
 }
 
@@ -992,196 +867,6 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
   }
 }
 
-function isCurrentAmbientGeneration(runId: number) {
-  return runId === activeAmbientGenerationId;
-}
-
-function getCurrentAmbientState() {
-  const currentAudio = getCurrentAudio('ambient');
-  const title = typeof currentAudio.title === 'string' ? currentAudio.title.trim() : '';
-  return {
-    title,
-    src: typeof currentAudio.src === 'string' ? currentAudio.src : '',
-    playing: currentAudio.playing === true,
-    location: getAmbientLocationFromTitle(title),
-  };
-}
-
-function normalizeAmbientLocation(location: string) {
-  return location.trim().replace(/\s+/g, ' ');
-}
-
-function markAmbientReused(runId: number, action: AmbientAction, current: ReturnType<typeof getCurrentAmbientState>) {
-  runtimeAudit.ambient = {
-    ...runtimeAudit.ambient,
-    status: 'success',
-    matched: true,
-    location: action.location,
-    current_location: current.location || null,
-    error: null,
-  };
-  debugInfo('<杠杠-环境音> 地点未变化，沿用当前环境音', {
-    generationId: runId,
-    location: action.location,
-  });
-}
-
-function assertAmbientPlayback(audio: Audio) {
-  const current = getCurrentAmbientState();
-  const isTargetAudio = current.src === audio.url || current.title === audio.title;
-  if (current.playing && isTargetAudio) return current;
-
-  const settings = getAudioSettings('ambient');
-  throw new Error(
-    `环境音未开始播放（enabled=${settings.enabled}, muted=${settings.muted}, volume=${settings.volume}）`,
-  );
-}
-
-async function waitForAmbientPlaybackCheck(runId: number, audio: Audio) {
-  const deadline = Date.now() + AUDIO_PLAYBACK_CHECK_TIMEOUT_MS;
-  while (isCurrentAmbientGeneration(runId) && Date.now() < deadline) {
-    try {
-      return assertAmbientPlayback(audio);
-    } catch {
-      await waitForAudioPlaybackCheckStep();
-    }
-  }
-  if (!isCurrentAmbientGeneration(runId)) return null;
-  return assertAmbientPlayback(audio);
-}
-
-async function resumeCurrentAmbient(
-  runId: number,
-  action: AmbientAction,
-  current: ReturnType<typeof getCurrentAmbientState>,
-) {
-  if (!current.src || !isCurrentAmbientGeneration(runId)) return false;
-
-  try {
-    playAudio('ambient', { title: current.title || action.title, url: current.src });
-    const resumed = await waitForAmbientPlaybackCheck(runId, {
-      title: current.title || action.title,
-      url: current.src,
-    });
-    if (!resumed || !isCurrentAmbientGeneration(runId)) return true;
-    markAmbientReused(runId, action, resumed);
-    return true;
-  } catch (error) {
-    if (isCurrentAmbientGeneration(runId)) {
-      pauseAudioSafely('ambient');
-      debugWarn('<杠杠-环境音> 当前音频恢复播放失败，将重新搜索', {
-        generationId: runId,
-        location: action.location,
-        message: errorText(error),
-      });
-    }
-    return false;
-  }
-}
-
-async function searchAndPlayAmbient(runId: number, action: AmbientAction) {
-  if (!isCurrentAmbientGeneration(runId)) return;
-
-  const fallbackBvids = bgmSettingsStore.settings.ambient_fallback_bv_ids;
-  abortActiveAmbientRequest();
-  const requestController = new AbortController();
-  activeAmbientRequestController = requestController;
-  const isActiveRequest = () =>
-    isCurrentAmbientGeneration(runId) &&
-    activeAmbientRequestController === requestController &&
-    !requestController.signal.aborted;
-
-  try {
-    const resolveOptions = {
-      signal: requestController.signal,
-      shouldContinue: isActiveRequest,
-      onSearchAttempt: (attempt: number, query: string) => {
-        if (!isActiveRequest()) return;
-        runtimeAudit.ambient.search_attempts = attempt;
-        debugInfo('<杠杠-环境音> 搜索 B站环境音', { generationId: runId, attempt, query });
-      },
-    };
-    const result = await resolveBilibiliAmbientAudio(action.location, fallbackBvids, resolveOptions);
-    if (!isActiveRequest()) return;
-
-    const latestCurrent = getCurrentAmbientState();
-    if (
-      latestCurrent.playing &&
-      normalizeAmbientLocation(latestCurrent.location) === normalizeAmbientLocation(action.location)
-    ) {
-      markAmbientReused(runId, action, latestCurrent);
-      return;
-    }
-
-    const audio = {
-      title: action.title,
-      url: `https://music-proxy.gdstudio.org/${result.url}`,
-    };
-    replaceAudioList('ambient', [audio]);
-    playAudio('ambient', audio);
-    const playbackState = await waitForAmbientPlaybackCheck(runId, audio);
-    if (!playbackState || !isActiveRequest()) return;
-    runtimeAudit.ambient = {
-      ...runtimeAudit.ambient,
-      status: 'success',
-      matched: true,
-      location: action.location,
-      current_location: playbackState.location || null,
-      source: result.source,
-      bvid: result.bvid,
-      error: null,
-    };
-    debugInfo('<杠杠-环境音> 匹配 B站音源并开始播放', {
-      generationId: runId,
-      location: action.location,
-      source: result.source,
-      bvid: result.bvid,
-    });
-  } catch (error) {
-    if (!isActiveRequest()) return;
-    const message = errorText(error);
-    pauseAudioSafely('ambient');
-    runtimeAudit.ambient = {
-      ...runtimeAudit.ambient,
-      status: 'fail',
-      error: message,
-    };
-    runtimeAudit.last_error = message;
-    debugWarn('<杠杠-环境音> 搜索或播放失败', { generationId: runId, location: action.location, message });
-  } finally {
-    if (activeAmbientRequestController === requestController) activeAmbientRequestController = null;
-  }
-}
-
-function handleAmbientAction(runId: number, action: AmbientAction) {
-  if (!isCurrentAmbientGeneration(runId)) return;
-
-  const current = getCurrentAmbientState();
-  runtimeAudit.ambient = {
-    status: 'pending',
-    matched: true,
-    location: action.location,
-    current_location: current.location || null,
-    search_attempts: 0,
-    source: null,
-    bvid: null,
-    error: null,
-  };
-
-  if (normalizeAmbientLocation(current.location) === normalizeAmbientLocation(action.location)) {
-    if (current.playing) {
-      markAmbientReused(runId, action, current);
-      return;
-    }
-
-    void resumeCurrentAmbient(runId, action, current).then(resumed => {
-      if (!resumed && isCurrentAmbientGeneration(runId)) void searchAndPlayAmbient(runId, action);
-    });
-    return;
-  }
-
-  void searchAndPlayAmbient(runId, action);
-}
 
 function startGeneration() {
   if (!isBgmEnabled() || !pendingBgmPromptDecision?.bgmPromptIncluded) return;
@@ -1251,30 +936,6 @@ function startSkippedGeneration() {
   runtimeAudit.audio_played = { status: 'pending', error: null };
   runtimeAudit.last_error = null;
   debugInfo(`<杠杠-BGM> skipped BGM generation started #${currentGenerationId}`);
-}
-
-function startAmbientGeneration() {
-  if (!isAmbientEnabled()) return;
-  abortActiveAmbientRequest();
-  ambientGenerationId += 1;
-  const currentAmbientGenerationId = ambientGenerationId;
-  activeAmbientGenerationId = currentAmbientGenerationId;
-  const currentLocation = getCurrentAmbientState().location;
-  runtimeAudit.ambient = {
-    status: 'pending',
-    matched: false,
-    location: null,
-    current_location: currentLocation || null,
-    search_attempts: 0,
-    source: null,
-    bvid: null,
-    error: null,
-  };
-  activeAmbientScanner = createAmbientMarkerScanner(currentAmbientGenerationId, action => {
-    debugInfo('<杠杠-环境音> marker resolved', { generationId: currentAmbientGenerationId, action });
-    handleAmbientAction(currentAmbientGenerationId, action);
-  });
-  debugInfo(`<杠杠-环境音> generation started #${currentAmbientGenerationId}`);
 }
 
 function getCurrentBgmPromptCadenceDecision(floorCount = normalAssistantFloorCount + 1) {
@@ -1627,34 +1288,17 @@ function finishAudioGeneration(eventMessageId: number | null, receivedType?: str
     activeScanner = null;
   }
 
-  let ambientAction: AmbientAction | null = null;
-  if (activeAmbientScanner) {
-    if (!activeAmbientScanner.getState().action) activeAmbientScanner.pushSnapshot(finalText);
-    ambientAction = activeAmbientScanner.finish();
-  }
-
   runtimeAudit.stream_finished = { status: 'success', message_id: finalMessageId, error: null };
   if (bgmAction?.type === 'none' && runtimeAudit.marker.status === 'pending') {
     runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
-  }
-  if (!ambientAction && runtimeAudit.ambient.status === 'pending') {
-    const currentLocation = getCurrentAmbientState().location;
-    runtimeAudit.ambient = {
-      ...runtimeAudit.ambient,
-      status: 'success',
-      matched: false,
-      current_location: currentLocation || null,
-    };
   }
   debugInfo('<杠杠-调音台> stream finished', {
     generationId,
     messageId: finalMessageId,
     type: receivedType ?? pending?.generationType ?? 'unknown',
     bgmAction,
-    ambientAction,
   });
   activeScanner = null;
-  activeAmbientScanner = null;
   activeGenerationSourceContext = null;
 }
 
@@ -1666,12 +1310,11 @@ eventOn(tavern_events.CHAT_CHANGED, () => {
   clearBgmPromptInjections();
 });
 watch(
-  () => [bgmSettingsStore.settings.module_enabled.bgm, bgmSettingsStore.settings.module_enabled.ambient],
-  ([nextBgmEnabled], [previousBgmEnabled]) => {
+  () => bgmSettingsStore.settings.module_enabled.bgm,
+  (nextBgmEnabled, previousBgmEnabled) => {
     // Turning BGM off/on must not erase the normal-floor phase. Preserve an
     // in-flight floor so a reply that already lands can still commit once.
     resetBgmGeneration(true);
-    resetAmbientGeneration();
     clearBgmPromptInjections();
     if (nextBgmEnabled !== previousBgmEnabled) {
       updateSwipePromptAudit({ swipe_enabled: bgmSettingsStore.settings.generate_on_swipe });
@@ -1739,7 +1382,7 @@ eventOn(tavern_events.GENERATION_AFTER_COMMANDS, (type: string, option: { signal
     const preservedSwipeAudit = type === 'swipe' ? snapshotSwipePromptAudit() : undefined;
     consumePendingSwipeTarget(type);
     installCurrentBgmPlaylistPrompt(getCurrentBgmPromptCadenceDecision(), false, preservedSwipeAudit);
-    debugInfo('<杠杠-BGM> 本轮类型不计入 BGM 正文楼，仍保留环境音提示', { type });
+    debugInfo('<杠杠-BGM> 本轮类型不计入 BGM 正文楼', { type });
     return;
   }
   if (!pending.afterCommandsAccepted) {
@@ -1796,7 +1439,6 @@ eventOn(tavern_events.GENERATION_STARTED, (type: string, option: { signal?: Abor
     }
     consumePendingSwipeTarget(type);
   }
-  if (isAmbientEnabled()) startAmbientGeneration();
 });
 
 eventOn(tavern_events.STREAM_TOKEN_RECEIVED, (fullText: string) => {
@@ -1804,10 +1446,6 @@ eventOn(tavern_events.STREAM_TOKEN_RECEIVED, (fullText: string) => {
   if (pendingBgmPromptDecision?.generationStarted && pendingBgmPromptDecision.bgmPromptIncluded) {
     startPendingBgmRuntime(pendingBgmPromptDecision);
     activeScanner?.pushSnapshot(fullText);
-  }
-  if (isAmbientEnabled()) {
-    if (!activeAmbientScanner) startAmbientGeneration();
-    activeAmbientScanner?.pushSnapshot(fullText);
   }
 });
 
@@ -1832,7 +1470,6 @@ eventOn(tavern_events.GENERATION_STOPPED, () => {
 
 eventOn(tavern_events.MESSAGE_SWIPED, (messageId: number) => {
   resetBgmGeneration(true);
-  resetAmbientGeneration();
   lastSettledBgmGeneration = null;
   clearSkippedSwipeLifecycle();
   const messageRef = rawMessageRef(messageId);

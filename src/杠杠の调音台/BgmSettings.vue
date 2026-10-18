@@ -160,19 +160,6 @@
           </div>
         </div>
 
-        <div v-else-if="activeModule === 'ambient'" class="ganggang-console-settings__module-panel">
-          <div class="ganggang-console-settings__enable-row">
-            <label class="ganggang-console-settings__enable-label" for="ganggang-console-ambient-enabled">
-              <input id="ganggang-console-ambient-enabled" v-model="settings.module_enabled.ambient" type="checkbox" />
-              <span>启用环境音</span>
-            </label>
-          </div>
-
-          <p class="ganggang-console-settings__hint">
-            AI 会在正文前输出环境音标签；地点不变时复用当前环境音，地点变化时才搜索并切换。
-          </p>
-        </div>
-
         <div v-else-if="activeModule === 'prompt'" class="ganggang-console-settings__module-panel">
           <div class="ganggang-console-settings__row">
             <label for="ganggang-console-prompt-preset">提示词方案</label>
@@ -241,19 +228,6 @@
               class="text_pole ganggang-console-settings__textarea"
               rows="4"
             ></textarea>
-          </div>
-
-          <div class="ganggang-console-settings__row ganggang-console-settings__row--stacked">
-            <label for="ganggang-console-ambient-prompt">环境音要求</label>
-            <textarea
-              id="ganggang-console-ambient-prompt"
-              v-model="promptDraft.ambient_prompt_content"
-              class="text_pole ganggang-console-settings__textarea"
-              rows="8"
-            ></textarea>
-            <span v-pre class="ganggang-console-settings__hint">
-              对应模块二“环境音”；环境音功能启用后生效。当前地点占位符：{{current_ambient_location}}；当前标题占位符：{{current_ambient_title}}
-            </span>
           </div>
 
           <div class="ganggang-console-settings__row ganggang-console-settings__row--stacked">
@@ -359,17 +333,6 @@
             </span>
           </div>
 
-          <div class="ganggang-console-settings__row ganggang-console-settings__row--stacked">
-            <label for="ganggang-console-ambient-fallback-bv">环境音保底 BV 号</label>
-            <textarea
-              id="ganggang-console-ambient-fallback-bv"
-              v-model="fallbackBvInput"
-              class="text_pole ganggang-console-settings__textarea"
-              rows="4"
-              placeholder="每行一个 BV 号，也可以粘贴带描述的文本"
-              @change="normalizeFallbackBvIds"
-            ></textarea>
-          </div>
         </div>
       </div>
     </div>
@@ -379,7 +342,6 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { extractBilibiliVideoIds } from './ambient-audio';
 import {
   DEFAULT_NETEASE_PLAYLISTS,
   currentNeteaseSampleTracks,
@@ -399,10 +361,9 @@ import {
 
 const store = useBgmSettingsStore();
 const { settings } = storeToRefs(store);
-const activeModule = ref<'bgm' | 'ambient' | 'prompt' | 'more'>('bgm');
+const activeModule = ref<'bgm' | 'prompt' | 'more'>('bgm');
 const modules = [
   { key: 'bgm', label: 'BGM' },
-  { key: 'ambient', label: '环境音' },
   { key: 'prompt', label: '提示词' },
   { key: 'more', label: '更多' },
 ] as const;
@@ -419,7 +380,6 @@ const NEW_PLAYLIST_VALUE = '__new_playlist__';
 const playlistNames = ref<Record<string, string>>(
   Object.fromEntries(DEFAULT_NETEASE_PLAYLISTS.map(playlist => [playlist.id, playlist.name])),
 );
-const fallbackBvInput = ref(settings.value.ambient_fallback_bv_ids.join('\n'));
 const selectedPromptPresetId = ref(settings.value.current_prompt_preset_id);
 const promptDraft = ref<BgmPromptPreset>({
   ...getCurrentBgmPromptPreset(settings.value.prompt_presets, selectedPromptPresetId.value),
@@ -602,21 +562,6 @@ watch(
     }
   },
 );
-
-watch(
-  () => settings.value.ambient_fallback_bv_ids,
-  fallbackBvIds => {
-    const nextValue = fallbackBvIds.join('\n');
-    if (fallbackBvInput.value !== nextValue) fallbackBvInput.value = nextValue;
-  },
-  { deep: true },
-);
-
-function normalizeFallbackBvIds() {
-  const ids = extractBilibiliVideoIds(fallbackBvInput.value);
-  settings.value.ambient_fallback_bv_ids = ids;
-  fallbackBvInput.value = ids.join('\n');
-}
 
 async function loadPlaylist(playlistId = playlistInput.value, manual = true) {
   abortActivePlaylistRequest();

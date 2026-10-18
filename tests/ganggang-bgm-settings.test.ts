@@ -1,5 +1,4 @@
 import {
-  DEFAULT_AMBIENT_PROMPT_CONTENT,
   DEFAULT_BGM_PROMPT_PRESET,
   areBgmPromptPresetsEqual,
   createBgmPromptCadenceState,
@@ -42,7 +41,6 @@ function equal(actual: unknown, expected: unknown, message: string): void {
 
 const legacy = {
   bgm_injection_location: ' legacy injection ',
-  ambient_prompt_content: 'legacy ambient {{current_ambient_location}}',
   bgm_prompt_content: 'legacy BGM',
   bgm_forbidden_list_prompt: 'legacy forbidden {{current_bgm_playlist}}',
   bgm_required_list_prompt: 'legacy required {{required_candidates}}',
@@ -54,8 +52,12 @@ equal(migrated.prompt_presets[0].id, DEFAULT_BGM_PROMPT_PRESET.id, '迁移后的
 equal(migrated.prompt_presets[0].name, '默认提示词', '迁移后的默认提示词名称');
 equal(migrated.current_prompt_preset_id, migrated.prompt_presets[0].id, '迁移后当前 ID 应可用');
 equal(migrated.bgm_prompt_content, legacy.bgm_prompt_content, '迁移不得丢失 BGM 提示词');
-equal(migrated.ambient_prompt_content, legacy.ambient_prompt_content, '迁移不得丢失环境音提示词');
 equal(migrated.bgm_forbidden_list_prompt, legacy.bgm_forbidden_list_prompt, '迁移不得丢失禁选列表');
+equal(
+  migrated.prompt_presets[0].ambient_prompt_content,
+  undefined,
+  'v0.4.0 起环境音提示词已从提示词字段中移除',
+);
 assert(migrated.generate_on_swipe, '旧设置迁移时 Swipe 出歌默认开启');
 equal(
   migrateBgmSettings({ ...legacy, generate_on_swipe: false }).generate_on_swipe,
@@ -63,21 +65,19 @@ equal(
   '已有 Swipe 开关关闭状态应在迁移后保留',
 );
 
-const blankAmbientMigrated = migrateBgmSettings({ ...legacy, ambient_prompt_content: ' \n\t' });
-equal(blankAmbientMigrated.ambient_prompt_content, DEFAULT_AMBIENT_PROMPT_CONTENT, '空环境音提示词应恢复默认值');
+// v0.4.0 removed the ambient prompt field. Legacy payloads that still carry it
+// must be tolerated (no crash) and must NOT resurrect the field.
+const legacyWithAmbient = { ...legacy, ambient_prompt_content: 'legacy ambient' };
+const ambientTolerated = migrateBgmSettings(legacyWithAmbient);
 equal(
-  blankAmbientMigrated.prompt_presets[0].ambient_prompt_content,
-  DEFAULT_AMBIENT_PROMPT_CONTENT,
-  '恢复默认环境音提示词后 active preset 应保持一致',
+  ambientTolerated.prompt_presets[0].ambient_prompt_content,
+  undefined,
+  '旧设置里残留的环境音提示词不应被恢复',
 );
 equal(
-  migrateBgmSettings({
-    ...legacy,
-    prompt_presets: [{ ...legacy, id: 'blank', name: '空环境音', ambient_prompt_content: '  ' }],
-    current_prompt_preset_id: 'blank',
-  }).ambient_prompt_content,
-  DEFAULT_AMBIENT_PROMPT_CONTENT,
-  'preset 内的空环境音提示词也应恢复默认值',
+  ambientTolerated.bgm_prompt_content,
+  legacy.bgm_prompt_content,
+  '残留环境音字段不应影响 BGM 提示词迁移',
 );
 
 const selectedPreset = createBgmPromptPreset({ id: 'selected', name: '已选方案', bgm_prompt_content: 'selected content' });
@@ -232,8 +232,7 @@ equal(
 for (const firstEvent of ['started', 'after_commands'] as const) {
   const pairEvent = firstEvent === 'started' ? 'after_commands' : 'started';
   const bgmEnabled = false;
-  const ambientEnabled = true;
-  assert(!bgmEnabled && ambientEnabled, 'BGM disabled + ambient enabled 应仍保留 Swipe 生命周期');
+  assert(!bgmEnabled, 'BGM disabled 时应仍保留 Swipe 生命周期');
   assert(
     !shouldArmBgmPromptGeneration({
       enabled: bgmEnabled,
@@ -242,9 +241,9 @@ for (const firstEvent of ['started', 'after_commands'] as const) {
       generateOnSwipe: true,
       swipeFloorEligible: true,
     }),
-    'BGM disabled + ambient enabled 时 Swipe 应走 non-candidate 分支',
+    'BGM disabled 时 Swipe 应走 non-candidate 分支',
   );
-  assert(shouldTrackAudioGeneration('swipe', false), 'BGM disabled + ambient enabled 仍应接收真实 Swipe 事件');
+  assert(shouldTrackAudioGeneration('swipe', false), 'BGM disabled 时仍应接收真实 Swipe 事件');
   let skippedSwipe = createBgmPromptSkippedSwipeLifecycle(firstEvent, skippedSwipeAudit.swipe_message_id);
   const firstTransition = advanceBgmPromptSkippedSwipeLifecycle(skippedSwipe, firstEvent);
   assert(firstTransition.action === 'wait', `${firstEvent} 首次到达时应等待配对事件`);
@@ -314,10 +313,10 @@ assert(
   !shouldArmBgmPromptGeneration({ enabled: true, type: 'normal', dryRun: true }),
   'dry_run 不得创建 BGM 生成门控',
 );
-assert(shouldTrackAudioGeneration('continue', false), 'continue 应继续进入环境音生命周期');
-assert(shouldTrackAudioGeneration('appendFinal', false), 'appendFinal 应继续进入环境音生命周期');
-assert(!shouldTrackAudioGeneration('quiet', false), 'quiet 不应进入环境音生命周期');
-assert(!shouldTrackAudioGeneration('normal', true), 'dry_run 不应进入环境音生命周期');
+assert(shouldTrackAudioGeneration('continue', false), 'continue 应继续进入音频生成生命周期');
+assert(shouldTrackAudioGeneration('appendFinal', false), 'appendFinal 应继续进入音频生成生命周期');
+assert(!shouldTrackAudioGeneration('quiet', false), 'quiet 不应进入音频生成生命周期');
+assert(!shouldTrackAudioGeneration('normal', true), 'dry_run 不应进入音频生成生命周期');
 
 equal(normalizeBgmPromptInterval(undefined), 0, '缺失间隔应归一化为 0');
 equal(normalizeBgmPromptInterval('not-a-number'), 0, '非法间隔应归一化为 0');
