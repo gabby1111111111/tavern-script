@@ -1,8 +1,12 @@
 # 生图机代码线路图
 
-## v0.5.1 当前线路
+## v0.5.2 当前线路
 
-v0.4.2~v0.5.0 已发布；v0.5.1 新增图鉴匹配线路,存储与异步线路不变。图鉴线路:`gallery-reference.ts` 维护别名索引(图库文件夹内 `参考-<标签>-<别名>.png`,启动/CHAT_CHANGED/本脚本上传删除后刷新)→ 出图预设「图鉴参考匹配」开启且与头像互斥时,`prompt-processor.ts` 解析 `<pic>` 中的『当前出场角色』声明并按声明序匹配(无兜底扫描);命中文件以服务器相对路径进入固定段序组装(身份 → 画风 → 上一镜头图),物化相对宿主页 origin 解析(srcdoc 下 location.origin 不可用,经 `gallery.baseOrigin` 显式传入);预演、toast(仅声明缺失/零匹配)与审计 `reference_match`/`matched_count` 由 runtime 接线。
+v0.4.2~v0.5.0 已发布；v0.5.1 新增图鉴匹配线路,v0.5.2 修复其引入的两个回归问题,存储与异步线路不变。图鉴线路:`gallery-reference.ts` 维护别名索引(图库文件夹内 `参考-<标签>-<别名>.png`,启动/CHAT_CHANGED/本脚本上传删除后刷新)→ 出图预设「图鉴参考匹配」开启且与头像互斥时,`prompt-processor.ts` 解析 `<pic>` 中的『当前出场角色』声明并按声明序匹配(无兜底扫描);命中文件以服务器相对路径进入固定段序组装(身份 → 画风 → 上一镜头图),物化相对宿主页 origin 解析(srcdoc 下 location.origin 不可用,经 `gallery.baseOrigin` 显式传入);预演、toast(仅声明缺失/零匹配)与审计 `reference_match`/`matched_count` 由 runtime 接线。
+
+v0.5.2 修复:
+- `output-preset.ts` 把"当前出场角色"声明指令句放回默认画图预设,避免教正文 AI 的指令被误发出图预设送 API。
+- `prompt-editor.ts` 恢复镜头或旧镜头重绘时,若 `finalPrompt` 为空或属于恢复镜头,按当前出图预设模板重新展开最终提示词,避免"两框同文"和风格规则丢失。
 
 ## v0.5.0 当前线路
 
