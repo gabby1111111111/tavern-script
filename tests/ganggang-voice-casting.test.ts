@@ -138,6 +138,24 @@ const runCastingTests = async (): Promise<void> => {
   assert(!('chatSnapshot' in variables), '集中 updater 必须清理不在持久化契约中的字段');
   assert(!('recentAudio' in variables), '集中 updater 不能写入最近音频');
 
+  equal(normalized.ttsPresetEnabled, false, 'TTS 预设默认关闭');
+  equal(normalized.ttsPresets.length, 1, '缺省应自带一个 TTS 预设');
+  equal(normalized.ttsPresets[0].id, 'default-tts-preset', '默认预设 id 必须稳定');
+  equal(normalized.currentTtsPresetId, 'default-tts-preset', '当前预设 id 必须落在预设列表里');
+
+  const presetSaved = updateVoiceSettings(
+    current => ({
+      ...current,
+      ttsPresetEnabled: true,
+      ttsPresets: [...current.ttsPresets, { id: 'p-2', name: '带语速', instructionText: 'x' }],
+      currentTtsPresetId: 'p-2',
+    }),
+    variableApi,
+  );
+  equal(presetSaved.ttsPresetEnabled, true, 'TTS 预设开关必须持久化');
+  equal(presetSaved.ttsPresets.length, 2, 'TTS 预设列表必须持久化');
+  equal(presetSaved.currentTtsPresetId, 'p-2', '当前 TTS 预设必须持久化');
+
   const context = readCurrentCastingContext(3, {
     getCharData: () => ({
       name: '小葵',
@@ -150,9 +168,16 @@ const runCastingTests = async (): Promise<void> => {
     getCurrentCharacterName: () => '小葵',
     getCurrentCharacterId: () => 'aoi-avatar.png',
     getLastMessageId: () => 11,
-    getChatMessages: (range: string | number) => {
-      equal(range, '9-11', '只应请求最近 N 条聊天，而不是扫描全部历史');
+    getChatMessages: (range: string | number, options?: { hide_state?: string }) => {
+      equal(range, '4-11', '应为隐藏/跳过的楼层留出余量，而不是只取恰好 N 条');
+      equal(
+        options?.hide_state,
+        'all',
+        '隐藏过滤必须在代码里做：酒馆的 unhidden 会把 is_hidden 未定义（而非 false）的 AI 楼层一并丢掉',
+      );
       return [
+        { message_id: 7, role: 'user', name: '用户', message: '隐藏的前情', is_hidden: true },
+        { message_id: 8, role: 'assistant', name: '小葵', message: '被筛掉的隐藏回复', is_hidden: true },
         { message_id: 9, role: 'user', name: '用户', message: '你还好吗？', is_hidden: false },
         { message_id: 10, role: 'assistant', name: '小葵', message: '我没事。', is_hidden: false },
         { message_id: 11, role: 'assistant', name: '小葵', message: '车站的灯亮了。', is_hidden: false },
@@ -166,6 +191,11 @@ const runCastingTests = async (): Promise<void> => {
     '角色卡头像文件名应优先于可能随列表变化的角色索引',
   );
   equal(context.recentMessages.length, 3, '上下文应只包含最近消息');
+  equal(
+    context.recentMessages.map(message => message.messageId).join(','),
+    '9,10,11',
+    '隐藏楼层被剔除后仍要补足最近 N 条，而不是让窗口整体前移丢对话',
+  );
   assert(!JSON.stringify(context).includes('should-not-be-copied'), '上下文不能复制整张角色卡原始 JSON');
 
   const longWorldbookContent = '长'.repeat(25_000);

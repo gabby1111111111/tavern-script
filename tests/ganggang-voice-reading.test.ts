@@ -76,6 +76,13 @@ equal(
 );
 assert(voiceRouteKey(routed[1]).includes('happy'), '合成相关情绪应进入路由键');
 
+const emotional = routeSpokenSegments(
+  [{ ...segments[1], emotion: 'sad' }],
+  { mode: 'dialogue-only', casting, singleVoice: null, fallbackVoice: null },
+);
+equal(emotional[0].voice.emotion, 'sad', '逐句情绪必须覆盖配音表里的静态情绪');
+assert(voiceRouteKey(emotional[0]).includes('sad'), '逐句情绪变化必须改变路由键（影响缓存复用）');
+
 const oneVoice = routeSpokenSegments(segments, {
   mode: 'single-voice',
   casting,

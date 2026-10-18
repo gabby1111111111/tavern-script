@@ -7,7 +7,6 @@ import {
   parseDoubaoNdjson,
 } from '../src/杠杠の配音室/tts/doubao-request';
 import {
-  FISH_MODEL_ENDPOINT,
   FISH_TTS_PROXY_PATH,
   MINIMAX_ENDPOINTS,
   XIAOMI_MIMO_ENDPOINT,
@@ -22,6 +21,8 @@ import {
 } from '../src/杠杠の配音室/tts/providers';
 import * as providersModule from '../src/杠杠の配音室/tts/providers';
 import { extractContentText, parseSpokenSegments } from '../src/杠杠の配音室/tts/text';
+import { FISH_WHITELIST } from '../src/杠杠の配音室/tts/fish-whitelist';
+import { DOUBAO_CONTEXT } from '../src/杠杠の配音室/tts/emotion';
 import type { SynthesisRequest, TtsProviderProfile } from '../src/杠杠の配音室/types';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -101,6 +102,11 @@ void (async () => {
   assert(
     segments.every(segment => segment.sourceMessageId === 8),
     '解析结果必须携带消息 ID',
+  );
+  equal(
+    segments.map(segment => segment.emotion ?? null),
+    [null, 'gentle', null],
+    '对白行里的情绪标签必须归一化成标准情绪键（温柔 → gentle）',
   );
   assert(new Set(segments.map(segment => segment.id)).size === segments.length, '解析结果 ID 必须唯一');
 
@@ -398,10 +404,14 @@ void (async () => {
     },
   });
   const minimaxVoices = await minimaxRegistry.listVoices(minimaxProfile);
-  equal(
-    minimaxVoices.map(voice => voice.voiceId),
-    ['male-qn-qingse', 'male-qn-jingying', 'male-qn-badao', 'male-qn-daxuesheng'],
-    'MiniMax 音色表应使用内置精选清单（get_voice 已改版 404）',
+  const minimaxIds = minimaxVoices.map(voice => voice.voiceId);
+  ['male-qn-qingse', 'male-qn-jingying', 'male-qn-badao', 'male-qn-daxuesheng', 'female-shaonv', 'female-yujie'].forEach(
+    id => assert(minimaxIds.includes(id), `MiniMax 内置清单必须包含 ${id}`),
+  );
+  assert(minimaxIds.length >= 20, 'MiniMax 内置清单应有足够的男女声候选，而不是只有 4 个男声');
+  assert(
+    minimaxVoices.every(voice => (voice.description ?? '').length > 0),
+    'MiniMax 每个音色都要带音色说明，AI 才能按音色选人',
   );
   equal(capturedMinimax, null, 'MiniMax 内置清单不得请求供应商目录接口');
   const minimaxProbe = await minimaxRegistry.probe(minimaxProfile);
@@ -480,26 +490,25 @@ void (async () => {
   const fishRegistry = createProviderRegistry({
     fetchImpl: async (url, init) => {
       capturedFish = { url, init };
-      if (String(url).startsWith(FISH_MODEL_ENDPOINT)) {
-        return Response.json({
-          items: [
-            { _id: 'fish-ref-1', title: '测试音色' },
-            { _id: 'fish-ref-2', title: '另一音色' },
-          ],
-          total: 2,
-        });
-      }
       // /proxy 实测会丢上游 Content-Type（content-type 为 null），这里刻意不给响应头以逼出魔数兜底。
       return new Response(mp3Frame, { status: 200 });
     },
     getSillyTavernHeaders: () => ({ 'X-CSRF-Token': 'csrf-fish' }),
   });
   const fishVoices = await fishRegistry.listVoices(fishProfile);
+  equal(FISH_WHITELIST.length, 40, 'Fish 白名单必须固定 40 条');
   equal(
-    fishVoices.map(voice => voice.voiceId),
-    ['fish-ref-1', 'fish-ref-2'],
-    'Fish 音色表应直连动态拉取公开音色市场',
+    new Set(FISH_WHITELIST.map(voice => voice.voiceId)).size,
+    FISH_WHITELIST.length,
+    'Fish 白名单不允许重复 voiceId',
   );
+  assert(
+    FISH_WHITELIST.every(voice => voice.name.trim() && (voice.description || '').trim()),
+    'Fish 白名单每条都要有名称与描述（AI 靠这两项选音色）',
+  );
+  equal(fishVoices.length, 41, '白名单 40 条 + Profile 默认音色（不在名单内时补一条）');
+  equal(fishVoices[0].voiceId, 'fish-ref-1', 'Profile 默认音色应排在最前，便于手填音色');
+  assert(capturedFish === null, 'Fish 目录不得再联网拉取市场（白名单是内置常量）');
   const fishAudio = await fishRegistry.synthesize(fishProfile, requestFor(fishProfile, '[happy] 你好吗'));
   const fishCall = capturedFish as unknown as { url: RequestInfo | URL; init?: RequestInit };
   equal(FISH_TTS_PROXY_PATH, '/proxy/https://api.fish.audio/v1/tts', '/proxy 后必须跟完整目标 URL 且不做 encode');
@@ -547,7 +556,7 @@ void (async () => {
   const fishProbeBody = JSON.parse(String((capturedFish as unknown as { init?: RequestInit }).init?.body)) as {
     reference_id?: string;
   };
-  equal(fishProbeBody.reference_id, 'fish-ref-1', 'Fish probe 未填音色时应回落到目录第一条');
+  equal(fishProbeBody.reference_id, FISH_WHITELIST[0].voiceId, 'Fish probe 未填音色时应回落到白名单第一条');
 
   const fishProxyDisabledRegistry = createProviderRegistry({
     fetchImpl: async () =>
@@ -706,6 +715,71 @@ void (async () => {
   assert(MAX_TTS_RESPONSE_BYTES > 0, 'provider 响应大小限制必须存在');
   assert(MAX_TTS_WIRE_BYTES > MAX_TTS_RESPONSE_BYTES, '豆包线上闸门必须大于解码后的音频上限');
   assert(MAX_PROXY_AUDIO_BYTES === 25 * 1024 * 1024, '/proxy 音频上限必须固定为 25MB');
+
+  // 对外一套情绪词，对内翻译成各家机制。
+  const doubaoEmotionProfile = baseProfile({
+    id: 'db-e',
+    name: '豆包',
+    type: 'doubao',
+    resourceId: 'seed-tts-2.0',
+    defaultVoiceId: 'zh_male_x',
+  });
+  const minimaxEmotionProfile = baseProfile({
+    id: 'mm-e',
+    name: 'MiniMax',
+    type: 'minimax',
+    groupId: 'group',
+    defaultVoiceId: 'female-shaonv',
+  });
+  const mimoEmotionProfile = baseProfile({
+    id: 'mi-e',
+    name: 'MiMo',
+    type: 'xiaomi-mimo',
+    defaultVoiceId: '白桦',
+  });
+  const fishEmotionProfile = baseProfile({ id: 'fs-e', name: 'Fish', type: 'fish', defaultVoiceId: 'ref-1' });
+
+  equal(
+    providersModule.buildMinimaxPayload(minimaxEmotionProfile, {
+      ...requestFor(minimaxEmotionProfile),
+      emotion: 'coquettish',
+    }).emotion,
+    'happy',
+    '撒娇必须落到 MiniMax 的 happy 档',
+  );
+  assert(
+    providersModule
+      .buildMimoPayload(mimoEmotionProfile, { ...requestFor(mimoEmotionProfile), emotion: 'gentle' })
+      .style.includes('温柔'),
+    'MiMo 必须把情绪写进导演台本',
+  );
+
+  const emotionCalls: Array<{ url: string; body: Record<string, any> }> = [];
+  const emotionRegistry = createProviderRegistry({
+    fetchImpl: async (url, init) => {
+      emotionCalls.push({
+        url: String(url),
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, any>) : {},
+      });
+      return new Response('not-audio', { status: 200 });
+    },
+    getSillyTavernHeaders: () => ({ 'X-CSRF-Token': 'csrf' }),
+  });
+  await emotionRegistry
+    .synthesize(doubaoEmotionProfile, { ...requestFor(doubaoEmotionProfile), emotion: 'sad' })
+    .catch(() => undefined);
+  equal(
+    JSON.parse(String(emotionCalls.at(-1)?.body.req_params.additions)).context_texts,
+    [DOUBAO_CONTEXT.sad],
+    '豆包情绪必须翻译成画面级 context_texts（短词对它无效）',
+  );
+  await emotionRegistry
+    .synthesize(fishEmotionProfile, { ...requestFor(fishEmotionProfile), emotion: 'angry' })
+    .catch(() => undefined);
+  assert(
+    String(emotionCalls.at(-1)?.body.text).startsWith('[angry]'),
+    'Fish 情绪必须写成句首内联标签',
+  );
 
   // 传输层迁移的全局负向断言：浏览器侧已不再导出任何桥接端点/常量。
   assert(

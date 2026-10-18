@@ -2,6 +2,7 @@ import {
   castingRoomPrompt,
   CASTING_ROOM_JSON_SCHEMA,
   CASTING_ROOM_MAX_CANDIDATES,
+  findCharacterExampleLine,
   parseCastingRoomResult,
 } from '../src/杠杠の配音室/casting-room';
 import { findCastingEntryError } from '../src/杠杠の配音室/casting';
@@ -128,6 +129,85 @@ const runCastingRoomTests = async (): Promise<void> => {
     voice: { providerProfileId: 'p-b', voiceId: 'v-b' },
   });
   assert(/不能重复/.test(findCastingEntryError(entries) ?? ''), '定角新建条目与别名冲突必须报错');
+
+  const chatContext: CastingContext = {
+    ...context,
+    recentMessages: [
+      { messageId: 1, role: 'assistant', name: '程妄', message: '[程妄|温柔]|「今天回来得真晚。」' },
+      { messageId: 2, role: 'user', name: '测试用户', message: '路上堵车。' },
+      { messageId: 3, role: 'assistant', name: '程妄', message: '他笑了笑：“先吃饭，别凉了。”' },
+      { messageId: 4, role: 'assistant', name: '程妄', message: '[程妄]|「汤我热过了，慢慢喝。」' },
+    ],
+  };
+  equal(
+    findCharacterExampleLine(chatContext, '程妄', ['妄妄']),
+    '汤我热过了，慢慢喝。',
+    '应取聊天里该角色最近一次说过的台词当试音例句',
+  );
+  equal(
+    findCharacterExampleLine({ ...chatContext, recentMessages: chatContext.recentMessages.slice(2, 3) }, '程妄'),
+    '先吃饭，别凉了。',
+    '没有标准对白行时应退到 AI 回复里的引号台词',
+  );
+  equal(findCharacterExampleLine(context, '程妄'), '', '聊天里没有台词时应返回空串，交给 AI 现编');
+  equal(
+    findCharacterExampleLine(
+      {
+        ...context,
+        recentMessages: [
+          {
+            messageId: 1,
+            role: 'assistant',
+            name: '程妄',
+            message: '<center>「202X/11/14｜深秋｜21:42｜夜凉」</center>\n他低声道：“先吃饭，别凉了。”',
+          },
+        ],
+      },
+      '程妄',
+    ),
+    '先吃饭，别凉了。',
+    '状态栏里的时间戳与分隔符不能被当成台词',
+  );
+
+  const hintPrompts = castingRoomPrompt(context, catalog, '干净温和', '程妄', '汤我热过了，慢慢喝。');
+  assert(hintPrompts[1].content.includes('汤我热过了，慢慢喝。'), '给定例句必须写进 prompt');
+
+  const limitPrompts = castingRoomPrompt(chatContext, catalog, '干净温和', '程妄', '', 5);
+  assert(limitPrompts[1].content.includes('正好 5 个'), '提示词必须要求 AI 选满用户设定的 N 个');
+  assert(limitPrompts[1].content.includes('最近聊天记录：共 4 条'), '提示词必须说明聊天记录的存在与条数');
+  assert(limitPrompts[1].content.includes('汤我热过了，慢慢喝。'), '聊天记录正文必须随人设资料一起发给 AI');
+  assert(limitPrompts[1].content.includes('角色人设资料'), '人设资料段必须存在（空对象是已知故障）');
+
+  const chatLinePrompts = castingRoomPrompt(chatContext, catalog, '', '程妄', '汤我热过了，慢慢喝。', 5, 'chat');
+  assert(chatLinePrompts[1].content.includes('参考台词'), '聊天记录里的台词只能作为参考，不能写死');
+  assert(!chatLinePrompts[1].content.includes('必须原样'), '聊天台词不应被强制原样使用');
+  const userLinePrompts = castingRoomPrompt(chatContext, catalog, '', '程妄', '你回来了。', 5, 'user');
+  assert(userLinePrompts[1].content.includes('用户指定'), '用户手填的例句必须标记为强制使用');
+
+  const fallbackOnly = parseCastingRoomResult(
+    { candidates: [{ providerProfileId: 'p-mimo', voiceId: 'mimo-1', reason: '贴人设' }], exampleLine: '' },
+    catalog,
+    8,
+    '',
+    '汤我热过了，慢慢喝。',
+  );
+  equal(fallbackOnly.exampleLine, '汤我热过了，慢慢喝。', 'AI 没给例句时应回落到聊天台词');
+  const aiWinsOverChat = parseCastingRoomResult(
+    { candidates: [{ providerProfileId: 'p-mimo', voiceId: 'mimo-1', reason: '贴人设' }], exampleLine: 'AI 改写的试音句' },
+    catalog,
+    8,
+    '',
+    '汤我热过了，慢慢喝。',
+  );
+  equal(aiWinsOverChat.exampleLine, 'AI 改写的试音句', '聊天台词是参考，AI 可以改写');
+
+  const withOverride = parseCastingRoomResult(
+    { candidates: [{ providerProfileId: 'p-mimo', voiceId: 'mimo-1', reason: '贴人设' }], exampleLine: 'AI 现编的句子' },
+    catalog,
+    8,
+    '汤我热过了，慢慢喝。',
+  );
+  equal(withOverride.exampleLine, '汤我热过了，慢慢喝。', '给定例句应覆盖 AI 生成的 exampleLine');
 
   console.info('<杠杠の配音室> casting-room tests passed');
 };
