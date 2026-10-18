@@ -1,3 +1,17 @@
+/**
+ * 环境音模块（B 站音源）——当前处于【闲置/不可用】状态。
+ *
+ * 2026-10-19 实测：`types=search&source=bilibili` 仍能返回 BV 号，但
+ * `types=url&source=bilibili` 已不再返回音频地址，恒为
+ * `{ url: '', br: -1, size: 0 }`，因此本模块解析不出可播放的音频。
+ * 同一轮探测中，BGM 侧 netease 可播率 46/48，joox 与 bilibili 均为 0/48。
+ *
+ * v0.3.2 未改动本模块的逻辑，仅在此标注状态：保留代码，等待上游接口恢复，
+ * 或改由用户手动提供备用 BV 号（ambient_fallback_bv_ids）绕过搜索。
+ * 在此之前请在设置中关闭"环境音"，以免每轮都产生一次注定失败的请求。
+ *
+ * 恢复判据：下述 url 请求能返回非空 `url` 且 `size > 0` 即可认为已恢复。
+ */
 const MUSIC_API_BASE = 'https://music-api.gdstudio.xyz/api.php';
 const MUSIC_PROXY_BASE = 'https://music-proxy.gdstudio.org/';
 const SEARCH_ATTEMPTS = 1;

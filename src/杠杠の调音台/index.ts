@@ -399,7 +399,7 @@ type RuntimeAudit = {
   stream_finished: { status: 'pending' | 'success' | 'fail'; message_id: number | null; error: string | null };
   music_lookup: {
     status: 'pending' | 'success' | 'fail';
-    source: 'joox' | null;
+    source: MusicSource | null;
     query: string | null;
     track_id: string | null;
     error: string | null;
@@ -730,7 +730,21 @@ const BGM_FADE_DURATION_MS = 1_000;
 const BGM_FADE_STEP_MS = 100;
 const AUDIO_PLAYBACK_CHECK_INTERVAL_MS = 100;
 const AUDIO_PLAYBACK_CHECK_TIMEOUT_MS = 2_000;
-const JOOX_REQUEST_TIMEOUT_MS = 8_000;
+const MUSIC_REQUEST_TIMEOUT_MS = 8_000;
+
+/**
+ * Music sources exposed by music-api.gdstudio.xyz.
+ *
+ * `netease` is currently the only one that still returns playable urls
+ * (2026-10-19 probe: netease 46/48 playable, joox 0/48, bilibili 0/48;
+ * tencent/kuwo/tidal/qobuz/apple/ytmusic/spotify all HTTP-error out).
+ * `joox` is kept in the union so the constant below stays type-checked if it
+ * ever recovers — but BGM_TRACKED_MUSIC_SOURCE decides what we actually use.
+ */
+type MusicSource = 'netease' | 'joox' | 'bilibili';
+
+/** The source BGM lookup actually uses. See the probe note above. */
+const BGM_TRACKED_MUSIC_SOURCE: MusicSource = 'netease';
 let bgmTransitionId = 0;
 let bgmTransitionTargetVolume: number | null = null;
 
@@ -820,13 +834,13 @@ async function waitForBgmPlaybackCheck(runId: number, audio: Audio) {
   return assertBgmPlayback(audio);
 }
 
-async function fetchJooxJson(endpoint: string, errorLabel: string): Promise<unknown> {
+async function fetchMusicJson(endpoint: string, errorLabel: string): Promise<unknown> {
   const controller = new AbortController();
   let timedOut = false;
   const timer = window.setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, JOOX_REQUEST_TIMEOUT_MS);
+  }, MUSIC_REQUEST_TIMEOUT_MS);
 
   try {
     const response = await fetch(endpoint, { signal: controller.signal });
@@ -901,7 +915,7 @@ function pauseFailedBgmPlayback() {
 }
 
 async function searchAndPlayBgm(runId: number, song: string, singer: string, sourceContext: BgmSourceContext) {
-  const musicSource = 'joox' as const;
+  const musicSource: MusicSource = BGM_TRACKED_MUSIC_SOURCE;
   const query = createMusicSearchQuery(song, singer);
   if (isCurrentMusicGeneration(runId)) {
     runtimeAudit.music_lookup = { status: 'pending', source: musicSource, query, track_id: null, error: null };
@@ -913,9 +927,11 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
   let playlistState = { before_count: 0, removed_count: 0, after_count: 0 };
 
   try {
-    const searchData = await fetchJooxJson(
-      'https://music-api.gdstudio.xyz/api.php?types=search&source=joox&name=' + encodeURIComponent(query) + '&count=5',
-      'JOOX 搜歌',
+    const searchData = await fetchMusicJson(
+      `https://music-api.gdstudio.xyz/api.php?types=search&source=${musicSource}&name=` +
+        encodeURIComponent(query) +
+        '&count=5',
+      '音乐搜歌',
     );
 
     const firstTrack = Array.isArray(searchData) ? searchData[0] : undefined;
@@ -926,11 +942,11 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     trackId = String(rawTrackId);
 
     if (!isCurrentMusicGeneration(runId)) return;
-    if (!trackId) throw new Error('没有可用的 JOOX 歌曲 id');
+    if (!trackId) throw new Error('没有可用的歌曲 id');
 
-    const urlData = await fetchJooxJson(
+    const urlData = await fetchMusicJson(
       `https://music-api.gdstudio.xyz/api.php?types=url&source=${musicSource}&id=${encodeURIComponent(trackId)}&br=320`,
-      'JOOX 歌曲 URL',
+      '歌曲 URL',
     );
     const audioUrl =
       urlData && typeof urlData === 'object' && typeof (urlData as { url?: unknown }).url === 'string'
@@ -953,7 +969,7 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     runtimeAudit.playlist = { status: 'success', ...playlistState, error: null };
     runtimeAudit.music_lookup = { status: 'success', source: musicSource, query, track_id: trackId, error: null };
     runtimeAudit.audio_played = { status: 'success', error: null };
-    debugInfo('<杠杠-BGM> 匹配 JOOX 音源并开始播放', {
+    debugInfo('<杠杠-BGM> 匹配音源并开始播放', {
       generationId: runId,
       source: musicSource,
       playlistId: sourceContext.playlistId,
@@ -1185,7 +1201,7 @@ function startGeneration() {
   runtimeAudit.stream_finished = { status: 'pending', message_id: null, error: null };
   runtimeAudit.music_lookup = {
     status: 'pending',
-    source: 'joox',
+    source: BGM_TRACKED_MUSIC_SOURCE,
     query: null,
     track_id: null,
     error: null,
