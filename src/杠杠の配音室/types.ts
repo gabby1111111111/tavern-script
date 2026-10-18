@@ -85,6 +85,13 @@ export type TasteProfile = {
   styleNotes: string;
 };
 
+/** 「TTS 预设」：写给正文 AI 的指令，教它用可朗读的对白标记输出。 */
+export type TtsPreset = {
+  id: string;
+  name: string;
+  instructionText: string;
+};
+
 export type VoiceSettingsData = {
   schemaVersion: typeof VOICE_SETTINGS_SCHEMA_VERSION;
   profiles: TtsProviderProfile[];
@@ -92,6 +99,11 @@ export type VoiceSettingsData = {
   readingDefaults: ReadingDefaults;
   soundEffects: SoundEffectEntry[];
   tasteProfile: TasteProfile;
+  /** 精选页每次海选展示的候选数量（1-10）。 */
+  castingRoomCandidateCount: number;
+  ttsPresetEnabled: boolean;
+  currentTtsPresetId: string;
+  ttsPresets: TtsPreset[];
 };
 
 export type ContextMessage = {
@@ -131,6 +143,8 @@ export type SpokenSegment = {
   text: string;
   characterName: string | null;
   sourceMessageId: number | null;
+  /** 该句的情绪（标准键，见 tts/emotion.ts）；缺省表示不指定。 */
+  emotion?: string;
 };
 
 export type RoutedSegment = SpokenSegment & {
@@ -154,6 +168,8 @@ export type SynthesisRequest = {
   contextText?: string;
   /** 导演指令（如小米 MiMo 的 user 消息台本）；不进入朗读文本 */
   instruction?: string;
+  /** 统一情绪键（tts/emotion.ts）；由各家 provider 翻译成自己的机制 */
+  emotion?: string;
 };
 
 export type SynthesizedAudio = {

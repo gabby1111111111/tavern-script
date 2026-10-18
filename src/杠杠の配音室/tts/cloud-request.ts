@@ -6,7 +6,6 @@ export const MINIMAX_ENDPOINTS = Object.freeze({
 export const XIAOMI_MIMO_ENDPOINT = 'https://api.xiaomimimo.com/v1/chat/completions';
 
 export const FISH_TTS_ENDPOINT = 'https://api.fish.audio/v1/tts';
-export const FISH_MODEL_ENDPOINT = 'https://api.fish.audio/model';
 /** Fish 合成必须经酒馆同源 `/proxy`：上游 `POST /v1/tts` 的 CORS 预检 404，浏览器直连必死。 */
 export const FISH_TTS_PROXY_PATH = '/proxy/' + FISH_TTS_ENDPOINT;
 /** 免费档模型。Fish 的模型选择在请求头 `model` 里，漏头会默认走付费模型并报 402。 */
@@ -201,12 +200,6 @@ export function parseMimoResponse(value: unknown, maxBytes: number): Uint8Array 
   return audio;
 }
 
-export function buildFishModelListRequest(input: { page?: number; pageSize?: number } = {}) {
-  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(input.pageSize) || 100)));
-  const page = Math.min(50, Math.max(1, Math.floor(Number(input.page) || 1)));
-  return { url: `${FISH_MODEL_ENDPOINT}?page_size=${pageSize}&page_number=${page}` };
-}
-
 export type FishSynthesisRequestInput = {
   apiKey: string;
   /** 缺省免费档 `s2.1-pro-free`；模型走请求头而不是请求体 */
@@ -240,43 +233,4 @@ export function buildFishSynthesisRequest(input: FishSynthesisRequestInput) {
     },
     payload: { text, reference_id: voiceId, format, latency: 'normal' },
   };
-}
-
-export type DiscoveredFishVoice = {
-  voiceId: string;
-  name: string;
-  description: string;
-};
-
-function normalizeFishVoice(value: any): DiscoveredFishVoice | null {
-  const voiceId = optionalString(value?._id ?? value?.id, 500);
-  if (!voiceId) return null;
-  // 音色市场的标题/描述可能很长：解析目录时截断，不让单条脏数据失败整个目录。
-  const title = String(value?.title || "")
-    .trim()
-    .slice(0, 300);
-  const description = String(value?.description || "")
-    .trim()
-    .slice(0, 500);
-  return {
-    voiceId,
-    name: title || voiceId,
-    description,
-  };
-}
-
-/** Fish 音色市场是公开接口；响应形状按 items/_id/title 宽容解析，兼容数组或 {items:[…]}。 */
-export function parseFishVoiceListResponse(value: unknown, maxVoices = 500): DiscoveredFishVoice[] {
-  const data = parseJson(value, 'Fish 音色列表');
-  const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
-  const voices: DiscoveredFishVoice[] = [];
-  const seen = new Set<string>();
-  for (const item of items) {
-    const voice = normalizeFishVoice(item);
-    if (!voice || seen.has(voice.voiceId)) continue;
-    seen.add(voice.voiceId);
-    voices.push(voice);
-    if (voices.length >= maxVoices) break;
-  }
-  return voices;
 }

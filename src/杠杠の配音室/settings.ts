@@ -5,6 +5,7 @@ import type {
   ReadingMode,
   SoundEffectEntry,
   TasteProfile,
+  TtsPreset,
   TtsProviderKind,
   TtsProviderProfile,
   VoiceRef,
@@ -72,6 +73,34 @@ export const DEFAULT_TASTE_PROFILE: TasteProfile = {
   styleNotes: '干净、温和、低唤起；拒绝拖长音与播音腔。',
 };
 
+export const DEFAULT_CASTING_ROOM_CANDIDATE_COUNT = 8;
+export const DEFAULT_TTS_PRESET_ID = 'default-tts-preset';
+export const TTS_PRESET_MAX_INSTRUCTION_LENGTH = 20_000;
+
+/** 默认预设：教正文 AI 用可朗读的对白标记输出（解析器认的就是这个格式）。 */
+export const DEFAULT_TTS_PRESET: TtsPreset = {
+  id: DEFAULT_TTS_PRESET_ID,
+  name: '默认对白标记',
+  instructionText: [
+    '【对白语音标记】',
+    '正文里出现角色说话时，请让每句台词单独成行，并按下面的格式输出：',
+    '',
+    '[角色名|情绪]|「台词内容」',
+    '',
+    '规则：',
+    '1. 角色名写这句台词的说话人，必须与角色卡或剧情中的名字一致。',
+    '2. 情绪可省略，省略时写成 [角色名]|「台词内容」。情绪只能从这 8 个里选：平静、温柔、开心、撒娇、难过、生气、害怕、冷淡。',
+    '3. 台词只写真正说出口的内容，不要塞动作、神态或旁白；动作描写写在标记行之外。',
+    '4. 旁白、环境描写、动作描写一律不加标记。',
+    '5. 一句台词一个标记，不要把两个人的对话合并到一行。',
+    '',
+    '示例：',
+    '[程妄|温柔]|「今天回来得真晚。」',
+    '她把伞收好，站在门口没动。',
+    '[程妄|平静]|「饭在锅里，先吃。」',
+  ].join('\n'),
+};
+
 export const DEFAULT_VOICE_SETTINGS: VoiceSettingsData = {
   schemaVersion: VOICE_SETTINGS_SCHEMA_VERSION,
   profiles: [DEFAULT_PROFILE],
@@ -79,7 +108,39 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettingsData = {
   readingDefaults: DEFAULT_READING_DEFAULTS,
   soundEffects: [],
   tasteProfile: DEFAULT_TASTE_PROFILE,
+  castingRoomCandidateCount: DEFAULT_CASTING_ROOM_CANDIDATE_COUNT,
+  ttsPresetEnabled: false,
+  currentTtsPresetId: DEFAULT_TTS_PRESET_ID,
+  ttsPresets: [DEFAULT_TTS_PRESET],
 };
+
+function normalizeTtsPreset(value: unknown, index: number): TtsPreset | null {
+  if (!isRecord(value)) return null;
+  const id = stringValue(value.id, `tts-preset-${index + 1}`).trim() || `tts-preset-${index + 1}`;
+  return {
+    id,
+    name: stringValue(value.name, '未命名预设').trim().slice(0, 200) || '未命名预设',
+    instructionText: stringValue(value.instructionText).slice(0, TTS_PRESET_MAX_INSTRUCTION_LENGTH),
+  };
+}
+
+export function normalizeTtsPresets(value: unknown): TtsPreset[] {
+  const seen = new Set<string>();
+  const presets: TtsPreset[] = [];
+  (Array.isArray(value) ? value : []).forEach((item, index) => {
+    const preset = normalizeTtsPreset(item, index);
+    if (!preset) return;
+    let id = preset.id;
+    let suffix = 2;
+    while (seen.has(id)) {
+      id = `${preset.id}-${suffix}`;
+      suffix += 1;
+    }
+    seen.add(id);
+    presets.push({ ...preset, id });
+  });
+  return presets.length > 0 ? presets : [{ ...DEFAULT_TTS_PRESET }];
+}
 
 export function normalizeTasteProfile(value: unknown): TasteProfile {
   const record = isRecord(value) ? value : {};
@@ -283,6 +344,12 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettingsData {
     .filter((effect): effect is SoundEffectEntry => Boolean(effect))
     .filter((effect, index, all) => all.findIndex(candidate => candidate.id === effect.id) === index);
 
+  const ttsPresets = normalizeTtsPresets(record.ttsPresets);
+  const rawCurrentTtsPresetId = stringValue(record.currentTtsPresetId).trim();
+  const currentTtsPresetId = ttsPresets.some(preset => preset.id === rawCurrentTtsPresetId)
+    ? rawCurrentTtsPresetId
+    : ttsPresets[0].id;
+
   return {
     schemaVersion: VOICE_SETTINGS_SCHEMA_VERSION,
     profiles: normalizedProfiles,
@@ -290,6 +357,15 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettingsData {
     readingDefaults: normalizeReadingDefaults(record.readingDefaults),
     soundEffects,
     tasteProfile: normalizeTasteProfile(record.tasteProfile),
+    castingRoomCandidateCount: boundedInteger(
+      record.castingRoomCandidateCount,
+      DEFAULT_CASTING_ROOM_CANDIDATE_COUNT,
+      1,
+      10,
+    ),
+    ttsPresetEnabled: booleanValue(record.ttsPresetEnabled, false),
+    currentTtsPresetId,
+    ttsPresets,
   };
 }
 
@@ -302,6 +378,10 @@ function serializeVoiceSettings(settings: VoiceSettingsData): ScriptVariables {
     readingDefaults: normalized.readingDefaults,
     soundEffects: normalized.soundEffects,
     tasteProfile: normalized.tasteProfile,
+    castingRoomCandidateCount: normalized.castingRoomCandidateCount,
+    ttsPresetEnabled: normalized.ttsPresetEnabled,
+    currentTtsPresetId: normalized.currentTtsPresetId,
+    ttsPresets: normalized.ttsPresets,
   };
 }
 

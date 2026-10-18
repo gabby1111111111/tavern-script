@@ -1,4 +1,5 @@
 import type { SpokenSegment } from '../types';
+import { normalizeEmotionKey } from './emotion';
 
 export type SpokenSegmentOptions = {
   sourceMessageId?: number | null;
@@ -162,11 +163,13 @@ function buildMixedSegments(content: string, options: SpokenSegmentOptions): Spo
 
   for (const dialogue of dialogueRanges) {
     pushNarrationRange(cursor, dialogue.start);
+    const emotion = normalizeEmotionKey(dialogue.emotionLabel);
     addSegment({
       kind: 'dialogue',
       text: dialogue.text,
       characterName: dialogue.character || options.defaultCharacterName || null,
       sourceMessageId: options.sourceMessageId ?? null,
+      ...(emotion ? { emotion } : {}),
     });
     cursor = dialogue.end;
   }

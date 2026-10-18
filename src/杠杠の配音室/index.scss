@@ -1,5 +1,5 @@
 /* 配音室沿用同系列(生图机/调音台)的酒馆原生 inline-drawer 视觉语言:
-   折叠标题交给酒馆,标签是横向下划线式,主按钮用强调色描边而不是实底。 */
+   折叠标题交给酒馆,标签是横向下划线式,主体是扁平分区而不是一叠卡片,主按钮用强调色描边。 */
 .ganggang-voice-panel {
   /* 面板在酒馆扩展抽屉里只有 ~332px 宽,所有排版都按这个实际容器来,不要用视口媒体查询。 */
   --voice-accent: var(--SmartThemeQuoteColor, #8ab4f8);
@@ -12,6 +12,7 @@
   --voice-fail: #e07a7a;
   --voice-warn: #d9a44a;
   color: var(--SmartThemeBodyColor, inherit);
+  container-type: inline-size;
 }
 
 .ganggang-voice-panel * {
@@ -37,13 +38,35 @@
   font-size: calc(var(--mainFontSize) * 0.82);
 }
 
-/* 标签:与生图机/调音台一致的横向下划线式;6 个标签在 332px 里横向滚动。 */
+/* 标签行:与生图机/调音台一致的横向下划线式;右侧留一个当前页的动作按钮。 */
+.ganggang-voice-tabbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4em;
+  margin-bottom: 0.75em;
+  border-bottom: 1px solid var(--voice-hair);
+}
+
 .ganggang-voice-tabs {
   display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 0.35em;
-  margin-bottom: 0.75em;
+  margin-bottom: -1px;
   overflow-x: auto;
-  border-bottom: 1px solid var(--voice-hair);
+}
+
+/* 图标按钮:方形、与标签同高,承担「一键 AI 配音」这类页面级动作。 */
+.ganggang-voice-icon-action {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1em;
+  min-width: 2.1em;
+  height: 2.1em;
+  padding: 0;
+  line-height: 1;
 }
 
 .ganggang-voice-tab {
@@ -55,6 +78,8 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
+  /* 与生图机/调音台的标签同字重(两者未选中态实测也是 600)。 */
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -69,25 +94,79 @@
   gap: 0.65em;
 }
 
-.ganggang-voice-card {
+/* 扁平分区:同系列用"横线 + 小标题"分隔,而不是每块都套一张带底色的卡。 */
+.ganggang-voice-section {
   display: grid;
-  gap: 0.65em;
-  padding: 0.65em;
-  border: 1px solid var(--voice-hair);
-  border-radius: 0.45em;
-  background: var(--voice-surface);
+  gap: 0.5em;
+  padding-top: 0.7em;
+  border-top: 1px solid var(--voice-hair);
 }
 
-.ganggang-voice-card-header,
+.ganggang-voice-content > .ganggang-voice-section:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.ganggang-voice-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5em;
+}
+
+.ganggang-voice-section-head > div {
+  min-width: 0;
+}
+
+.ganggang-voice-section-head > .menu_button,
+.ganggang-voice-section-head > button {
+  flex: 0 0 auto;
+}
+
+/* 标题 + 紧跟其后的图标动作（配音表：标题 → 刷新 → 新增），整体左对齐。 */
+.ganggang-voice-section-head--title {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.35em;
+}
+
+.ganggang-voice-section-head--title > .ganggang-voice-section-title {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* 字段标签 + 紧跟其后的图标动作（精选：口味档案 → 开始海选）。 */
+.ganggang-voice-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.4em;
+}
+
+.ganggang-voice-field-head > span {
+  flex: 0 0 auto;
+}
+
+
+.ganggang-voice-section-title {
+  margin: 0;
+  font-size: 1em;
+}
+
+.ganggang-voice-enable-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .ganggang-voice-actions,
 .ganggang-voice-row {
   display: flex;
   align-items: center;
   gap: 0.5em;
-}
-
-.ganggang-voice-card-header {
-  justify-content: space-between;
 }
 
 .ganggang-voice-actions {
@@ -96,7 +175,7 @@
 
 /* 窄栏里按钮不许被旁边的长提示挤扁(否则「新增来源」四字竖排)。 */
 .ganggang-voice-actions > .menu_button,
-.ganggang-voice-card-header > .menu_button,
+.ganggang-voice-section-head > .menu_button,
 .ganggang-voice-actions > button {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -108,10 +187,6 @@
 }
 
 /* 抽屉只有 ~332px:两列网格在窄栏里换回单列,靠容器查询而不是视口宽度。 */
-.ganggang-voice-panel {
-  container-type: inline-size;
-}
-
 @container (max-width: 380px) {
   .ganggang-voice-grid {
     grid-template-columns: 1fr;
@@ -128,6 +203,7 @@
   gap: 0.65em;
 }
 
+/* 字段标签与生图机的 __label 同字号同字重,不再额外压暗,避免比其他两个面板更"轻"。 */
 .ganggang-voice-field {
   display: grid;
   gap: 0.3em;
@@ -135,14 +211,105 @@
 }
 
 .ganggang-voice-field > span {
-  color: var(--SmartThemeEmColor);
-  font-size: calc(var(--mainFontSize) * 0.82);
+  font-size: 0.9em;
+  font-weight: 600;
+  opacity: 0.9;
 }
 
 .ganggang-voice-field input,
 .ganggang-voice-field select,
 .ganggang-voice-field textarea {
   width: 100%;
+}
+
+/* ---------- 折叠区(手动试音 / 朗读与最近语音) ---------- */
+.ganggang-voice-fold {
+  border: 1px solid var(--voice-hair);
+  border-radius: 0.45em;
+  background: transparent;
+}
+
+.ganggang-voice-fold-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.5em 0.65em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ganggang-voice-fold-head::-webkit-details-marker {
+  display: none;
+}
+
+.ganggang-voice-fold-head > b {
+  flex: 0 0 auto;
+}
+
+.ganggang-voice-fold-head > .ganggang-voice-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ganggang-voice-fold-head > .fa-chevron-down {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  color: var(--SmartThemeEmColor);
+  transition: transform 0.15s ease;
+}
+
+.ganggang-voice-fold[open] > .ganggang-voice-fold-head > .fa-chevron-down {
+  transform: rotate(180deg);
+}
+
+.ganggang-voice-fold-body {
+  display: grid;
+  gap: 0.55em;
+  padding: 0 0.65em 0.7em;
+}
+
+.ganggang-voice-reading {
+  margin-top: 0.75em;
+}
+
+/* ---------- 配音表一行(= 一个可展开的条目) ---------- */
+.ganggang-voice-entry {
+  border: 1px solid var(--voice-hair);
+  border-radius: 0.45em;
+}
+
+.ganggang-voice-entry-head {
+  display: grid;
+  gap: 0.1em;
+  padding: 0.45em 0.6em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ganggang-voice-entry-head::-webkit-details-marker {
+  display: none;
+}
+
+.ganggang-voice-entry-name {
+  font-weight: 600;
+}
+
+.ganggang-voice-entry-voice {
+  overflow: hidden;
+  color: var(--SmartThemeEmColor);
+  font-size: calc(var(--mainFontSize) * 0.82);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ganggang-voice-entry > .ganggang-voice-grid,
+.ganggang-voice-entry > .ganggang-voice-actions,
+.ganggang-voice-entry > .ganggang-voice-hint {
+  margin: 0 0.6em 0.6em;
 }
 
 .ganggang-voice-list {
@@ -158,6 +325,16 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.5em;
   align-items: center;
+  padding: 0.45em 0;
+  border-top: 1px solid var(--voice-hair);
+}
+
+.ganggang-voice-list > .ganggang-voice-recent:first-child {
+  border-top: 0;
+}
+
+.ganggang-voice-recent-text {
+  min-width: 0;
 }
 
 .ganggang-voice-preview {
@@ -187,32 +364,19 @@
   color: var(--voice-accent);
 }
 
-.ganggang-voice-probe-row {
-  display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr);
-  gap: 0.5em;
-  align-items: center;
-}
-
-.ganggang-voice-probe-row > strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ganggang-voice-probe-row > .menu_button {
-  flex: 0 0 auto;
-}
-
 .ganggang-voice-empty {
-  border-style: dashed;
-}
-
-.ganggang-voice-empty > .ganggang-voice-hint {
   margin: 0;
+  padding: 1em;
+  border: 1px dashed var(--voice-hair-strong);
+  border-radius: 0.45em;
+  color: var(--SmartThemeEmColor);
+  font-size: calc(var(--mainFontSize) * 0.85);
+  line-height: 1.5;
+  text-align: center;
 }
 
 .ganggang-voice-probe-dot {
+  flex: 0 0 auto;
   width: 0.72em;
   height: 0.72em;
   border-radius: 999px;
@@ -231,7 +395,7 @@
   background: var(--voice-accent);
 }
 
-/* ---------- 选角间候选卡(4 行单列,332px 抽屉内) ---------- */
+/* ---------- 精选候选卡(4 行单列,332px 抽屉内) ---------- */
 .ganggang-voice-candidates {
   display: grid;
   gap: 0.65em;
@@ -282,6 +446,8 @@
 
 .ganggang-voice-cand-engine {
   color: var(--SmartThemeEmColor);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ganggang-voice-cand-status {
@@ -349,4 +515,3 @@
 .ganggang-voice-panel .ganggang-voice-primary:disabled {
   opacity: 0.35;
 }
-

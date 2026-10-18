@@ -2,16 +2,15 @@ import type { SynthesisRequest, SynthesizedAudio, TtsProviderProfile, TtsProvide
 import { detectAudioType } from './audio-signature';
 import { buildDoubaoUpstreamRequest, DEFAULT_DOUBAO_RESOURCE_ID, parseDoubaoNdjson } from './doubao-request';
 import {
-  buildFishModelListRequest,
   buildFishSynthesisRequest,
   buildMimoRequest,
   buildMinimaxRequest,
   classifyProviderHttpStatus,
-  parseFishVoiceListResponse,
   parseMimoResponse,
   parseMinimaxResponse,
 } from './cloud-request';
-import { getStaticVoiceCatalog, normalizeDiscoveredFishVoices } from './voice-catalog';
+import { getStaticVoiceCatalog } from './voice-catalog';
+import { DOUBAO_CONTEXT, FISH_TAG, MIMO_STYLE, MINIMAX_EMOTION, normalizeEmotionKey } from './emotion';
 
 export const MAX_TTS_RESPONSE_BYTES = 80 * 1024 * 1024;
 /** 豆包返回 base64 分片流，线上字节数必然大于解码后的音频，用解码上限的 4/3 加余量做线上闸门。 */
@@ -385,6 +384,7 @@ function describeDoubaoProxyFailure(label: string, status: number, bodyHead: str
 
 export function buildMinimaxPayload(profile: TtsProviderProfile, request: SynthesisRequest) {
   assertProfile(profile, 'minimax');
+  const emotionKey = normalizeEmotionKey(request?.emotion ?? request?.voice?.emotion);
   const payload = {
     apiKey: String(profile.apiKey || '').trim(),
     groupId: String(profile.groupId || '').trim(),
@@ -393,7 +393,10 @@ export function buildMinimaxPayload(profile: TtsProviderProfile, request: Synthe
     voiceId: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
     text: ensureText(request?.text),
     format: String(profile.responseFormat || 'mp3').trim(),
-    emotion: String(request?.voice?.emotion || profile.style || '').trim(),
+    // 统一情绪键 → MiniMax 七档枚举；认不出来再退回原始文本（buildMinimaxRequest 里还有一层中文别名映射）。
+    emotion: emotionKey
+      ? MINIMAX_EMOTION[emotionKey]
+      : String(request?.voice?.emotion || profile.style || '').trim(),
     speed: Number.isFinite(Number(request?.voice?.speed)) ? Number(request.voice.speed) : 1,
   };
   buildMinimaxRequest(payload);
@@ -402,14 +405,17 @@ export function buildMinimaxPayload(profile: TtsProviderProfile, request: Synthe
 
 export function buildMimoPayload(profile: TtsProviderProfile, request: SynthesisRequest) {
   assertProfile(profile, 'xiaomi-mimo');
+  const emotionKey = normalizeEmotionKey(request?.emotion ?? request?.voice?.emotion);
   const payload = {
     apiKey: String(profile.apiKey || '').trim(),
     model: String(profile.model || 'mimo-v2.5-tts').trim(),
     voiceId: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
     text: ensureText(request?.text),
     format: String(profile.responseFormat || 'wav').trim(),
-    // 导演指令：请求级 instruction（试音台）优先，Profile style 作为常驻兜底
-    style: String(request?.instruction || profile.style || '').trim(),
+    // 导演指令：请求级 instruction（试音台）优先，Profile style 作为常驻兜底；逐句情绪接在后面。
+    style: [String(request?.instruction || profile.style || '').trim(), emotionKey ? MIMO_STYLE[emotionKey] : '']
+      .filter(Boolean)
+      .join('\n'),
   };
   buildMimoRequest(payload);
   return payload;
@@ -513,28 +519,34 @@ export function createProviderRegistry({
       async synthesize(profile, request) {
         assertProfile(profile, 'doubao');
         try {
+          const emotionKey = normalizeEmotionKey(request?.emotion ?? request?.voice?.emotion);
           const upstream = buildDoubaoUpstreamRequest({
             apiKey: String(profile.apiKey || '').trim(),
             resourceId: String(profile.resourceId || DEFAULT_DOUBAO_RESOURCE_ID).trim(),
             speaker: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
             text: ensureText(request?.text),
-            contextText: request?.contextText,
+            // 显式 contextText（试音台）优先；朗读时用情绪键翻成"画面级"描述（短词对豆包无效）。
+            contextText: String(request?.contextText || '').trim() || (emotionKey ? DOUBAO_CONTEXT[emotionKey] : ''),
           });
           // P1-2：超时覆盖 fetch + body 读取全程（/proxy 响应体可能 trickle）
           const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, '豆包 合成超时（120 秒）');
-          const response = await postViaProxy(
-            upstream,
-            '豆包',
-            profile,
-            timeout.signal,
-            fetcher,
-            describeDoubaoProxyFailure,
-          );
-          // 响应是连续的 JSON 对象流（base64 音频分片），线上字节数必然大于解码后的音频。
-          const wireBytes = await readBoundedBytes(response, '豆包', MAX_TTS_WIRE_BYTES);
-          const audioBytes = parseDoubaoNdjson(new TextDecoder().decode(wireBytes), MAX_TTS_RESPONSE_BYTES);
-          timeout.dispose();
-          return { blob: blobFromBytes(audioBytes, 'audio/mpeg'), mimeType: 'audio/mpeg' };
+          try {
+            const response = await postViaProxy(
+              upstream,
+              '豆包',
+              profile,
+              timeout.signal,
+              fetcher,
+              describeDoubaoProxyFailure,
+            );
+            // 响应是连续的 JSON 对象流（base64 音频分片），线上字节数必然大于解码后的音频。
+            const wireBytes = await readBoundedBytes(response, '豆包', MAX_TTS_WIRE_BYTES);
+            const audioBytes = parseDoubaoNdjson(new TextDecoder().decode(wireBytes), MAX_TTS_RESPONSE_BYTES);
+            return { blob: blobFromBytes(audioBytes, 'audio/mpeg'), mimeType: 'audio/mpeg' };
+          } finally {
+            // 失败路径也必须清掉 120 秒定时器，否则它会一直吊着事件循环。
+            timeout.dispose();
+          }
         } catch (error) {
           return withRedactedError(error, profile);
         }
@@ -611,32 +623,32 @@ export function createProviderRegistry({
         const result = await probeBySynthesis(profile, request => this.synthesize(profile, request), signal, voiceId);
         return { ...result, mode: 'proxy' as const };
       },
-      async listVoices(profile, signal) {
+      async listVoices(profile) {
         assertProfile(profile, 'fish');
-        try {
-          const upstream = buildFishModelListRequest();
-          const response = await fetcher(upstream.url, { method: 'GET', signal });
-          const bytes = await readStructuredResponse(response, 'Fish 音色列表', profile);
-          return normalizeDiscoveredFishVoices(parseFishVoiceListResponse(bytes), profile.id);
-        } catch (error) {
-          return withRedactedError(error, profile);
-        }
+        // 白名单是内置常量：不联网、不吃分页（市场 page_size=100 会挂起，见 2026-10-18 实测）。
+        return getStaticVoiceCatalog(profile);
       },
       async synthesize(profile, request) {
         assertProfile(profile, 'fish');
         try {
+          const emotionKey = normalizeEmotionKey(request?.emotion ?? request?.voice?.emotion);
+          const spokenText = ensureText(request?.text);
           const upstream = buildFishSynthesisRequest({
             apiKey: String(profile.apiKey || '').trim(),
             model: String(profile.model || '').trim(),
             voiceId: String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim(),
-            text: ensureText(request?.text),
+            // Fish 没有参数级情绪：标签写进正文，从标签生效到下一个标签/句末。
+            text: emotionKey ? `${FISH_TAG[emotionKey]} ${spokenText}` : spokenText,
             format: String(profile.responseFormat || 'mp3').trim(),
           });
           const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, 'Fish 合成超时（120 秒）');
-          const response = await postViaProxy(upstream, 'Fish', profile, timeout.signal, fetcher);
-          const audio = await readProxyAudio(response, 'Fish', profile);
-          timeout.dispose();
-          return audio;
+          try {
+            const response = await postViaProxy(upstream, 'Fish', profile, timeout.signal, fetcher);
+            return await readProxyAudio(response, 'Fish', profile);
+          } finally {
+            // 失败路径同样要清掉定时器（否则 120 秒内进程退不出去）。
+            timeout.dispose();
+          }
         } catch (error) {
           return withRedactedError(error, profile);
         }

@@ -1,6 +1,7 @@
 import { buildCastingRequestPayload, sanitizeVoiceOptions } from './context';
 import { saveCastingTable } from './settings';
 import type { CastEntry, CastRole, CastingContext, CastingRequest, CastingTable, VoiceOption, VoiceRef } from './types';
+import { formatVoiceCatalogForPrompt } from './voice-catalog-prompt';
 
 type CastingPrompt = {
   role: 'system' | 'user';
@@ -32,6 +33,8 @@ export type CastingRuntime = {
 export type GenerateCastingOptions = {
   context: CastingContext;
   voices: VoiceOption[];
+  /** 口味档案：用户对声音的偏好说明，与选角间共用同一份。 */
+  tasteNotes?: string;
   generationId?: string;
   now?: () => number;
   isInputCurrent?: () => boolean | Promise<boolean>;
@@ -109,20 +112,34 @@ function resolveRuntime(runtime?: Partial<CastingRuntime>): CastingRuntime {
   return { generateRaw, stopGenerationById };
 }
 
-function buildCastingPrompt(request: CastingRequest): CastingPrompt[] {
+/**
+ * 一键配音的可读目录：音色 ID 必须逐字出现，名称/性别/语言/音色说明必须同时出现，
+ * 否则模型只能凭"冰糖""苏打"这种代号瞎猜（2026-10-18 Gabby 反馈）。
+ */
+function buildCastingPrompt(request: CastingRequest, tasteNotes = ''): CastingPrompt[] {
   const payload = buildCastingRequestPayload(request.context, request.voices);
-  const voicePairs = payload.voices.map(voice => `${voice.providerProfileId}/${voice.voiceId}`).join(', ');
+  const catalog = formatVoiceCatalogForPrompt(payload.voices);
+  const taste = tasteNotes.trim();
   return [
     {
       role: 'system',
       content:
-        '你是配音导演。请根据角色卡、用户设定、绑定的世界书条目和最近聊天，为主要叙述者及角色制作配音表。规范 JSON 根字段必须是 entries；每项必须包含 role、displayName、aliases、providerProfileId、voiceId，role 只能是 narrator、character 或 fallback。必须且只能有一个 narrator，最多一个 fallback；不同角色的 displayName 和 aliases 不能重复。只选择用户提供的 providerProfileId/voiceId 组合；不能创造、改写或猜测任何音色 ID。只返回规范 JSON，不要输出解释。',
+        '你是配音导演。请根据角色卡、用户 persona、绑定的世界书条目、最近聊天和口味档案，为旁白与主要角色制作配音表。' +
+        '可用音色目录会逐条给出 providerProfileId、voiceId、音色名称、性别/语言和音色说明（音高、年龄感、质地、情绪底色）；' +
+        '请依据这些说明和角色气质匹配，不要只凭音色名字的字面意思猜测；除非角色设定如此，不要把中文角色配给非中文音色。' +
+        '规范 JSON 根字段必须是 entries；每项必须包含 role、displayName、aliases、providerProfileId、voiceId，' +
+        '并附 reason（一句话说明这个音色贴合角色的哪一点：年龄、音高、质地或气质）。' +
+        'role 只能是 narrator、character 或 fallback。必须且只能有一个 narrator，最多一个 fallback；不同角色的 displayName 和 aliases 不能重复。' +
+        '只能逐字使用目录中给出的 providerProfileId 与 voiceId 组合，不能创造、改写或猜测任何音色 ID。只返回规范 JSON，不要输出解释。',
     },
     {
       role: 'user',
-      content: `输出契约：根对象只能包含 entries 数组；entries 的每一项必须包含 role、displayName、aliases、providerProfileId、voiceId。不要使用其他根字段或包装。可用音色组合（必须逐字选择）：${
-        voicePairs || '（没有可用音色）'
-      }\n\n输入资料：\n${JSON.stringify(payload, null, 2)}`,
+      content: [
+        '输出契约：根对象只能包含 entries 数组；entries 的每一项必须包含 role、displayName、aliases、providerProfileId、voiceId、reason。不要使用其他根字段或包装。',
+        `可用音色目录（方括号内是 providerProfileId，紧随其后是 voiceId，两者必须逐字选择）：\n${catalog || '（没有可用音色）'}`,
+        `口味档案：${taste || '（未填写）'}`,
+        `输入资料：\n${JSON.stringify({ context: payload.context }, null, 2)}`,
+      ].join('\n\n'),
     },
   ];
 }
@@ -402,7 +419,7 @@ export async function generateCastingTable(options: GenerateCastingOptions): Pro
     generation_id: generationId,
     should_silence: true,
     should_stream: false,
-    ordered_prompts: buildCastingPrompt(request),
+    ordered_prompts: buildCastingPrompt(request, options.tasteNotes),
     json_schema: CASTING_JSON_SCHEMA,
   });
   const table = parseCastingResult(result, request.context, request.voices, options.now ?? Date.now);

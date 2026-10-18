@@ -164,10 +164,16 @@ export function readCurrentCastingContext(
   const characterName = helper.getCurrentCharacterName() ?? '';
   const characterId = helper.getCurrentCharacterId() ?? '';
   const lastMessageId = Math.max(0, numberValue(helper.getLastMessageId(), 0));
-  const firstMessageId = Math.max(0, lastMessageId - count + 1);
+  // 不能只取 last-count+1：楼间可能有隐藏/被跳过的楼层，窗口会整体缩水。
+  // 多抓一倍再按真实条数截断，保证"最近 N 条"确实是最近的 N 条。
+  const firstMessageId = Math.max(0, lastMessageId - (count * 2 + 1));
   const range = `${firstMessageId}-${lastMessageId}`;
-  const messages = helper.getChatMessages(range, { hide_state: 'unhidden', include_swipes: false });
-  return buildCastingContext(card && isRecord(card) ? card : null, messages, { characterId, characterName });
+  // 用 hide_state:'all' + 代码内过滤，而不是 'unhidden'：
+  // 酒馆的 unhidden 过滤会把 is_hidden 未定义（而不是 false）的楼层当成隐藏，
+  // 实测当前聊天里 2 楼以后的 AI 楼层会被整段丢掉，只剩玩家发言（2026-10-18）。
+  const messages = helper.getChatMessages(range, { hide_state: 'all', include_swipes: false });
+  const context = buildCastingContext(card && isRecord(card) ? card : null, messages, { characterId, characterName });
+  return { ...context, recentMessages: context.recentMessages.slice(-count) };
 }
 
 function errorMessage(error: unknown): string {

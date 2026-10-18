@@ -23,7 +23,15 @@ import {
   markVoiceAuditError,
   setVoiceAuditBuild,
 } from './audit';
-import { castingRoomPrompt, CASTING_ROOM_JSON_SCHEMA, CASTING_ROOM_MAX_CANDIDATES, parseCastingRoomResult, type CastingRoomCandidate } from './casting-room';
+import {
+  castingRoomPrompt,
+  CASTING_ROOM_JSON_SCHEMA,
+  CASTING_ROOM_MAX_CANDIDATES,
+  findCharacterExampleLine,
+  parseCastingRoomResult,
+  type CastingRoomExampleSource,
+  type CastingRoomCandidate,
+} from './casting-room';
 import { createCastingGenerationId, findCastingEntryError, generateCastingTable, isStaleCastingInputError, stopCasting } from './casting';
 import { createCastingInputSignature, readCurrentCastingContext, readFullCastingContext } from './context';
 import {
@@ -44,11 +52,13 @@ import { createProviderRegistry, withTimeout } from './tts/providers';
 import { parseSpokenSegments } from './tts/text';
 import { getStaticVoiceCatalog } from './tts/voice-catalog';
 import type {
+  CastingTable,
   RecentVoiceItem,
   RoutedSegment,
   SoundCue,
   SoundEffectEntry,
   SpokenSegment,
+  TtsPreset,
   TtsProviderKind,
   TtsProviderProfile,
   VoiceCleanupReason,
@@ -65,11 +75,16 @@ export type CastingRoomCandidateView = CastingRoomCandidate & {
 
 export type CastingRoomPhase = 'idle' | 'nominating' | 'synthesizing' | 'done' | 'failed';
 
+/** TTS 预设注入到正文提示词的固定 id（与生图机的 drawing-preset 同构）。 */
+const TTS_PRESET_INJECTION_ID = 'ganggang-voice-tts-preset';
+
 export type CastingRoomState = {
   phase: CastingRoomPhase;
   roleName: string;
   exampleLine: string;
   candidates: CastingRoomCandidateView[];
+  /** AI 多给的候选：用于「换一个」「再换一批」，避免每次都重新问 AI。 */
+  reserve: CastingRoomCandidateView[];
   progress: { done: number; total: number };
 };
 
@@ -131,11 +146,14 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   const providerBusy = ref(false);
   const auditionBusy = ref(false);
   const castingRoomBusy = ref(false);
+  /** 本次试音例句的来源，仅用于面板展示（user / chat / ai）。 */
+  const castingRoomExampleSource = ref<CastingRoomExampleSource>('');
   const castingRoom = ref<CastingRoomState>({
     phase: 'idle',
     roleName: '',
     exampleLine: '',
     candidates: [],
+    reserve: [],
     progress: { done: 0, total: 0 },
   });
   const castingBusy = ref(false);
@@ -166,6 +184,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   let soundPlanSequence = 0;
   let stopped = false;
   let soundCatalogSignature = JSON.stringify(settings.value.soundEffects);
+  let ttsPresetSignature = '';
   let builtinSoundEffects: SoundEffectEntry[] = [];
 
   function currentSoundCatalog(): SoundEffectEntry[] {
@@ -213,8 +232,45 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     );
   }
 
-  function persistSettings(): void {
-    if (settingsTimer !== null) {
+  /** 当前选中的 TTS 预设（找不到就退回第一个）。 */
+  function currentTtsPreset(): TtsPreset | null {
+    return (
+      settings.value.ttsPresets.find(preset => preset.id === settings.value.currentTtsPresetId) ??
+      settings.value.ttsPresets[0] ??
+      null
+    );
+  }
+
+  /**
+   * 把「TTS 预设」注入正文提示词，或在关闭/改内容时撤掉旧注入。
+   * 与生图机的 drawing-preset 同构：injectPrompts(in_chat/depth 0/system) + uninjectPrompts。
+   * 注入只在当前聊天文件有效，因此换聊天要重新注入。
+   */
+  function syncTtsPresetInjection(): void {
+    const preset = currentTtsPreset();
+    const instruction = settings.value.ttsPresetEnabled ? (preset?.instructionText.trim() ?? '') : '';
+    const signature = instruction ? `${preset?.id ?? ''}\u0000${instruction}` : '';
+    if (signature === ttsPresetSignature) return;
+    ttsPresetSignature = signature;
+    try {
+      uninjectPrompts([TTS_PRESET_INJECTION_ID]);
+      if (!instruction) return;
+      injectPrompts([
+        {
+          id: TTS_PRESET_INJECTION_ID,
+          position: 'in_chat',
+          depth: 0,
+          role: 'system',
+          should_scan: false,
+          content: `<杠杠の配音室>\n${instruction}\n</杠杠の配音室>`,
+        },
+      ]);
+    } catch (caught) {
+      console.warn('<杠杠の配音室> TTS 预设注入失败:', errorMessage(caught));
+    }
+  }
+
+  function persistSettings(): void {    if (settingsTimer !== null) {
       window.clearTimeout(settingsTimer);
       settingsTimer = null;
     }
@@ -240,6 +296,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         plannedSoundMessages.clear();
         messageControls.renderAll();
       }
+      syncTtsPresetInjection();
       scheduleSettingsSave();
     },
     { deep: true },
@@ -263,8 +320,17 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     const controller = new AbortController();
     providerController = controller;
     try {
+      // 目录先取：Fish 的音色市场是公开接口，即使合成探针失败（额度 / 代理 / 模型头），
+      // 也应该把目录拿到，否则这里会留下"0 个音色"的来源。
+      let discovered: VoiceOption[] | null = null;
+      let catalogError: string | null = null;
+      try {
+        discovered = await registry.listVoices(profile, controller.signal);
+      } catch (caught) {
+        if (controller.signal.aborted) throw caught;
+        catalogError = errorMessage(caught);
+      }
       const probeResult = await registry.probe(profile, controller.signal);
-      const discovered = await registry.listVoices(profile, controller.signal);
       if (controller.signal.aborted || providerController !== controller) {
         // 被更新的探测取代：把状态灯从 busy 归位，别让旧行永远转圈
         providerProbeStatus.value = {
@@ -273,8 +339,10 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         };
         return;
       }
-      discoveredVoices.set(profile.id, { type: profile.type, voices: discovered });
+      if (discovered) discoveredVoices.set(profile.id, { type: profile.type, voices: discovered });
       refreshKnownVoices();
+      const voiceCount = discovered?.length ?? 0;
+      const catalogNote = catalogError ? `；音色目录读取失败：${catalogError}` : '';
       const networkVerified = probeResult.unverified !== true;
       markProviderReady(runId, profile.id, networkVerified);
       providerProbeStatus.value = {
@@ -282,13 +350,13 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         [profileId]: {
           state: 'ok',
           message: networkVerified
-            ? `连接成功（真实合成验证），读取到 ${discovered.length} 个音色`
-            : `配置检查通过（未联网验证），读取到 ${discovered.length} 个音色`,
+            ? `连接成功（真实合成验证），读取到 ${voiceCount} 个音色${catalogNote}`
+            : `配置检查通过（未联网验证），读取到 ${voiceCount} 个音色${catalogNote}`,
         },
       };
       status.value = networkVerified
-        ? `${profile.name} 连接检查通过，读取到 ${discovered.length} 个音色`
-        : `${profile.name} 配置检查通过（未联网验证），读取到 ${discovered.length} 个音色`;
+        ? `${profile.name} 连接检查通过，读取到 ${voiceCount} 个音色`
+        : `${profile.name} 配置检查通过（未联网验证），读取到 ${voiceCount} 个音色`;
     } catch (caught) {
       if (controller.signal.aborted || providerController !== controller) {
         providerProbeStatus.value = {
@@ -436,6 +504,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       const table = await generateCastingTable({
         context: input.context,
         voices: input.castingVoices,
+        tasteNotes: settings.value.tasteProfile.styleNotes,
         generationId,
         isInputCurrent: async () => (await captureInput()).signature === input.signature,
       });
@@ -444,6 +513,23 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       persistSettings();
       markAiCasting(auditRunId, 'success', table.entries.length);
       status.value = `已为 ${table.entries.length} 个主要角色分配音色`;
+      // 一次到位：顺手给主角挑 5 个候选并出样，结果直接落在「精选」页（例句优先用聊天里的原话）。
+      const mainRole = pickMainRoleForCasting(input.context.characterName, table);
+      if (mainRole && !castingRoomBusy.value) {
+        status.value = `已为 ${table.entries.length} 个主要角色分配音色；正在为「${mainRole}」挑 ${settings.value.castingRoomCandidateCount} 个候选…`;
+        try {
+          await generateCastingCandidates(mainRole, settings.value.castingRoomCandidateCount);
+        } catch (caught) {
+          console.warn('<杠杠の配音室> 自动精选失败，配音表已保存:', errorMessage(caught));
+          status.value = `已为 ${table.entries.length} 个主要角色分配音色（自动精选失败，可到精选页手动开始）`;
+        }
+      }
+      // 面板顶部不再常驻状态行，改用一次性提示。
+      toastr.success(
+        castingRoom.value.candidates.length > 0
+          ? `配音表已生成，「${mainRole}」${settings.value.castingRoomCandidateCount} 个候选已出样`
+          : `已为 ${table.entries.length} 个角色分配音色`,
+      );
     } catch (caught) {
       if (activeCastingGenerationId !== generationId) return;
       if (isStaleCastingInputError(caught)) {
@@ -466,14 +552,23 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
   let activeAuditionGenerationId: string | null = null;
   let castingRoomAbortController: AbortController | null = null;
 
-  async function generateCastingCandidates(targetRoleName: string, limit = CASTING_ROOM_MAX_CANDIDATES): Promise<void> {
+  async function generateCastingCandidates(
+    targetRoleName: string,
+    limit = settings.value.castingRoomCandidateCount,
+    options: { exampleLine?: string } = {},
+  ): Promise<void> {
     if (castingRoomBusy.value) return;
     const roleName = targetRoleName.trim();
     if (!roleName) {
       error.value = '请先选择或填写要海选的角色名';
       return;
     }
-    const clampedLimit = Math.min(CASTING_ROOM_MAX_CANDIDATES, Math.max(1, Math.floor(limit) || 8));
+    const clampedLimit = Math.min(
+      CASTING_ROOM_MAX_CANDIDATES,
+      Math.max(1, Math.floor(limit) || settings.value.castingRoomCandidateCount),
+    );
+    // 多要一倍：前 N 个展示，其余进备选池，供「换一个 / 再换一批」即时替换，不用反复问 AI。
+    const requestCount = Math.min(CASTING_ROOM_MAX_CANDIDATES * 2, clampedLimit * 2);
     castingRoomBusy.value = true;
     try {
       error.value = '';
@@ -482,6 +577,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         roleName,
         exampleLine: '',
         candidates: [],
+        reserve: [],
         progress: { done: 0, total: 0 },
       };
       status.value = `AI 正在为「${roleName}」提名候选音色…`;
@@ -490,7 +586,9 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       activeAuditionGenerationId = generationId;
       const characterKeyAtStart = currentCharacterKey.value;
       try {
-        const context = readFullCastingContext(settings.value.readingDefaults.recentMessageCount);
+          // 必须 await：readFullCastingContext 是异步的，漏掉 await 会把这个 Promise
+          // 直接 JSON.stringify 成 {}，AI 收到的人设与聊天记录就全是空的。
+          const context = await readFullCastingContext(settings.value.readingDefaults.recentMessageCount);
         const enabledIds = new Set(
           settings.value.profiles.filter(profile => profile.enabled).map(profile => profile.id),
         );
@@ -501,11 +599,27 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
           castingRoom.value.phase = 'failed';
           return;
         }
+        // 例句优先级：用户手填（强制） > 聊天里这个角色说过的话（参考） > 交给 AI 自拟
+        const userExampleLine = String(options.exampleLine || '').trim();
+        const chatExampleLine = userExampleLine
+          ? ''
+          : findCharacterExampleLine(context, roleName, roleAliasesFor(roleName));
+        const exampleLineHint = userExampleLine || chatExampleLine;
+        const exampleLineSource: CastingRoomExampleSource = userExampleLine
+          ? 'user'
+          : chatExampleLine
+            ? 'chat'
+            : '';
+        castingRoomExampleSource.value = exampleLineSource;
         const orderedPrompts = castingRoomPrompt(
           context,
           voiceCatalog,
           settings.value.tasteProfile.styleNotes,
           roleName,
+          exampleLineHint,
+          requestCount,
+          exampleLineSource,
+          clampedLimit,
         );
         const raw = await generateRaw({
           generation_id: generationId,
@@ -514,16 +628,19 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
           ordered_prompts: orderedPrompts,
           json_schema: CASTING_ROOM_JSON_SCHEMA,
         });
-        const parsed = parseCastingRoomResult(raw, voiceCatalog, clampedLimit);
+        const parsed = parseCastingRoomResult(raw, voiceCatalog, requestCount, userExampleLine, chatExampleLine);
+        if (!exampleLineSource) castingRoomExampleSource.value = 'ai';
+        const toView = (candidate: CastingRoomCandidate) => ({ ...candidate, status: 'pending' as const });
         castingRoom.value = {
           phase: 'nominating',
           roleName,
           exampleLine: parsed.exampleLine,
-          candidates: parsed.candidates.map(candidate => ({ ...candidate, status: 'pending' as const })),
+          candidates: parsed.candidates.slice(0, clampedLimit).map(toView),
+          reserve: parsed.candidates.slice(clampedLimit).map(toView),
           progress: { done: 0, total: 0 },
         };
         markAiAudition(auditRunId, 'success', parsed.candidates.length);
-        status.value = `AI 提名了 ${parsed.candidates.length} 个候选，开始批量出样…`;
+        status.value = `AI 提名了 ${parsed.candidates.length} 个候选（${clampedLimit} 个展示、${castingRoom.value.reserve.length} 个备选），开始批量出样…`;
       } catch (caught) {
         markAiAudition(auditRunId, 'fail');
         error.value = errorMessage(caught);
@@ -549,6 +666,53 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     castingRoomAbortController?.abort(new Error('用户停止'));
   }
 
+  /** 合成单个候选；换一个 / 换一批 也走这条路径，保证行为一致。 */
+  async function synthesizeCandidate(
+    room: CastingRoomState,
+    candidate: CastingRoomCandidateView,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const profile = settings.value.profiles.find(item => item.id === candidate.providerProfileId && item.enabled);
+    if (!profile) {
+      candidate.status = 'failed';
+      candidate.error = '来源不存在或已禁用';
+      return false;
+    }
+    candidate.status = 'synthesizing';
+    candidate.error = undefined;
+    // timeout 必须在 try 外：finally 里要 dispose，而 const 是块级作用域。
+    const timeout = withTimeout(signal, 90_000, `${profile.name} 试音样本合成超时(90 秒)`);
+    try {
+      const item = await recentStore.generate(
+        {
+          textPreview: room.exampleLine,
+          characterName: room.roleName,
+          voice: { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId },
+        },
+        async () =>
+          registry.synthesize(profile, {
+            text: room.exampleLine,
+            voice: { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId },
+            signal: timeout.signal,
+          }),
+      );
+      if (item.status === 'ready') {
+        candidate.status = 'ready';
+        candidate.recentItemId = item.id;
+        return true;
+      }
+      candidate.status = 'failed';
+      candidate.error = item.error || '合成失败';
+      return false;
+    } catch (caught) {
+      candidate.status = 'failed';
+      candidate.error = errorMessage(caught);
+      return false;
+    } finally {
+      timeout.dispose();
+    }
+  }
+
   async function runCastingRoomBatch(auditRunId: number, characterKeyAtStart: string): Promise<void> {
     const room = castingRoom.value;
     if (!room.candidates.length) return;
@@ -563,49 +727,9 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         room.progress.done += 1;
         continue;
       }
-      candidate.status = 'synthesizing';
       const profile = settings.value.profiles.find(item => item.id === candidate.providerProfileId && item.enabled);
-      if (!profile) {
-        candidate.status = 'failed';
-        candidate.error = '来源不存在或已禁用';
-        room.progress.done += 1;
-        continue;
-      }
-      status.value = `正在合成候选（${room.progress.done + 1}/${room.candidates.length}）：${profile.name}…`;
-      // timeout 必须在 try 外:finally 里要 dispose,而 const 是块级作用域,写在 try 内 finally 取不到。
-      const timeout = withTimeout(
-        castingRoomAbortController?.signal,
-        90_000,
-        `${profile.name} 试音样本合成超时(90 秒)`,
-      );
-      try {
-        const item = await recentStore.generate(
-          {
-            textPreview: room.exampleLine,
-            characterName: room.roleName,
-            voice: { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId },
-          },
-          async ({ signal }) =>
-            registry.synthesize(profile, {
-              text: room.exampleLine,
-              voice: { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId },
-              signal: timeout.signal,
-            }),
-        );
-        if (item.status === 'ready') {
-          candidate.status = 'ready';
-          candidate.recentItemId = item.id;
-          readyCount += 1;
-        } else {
-          candidate.status = 'failed';
-          candidate.error = item.error || '合成失败';
-        }
-      } catch (caught) {
-        candidate.status = 'failed';
-        candidate.error = errorMessage(caught);
-      } finally {
-        timeout.dispose();
-      }
+      status.value = `正在合成候选（${room.progress.done + 1}/${room.candidates.length}）：${profile?.name ?? '未知来源'}…`;
+      if (await synthesizeCandidate(room, candidate, castingRoomAbortController.signal)) readyCount += 1;
       room.progress.done += 1;
     }
     markAiAudition(auditRunId, readyCount > 0 ? 'success' : 'fail', readyCount);
@@ -617,17 +741,134 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         : 'AI 海选出样全部失败，请查看各候选的失败原因';
   }
 
-  function pinCastingChoice(candidate: CastingRoomCandidateView): void {
-    const roleName = castingRoom.value.roleName.trim();
-    if (!roleName) {
-      error.value = '海选目标角色名为空，无法定角';
+  /** 从备选池里取 count 个未在展示中的候选。 */
+  function takeCastingRoomReserve(room: CastingRoomState, count: number): CastingRoomCandidateView[] {
+    const shown = new Set(room.candidates.map(item => `${item.providerProfileId}\u0000${item.voiceId}`));
+    const picked: CastingRoomCandidateView[] = [];
+    while (picked.length < count && room.reserve.length > 0) {
+      const next = room.reserve.shift();
+      if (!next) break;
+      const key = `${next.providerProfileId}\u0000${next.voiceId}`;
+      if (shown.has(key)) continue;
+      shown.add(key);
+      picked.push({ ...next, status: 'pending', error: undefined, recentItemId: undefined });
+    }
+    return picked;
+  }
+
+  /** 换一个：只替换这一格，合成成功才落位。 */
+  async function replaceCastingRoomCandidate(index: number): Promise<void> {
+    if (castingRoomBusy.value) return;
+    const room = castingRoom.value;
+    if (!room.candidates[index]) return;
+    const [replacement] = takeCastingRoomReserve(room, 1);
+    if (!replacement) {
+      toastr.info('备选已用完：点「再换一批」或「开始 AI 海选」重新提名');
       return;
     }
-    if (candidate.status !== 'ready') {
-      error.value = '该候选还没有可用的试音样本';
+    castingRoomBusy.value = true;
+    const controller = new AbortController();
+    castingRoomAbortController = controller;
+    try {
+      const ok = await synthesizeCandidate(room, replacement, controller.signal);
+      room.candidates.splice(index, 1, replacement);
+      if (!ok) toastr.warning('这个备选没合成出来，可以再换一个');
+    } finally {
+      castingRoomBusy.value = false;
+      castingRoomAbortController = null;
+    }
+  }
+
+  /** 再换一批：用备选池整批替换（不足的部分保留原候选）。 */
+  async function refreshCastingRoomBatch(): Promise<void> {
+    if (castingRoomBusy.value) return;
+    const room = castingRoom.value;
+    if (!room.candidates.length) return;
+    const replacements = takeCastingRoomReserve(room, room.candidates.length);
+    if (!replacements.length) {
+      toastr.info('备选已用完：点「开始 AI 海选」重新提名一批');
       return;
     }
+    castingRoomBusy.value = true;
+    const controller = new AbortController();
+    castingRoomAbortController = controller;
+    room.phase = 'synthesizing';
+    room.progress = { done: 0, total: replacements.length };
+    try {
+      for (const candidate of replacements) {
+        if (controller.signal.aborted) break;
+        await synthesizeCandidate(room, candidate, controller.signal);
+        room.progress.done += 1;
+      }
+      room.candidates = [...replacements, ...room.candidates.slice(replacements.length)];
+      room.phase = 'done';
+    } finally {
+      castingRoomBusy.value = false;
+      castingRoomAbortController = null;
+    }
+  }
+
+  /** 角色名 → 配音表里对应的显示名与别名（用来从聊天里认出这个角色说过的话）。 */
+  function roleAliasesFor(roleName: string): string[] {
+    const table = settings.value.castingByCharacter[currentCharacterKey.value];
+    if (!table) return [];
     const normalized = roleName.trim().toLocaleLowerCase();
+    const entry = table.entries.find(item =>
+      [item.displayName, ...item.aliases].some(name => name.trim().toLocaleLowerCase() === normalized),
+    );
+    return entry ? [entry.displayName, ...entry.aliases] : [];
+  }
+
+  /** 一键配音收尾时自动精选的主角：优先角色卡本名，其次配音表里的第一个角色条目。 */
+  function pickMainRoleForCasting(characterName: string, table: CastingTable): string {
+    const normalized = characterName.trim().toLocaleLowerCase();
+    const named = table.entries.find(
+      entry =>
+        entry.role === 'character' &&
+        [entry.displayName, ...entry.aliases].some(name => name.trim().toLocaleLowerCase() === normalized),
+    );
+    if (named) return named.displayName;
+    const firstCharacter = table.entries.find(entry => entry.role === 'character');
+    return firstCharacter?.displayName || characterName.trim();
+  }
+
+  /** 精选页的例句文本框：改完可以直接按新例句重跑候选样本。 */
+  function setCastingRoomExampleLine(text: string): void {
+    castingRoom.value.exampleLine = text.trim().slice(0, 200);
+  }
+
+  async function rerunCastingRoomBatch(): Promise<void> {
+    if (castingRoomBusy.value) return;
+    if (!castingRoom.value.candidates.length) {
+      error.value = '还没有候选，先做一次 AI 海选';
+      return;
+    }
+    if (!castingRoom.value.exampleLine.trim()) {
+      error.value = '请先填写试音例句';
+      return;
+    }
+    castingRoomBusy.value = true;
+    error.value = '';
+    const generationId = `ganggang-audition-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const auditRunId = beginAiAuditionAudit(generationId);
+    try {
+      await runCastingRoomBatch(auditRunId, currentCharacterKey.value);
+    } finally {
+      castingRoomBusy.value = false;
+    }
+  }
+
+  /**
+   * 把一个具体音色写进当前角色卡的配音表（不存在就新建条目）。
+   * AI 海选定角与「精选」里的手动试音定角共用这一条路径，避免两套写表逻辑漂移。
+   */
+  function pinVoiceToRole(roleNameRaw: string, voice: VoiceRef, reason = '手动试音定角'): boolean {
+    const roleName = roleNameRaw.trim();
+    if (!roleName) {
+      error.value = '请先指定要定角的角色';
+      return false;
+    }
+    const normalized = roleName.toLocaleLowerCase();
     const isNarrator = normalized === '旁白' || normalized === 'narrator';
     const table = settings.value.castingByCharacter[currentCharacterKey.value] ?? null;
     const entries = table ? [...table.entries] : [];
@@ -637,23 +878,24 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         : entry.role === 'character' &&
           [entry.displayName, ...entry.aliases].some(alias => alias.trim().toLocaleLowerCase() === normalized),
     );
+    const voiceRef = { providerProfileId: voice.providerProfileId, voiceId: voice.voiceId };
     if (existing) {
-      existing.voice = { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId };
-      existing.reason = `AI 海选定角：${candidate.reason || '耳朵终选'}`.slice(0, 500);
+      existing.voice = { ...voiceRef };
+      existing.reason = reason.slice(0, 500);
     } else {
       entries.push({
-        id: `casting-room-${Date.now()}`,
+        id: `ping-${Date.now()}`,
         role: isNarrator ? 'narrator' : 'character',
         displayName: roleName,
         aliases: [],
-        voice: { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId },
-        reason: 'AI 海选定角',
+        voice: { ...voiceRef },
+        reason: reason.slice(0, 500),
       });
     }
     const problem = findCastingEntryError(entries);
     if (problem) {
       error.value = problem;
-      return;
+      return false;
     }
     // P1-4：同步更新 settings ref（deep watch 350ms 落盘）——只调 saveCastingTable 会被后续深 watch 覆写丢失
     settings.value.castingByCharacter = {
@@ -667,7 +909,22 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     };
     persistSettings();
     error.value = '';
-    status.value = `已定角：「${roleName}」 → ${candidate.voiceId}（仅当前角色卡「${currentCharacterName.value}」的朗读生效）`;
+    status.value = `已定角：「${roleName}」 → ${voice.voiceId}（仅当前角色卡「${currentCharacterName.value}」的朗读生效）`;
+    toastr.success(`已定角：${roleName} → ${voice.voiceId}`);
+    return true;
+  }
+
+  function pinCastingChoice(candidate: CastingRoomCandidateView): void {
+    const roleName = castingRoom.value.roleName.trim();
+    if (candidate.status !== 'ready') {
+      error.value = '该候选还没有可用的试音样本';
+      return;
+    }
+    pinVoiceToRole(
+      roleName,
+      { providerProfileId: candidate.providerProfileId, voiceId: candidate.voiceId },
+      `AI 海选定角：${candidate.reason || '耳朵终选'}`,
+    );
   }
 
   function routeSegments(segments: SpokenSegment[], mode = settings.value.readingDefaults.mode): RoutedSegment[] {
@@ -724,9 +981,10 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         text: segment.text,
         voice: segment.voice,
         signal: generation.signal,
-        contextText: segment.voice.emotion
-          ? `${segment.characterName ?? '旁白'}，情绪：${segment.voice.emotion}`
-          : (segment.characterName ?? undefined),
+        // 逐句情绪交给各 provider 翻译（MiniMax 枚举 / 豆包画面描述 / MiMo 台本 / Fish 标签）。
+        ...(segment.voice.emotion ? { emotion: segment.voice.emotion } : {}),
+        // 没有情绪时才给豆包一个说话人语境，避免覆盖掉情绪对应的画面级描述。
+        ...(!segment.voice.emotion && segment.characterName ? { contextText: segment.characterName } : {}),
       });
       if (sequence !== readingSequence || generation.signal.aborted) {
         recentStore.markCancelled(generation.item.id);
@@ -1230,6 +1488,14 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     stopped = false;
     refreshCharacter();
     refreshKnownVoices();
+    syncTtsPresetInjection();
+    // 注入只对当前聊天文件有效：换聊天要重新注入。
+    listeners.push(
+      eventOn(tavern_events.CHAT_CHANGED, () => {
+        ttsPresetSignature = '';
+        syncTtsPresetInjection();
+      }),
+    );
     listeners.push(
       ...bindVoiceLifecycleEvents(
         {
@@ -1271,6 +1537,8 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     stopSettingsWatch();
     stopRecentSubscription();
     listeners.splice(0).forEach(listener => listener.stop());
+    uninjectPrompts([TTS_PRESET_INJECTION_ID]);
+    ttsPresetSignature = '';
     messageControls.destroy();
     soundPlayer.dispose();
     recentStore.dispose();
@@ -1307,9 +1575,15 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     stopCastingRoom,
     castingRoom,
     castingRoomBusy,
+    castingRoomExampleSource,
     generateCastingCandidates,
     runCastingRoomBatch,
+    rerunCastingRoomBatch,
+    replaceCastingRoomCandidate,
+    refreshCastingRoomBatch,
+    setCastingRoomExampleLine,
     pinCastingChoice,
+    pinVoiceToRole,
     readLatest,
     readSelection,
     playRecent,

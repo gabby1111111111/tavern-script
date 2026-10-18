@@ -89,7 +89,9 @@ export function routeSpokenSegments(segments: SpokenSegment[], options: ReadingR
     const cast = castForSegment(segment, options.casting) ?? fallbackCast(options.casting);
     const voice = explicitSingleVoice ?? cast?.voice ?? options.fallbackVoice;
     if (!voice) throw new Error(`“${segment.characterName ?? '旁白'}”还没有可用音色`);
-    return { ...segment, voice: { ...voice } };
+    // 逐句情绪优先于配音表里的静态情绪：句子上的标记更具体。
+    const emotion = segment.emotion ?? voice.emotion;
+    return { ...segment, voice: { ...voice, ...(emotion ? { emotion } : {}) } };
   });
 }
 
