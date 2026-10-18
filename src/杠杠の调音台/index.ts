@@ -26,7 +26,6 @@ import {
   shouldTrackAudioGeneration,
   settleBgmPromptCadence,
   updateBgmPromptCadenceInterval,
-  BgmMessageIdentityStore,
   type BgmPromptCadenceDecision,
   type BgmPromptFloorDecision,
   type BgmPromptGenerationLifecycle,
@@ -37,6 +36,7 @@ import {
   type BgmSourceMode,
   useBgmSettingsStore,
 } from './bgm-settings';
+import { BgmFloorEligibilityLedger, type BgmFloorPlan } from './bgm-eligibility';
 
 const bgmPinia = createPinia();
 const bgmSettingsStore = useBgmSettingsStore(bgmPinia);
@@ -361,7 +361,7 @@ type PendingSwipeTarget = {
 };
 
 let pendingSwipeTarget: PendingSwipeTarget | null = null;
-const floorDecisions = new BgmMessageIdentityStore<BgmPromptFloorDecision>();
+const floorEligibility = new BgmFloorEligibilityLedger<BgmPromptFloorDecision>();
 
 type PendingBgmPromptDecision = BgmPromptFloorDecision & BgmPromptGenerationLifecycle & {
   runtimeStarted: boolean;
@@ -372,6 +372,8 @@ type PendingBgmPromptDecision = BgmPromptFloorDecision & BgmPromptGenerationLife
   startChatLength: number;
   startTailRef: object | null;
   abortSignal?: AbortSignal;
+  /** Floor ledger plan for the normal path. Set when ledger.prepare ran in createPendingBgmGeneration. */
+  floorEligibilityPlan?: BgmFloorPlan<BgmPromptFloorDecision>;
 };
 
 let pendingBgmPromptDecision: PendingBgmPromptDecision | null = null;
@@ -751,7 +753,7 @@ function cancelBgmTransition() {
 function resetBgmPromptCadence() {
   bgmPromptCadenceState = createBgmPromptCadenceState(bgmSettingsStore.settings.bgm_prompt_interval);
   normalAssistantFloorCount = 0;
-  floorDecisions.reset();
+  floorEligibility.reset();
   updatePlaylistPromptAudit({
     interval: bgmPromptCadenceState.interval,
     skipped_count: 0,
@@ -1267,30 +1269,70 @@ function getCurrentBgmPromptCadenceDecision(floorCount = normalAssistantFloorCou
   return decideBgmPromptCadenceAtFloor(bgmPromptCadenceState, floorCount);
 }
 
+/**
+ * Resolve floor decision via ledger (decoupled from MESSAGE_SWIPED event order).
+ * Returns undefined when chatId/index is stale or the message is not on the ledger.
+ */
+function readBgmFloorDecisionForMessage(messageId: number | null): BgmPromptFloorDecision | undefined {
+  if (messageId === null || !Number.isInteger(messageId) || messageId < 0) return undefined;
+  const ref = rawMessageRef(messageId);
+  if (!ref) return undefined;
+  return floorEligibility.get(ref);
+}
+
+/** Bridges the live cadence state into a `decide` callback for ledger.prepare. */
+function decideBgmFloorDecision(nextFloorCount: number): BgmPromptFloorDecision {
+  const cadence = decideBgmPromptCadenceAtFloor(bgmPromptCadenceState, nextFloorCount);
+  return {
+    interval: cadence.interval,
+    bgmPromptIncluded: cadence.bgmPromptIncluded,
+    skippedCount: cadence.skippedCount,
+    completedCount: cadence.completedCount,
+    decision: cadence.decision,
+    reason: cadence.reason,
+    normalAssistantFloorCount: nextFloorCount,
+  };
+}
+
+/**
+ * AUDIT ONLY: returns the pending MESSAGE_SWIPED target if it is still valid.
+ * Swipe eligibility is resolved via the floor ledger in {@link consumePendingSwipeTarget};
+ * this function exists only so {@link updateSwipeAuditFromPendingTarget} can attribute
+ * the swipe source.
+ */
 function inspectPendingSwipeTarget() {
   const target = pendingSwipeTarget;
   if (!target || target.chatId !== currentChatId() || rawMessageRef(target.messageId) !== target.messageRef) return null;
   const message = getChatMessages(target.messageId)[0];
   if (message?.role !== 'assistant') return null;
-  return { target, decision: floorDecisions.get(target.messageRef) };
+  return { target, decision: readBgmFloorDecisionForMessage(target.messageId) };
 }
 
+/**
+ * Resolve a swipe trigger using the floor ledger. Eligibility no longer depends on
+ * MESSAGE_SWIPED having fired: when the host skips the event, the assistant tail still
+ * points to the same message identity as long as SillyTavern reuses the chat object.
+ * The ledger's `prepare` rejects swipe requests without an inherited record, so we never
+ * silently arm on an unrelated floor.
+ */
 function consumePendingSwipeTarget(type: string) {
-  const inspected = inspectPendingSwipeTarget();
+  const audited = inspectPendingSwipeTarget();
   pendingSwipeTarget = null;
   if (type !== 'swipe') return null;
-  if (inspected) return inspected;
-
-  // Match the image-machine fallback: when host event order does not leave a
-  // pending MESSAGE_SWIPED target, the current assistant tail is the Swipe
-  // source. Its raw object identity still carries the original floor decision.
-  const messageId = getLastMessageId();
-  const messageRef = messageId >= 0 ? rawMessageRef(messageId) : null;
-  const message = messageId >= 0 ? getChatMessages(messageId)[0] : undefined;
-  if (!messageRef || message?.role !== 'assistant') return null;
+  const messageId = audited?.target.messageId ?? getLastMessageId();
+  const chatId = currentChatId();
+  const plan = floorEligibility.prepare({
+    type: 'swipe',
+    chat: SillyTavern.chat,
+    targetMessageId: messageId,
+    decide: decideBgmFloorDecision,
+  });
+  if (!plan) return null;
+  const ref = rawMessageRef(messageId);
+  if (!ref) return null;
   return {
-    target: { chatId: currentChatId(), messageId, messageRef },
-    decision: floorDecisions.get(messageRef),
+    target: { chatId, messageId, messageRef: ref },
+    decision: plan.decision,
   };
 }
 
@@ -1353,9 +1395,26 @@ function createPendingBgmGeneration(
   if (!isBgmEnabled()) return null;
   const swipe = consumePendingSwipeTarget(type);
   let floorDecision: BgmPromptFloorDecision | undefined;
+  let floorEligibilityPlan: BgmFloorPlan<BgmPromptFloorDecision> | undefined;
   let expectedMessageId: number | null = null;
   if (type === 'normal') {
-    floorDecision = decideBgmPromptCadenceAtFloor(bgmPromptCadenceState, normalAssistantFloorCount + 1);
+    // Prepare a plan via the floor ledger so commit can verify the chat shape
+    // and reject stale/duplicate settlements. prepare returns null only when
+    // the targeted slot already carries a record (e.g. retry on the same chat);
+    // we fall back to a plain in-line cadence decision in that narrow case.
+    const freshUserInput = String($('#send_textarea').val?.() ?? '').trim().length > 0;
+    const plan = floorEligibility.prepare({
+      type: 'normal',
+      chat: SillyTavern.chat,
+      freshUserInput,
+      decide: decideBgmFloorDecision,
+    });
+    if (plan) {
+      floorDecision = plan.decision;
+      floorEligibilityPlan = plan;
+    } else {
+      floorDecision = decideBgmFloorDecision(normalAssistantFloorCount + 1);
+    }
   } else {
     expectedMessageId = swipe?.target.messageId ?? null;
     const swipeDecision = swipe?.decision;
@@ -1400,6 +1459,7 @@ function createPendingBgmGeneration(
       const tailId = getLastMessageId();
       return tailId >= 0 ? rawMessageRef(tailId) : null;
     })(),
+    ...(floorEligibilityPlan ? { floorEligibilityPlan } : {}),
   };
   lastSettledBgmGeneration = null;
   pendingBgmPromptDecision = pending;
@@ -1467,15 +1527,21 @@ function commitNormalAssistantFloor(pending: PendingBgmPromptDecision, messageId
   );
   const messageRef = rawMessageRef(messageId);
   if (messageRef) {
-    floorDecisions.set(messageRef, {
-      interval: pending.interval,
-      bgmPromptIncluded: pending.bgmPromptIncluded,
-      skippedCount: pending.skippedCount,
-      completedCount: pending.completedCount,
-      decision: pending.decision,
-      reason: pending.reason,
-      normalAssistantFloorCount: pending.normalAssistantFloorCount,
-    });
+    if (pending.floorEligibilityPlan) {
+      const committed = floorEligibility.commit(
+        pending.floorEligibilityPlan,
+        messageRef,
+        SillyTavern.chat,
+      );
+      if (!committed) {
+        debugWarn('<杠杠-BGM> floor ledger rejected commit (stale or duplicate chat shape)', {
+          messageId,
+          chatLength: SillyTavern.chat.length,
+        });
+      }
+    } else {
+      debugInfo('<杠杠-BGM> normal commit without ledger plan; falling back to inline record', { messageId });
+    }
   }
   updatePlaylistPromptAudit({
     skipped_count: bgmPromptCadenceState.skippedCount,
