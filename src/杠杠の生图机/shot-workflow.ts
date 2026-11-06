@@ -7,6 +7,7 @@ import {
   type ConfirmedShotEntry,
   type ShotStorageOptions,
 } from './shot-storage';
+import { trackConfirmedShotUpload } from './delete-sync';
 import type { ImageMemoryKey } from './pipeline-types';
 
 /** Everything the persist hook needs besides the placement itself. */
@@ -86,9 +87,16 @@ export class ShotWorkflow {
       // The placement URL may be a data, object, or remote URL; resolving it
       // here keeps the base64 out of any state until the request body itself.
       const dataUrl = await imageResourceToDataUrl({ url: placement.url }, { fetchImpl: storageOptions.fetchImpl });
-      const entry = await uploadConfirmedShot(
-        { identity, dataUrl, shotPrompt: context.shotPrompt ?? placement.prompt },
-        storageOptions,
+      // 按 delete-sync 的竞态契约登记在途上传（简报 §4.4）：删除同步的首轮扫描若
+      // 看不到索引条目，会等待这里登记的配对上传后再决策。存储串行链已让两条路径
+      // 天然互斥，这层登记是文档承诺的第二道防线。
+      const entry = await trackConfirmedShotUpload(
+        identity.chatId,
+        identity,
+        uploadConfirmedShot(
+          { identity, dataUrl, shotPrompt: context.shotPrompt ?? placement.prompt },
+          storageOptions,
+        ),
       );
       hooks.onUploaded?.(entry);
     } catch (error) {

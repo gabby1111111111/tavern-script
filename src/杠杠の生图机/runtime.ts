@@ -867,7 +867,14 @@ export function createStoryImageRuntime(): StoryImageRuntime {
     cache
       .values()
       .filter(
-        task => isInlineTask(task) && rawMessageRef(task.messageId) && currentSwipeId(task.messageId) === task.swipeId,
+        task =>
+          // success/cancelled 任务不得映射为空镜头：placement 全部删除后，它们会
+          // 变成永久 pending 的幽灵「生成中」条目（2026-11-03 审查 P2-2）。
+          task.status !== 'success' &&
+          task.status !== 'cancelled' &&
+          isInlineTask(task) &&
+          rawMessageRef(task.messageId) &&
+          currentSwipeId(task.messageId) === task.swipeId,
       )
       .forEach(task => {
         const id = imageRetentionScopeKey(taskScope(task));
@@ -2368,6 +2375,16 @@ export function createStoryImageRuntime(): StoryImageRuntime {
       clearRenderedHosts();
       listen(tavern_events.GENERATION_STARTED, prepareGeneration);
       listen(tavern_events.GENERATION_STOPPED, () => {
+        // 中止时 prepareGeneration 可能已经把 generation 置为 running 但尚未解析出
+        // 任何图片任务（回复被截停/无镜头标记）。此时没有任何路径会收敛审计，
+        // generation 会永远悬挂在 running——与调音台的中止终态同一类问题。
+        if (audit.generation.status === 'running') {
+          audit.generation = { id: audit.generation.id, status: 'fail' };
+          audit.last_error = '生成被停止，本轮未产生图片任务';
+        }
+        audit.tasks = audit.tasks.map(task =>
+          task.status === 'pending' || task.status === 'running' ? { ...task, status: 'fail' } : task,
+        );
         releaseContinuity(activeGeneration?.continuity, true);
         activeGeneration = null;
         installPrompt(null);
@@ -2412,6 +2429,12 @@ export function createStoryImageRuntime(): StoryImageRuntime {
         renderPlacementsForMessage(messageId);
       });
       listen(tavern_events.MESSAGE_SWIPED, messageId => {
+        // swipe 会打断进行中的生成会话，审计与 GENERATION_STOPPED 同样需要终态收敛，
+        // 否则 generation 悬挂 running，工作台出现幽灵「生成中」。
+        if (audit.generation.status === 'running') {
+          audit.generation = { id: audit.generation.id, status: 'fail' };
+          audit.last_error = '生成被切换 swipe 重置';
+        }
         const messageRef = rawMessageRef(messageId);
         pendingSwipeTarget =
           Number.isInteger(messageId) && messageRef ? { chatId: memoryChatId, messageId, messageRef } : null;
