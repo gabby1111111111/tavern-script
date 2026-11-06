@@ -460,25 +460,37 @@ export function createProviderRegistry({
         const payload = buildOpenAiSpeechPayload(profile, request);
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (profile.apiKey) headers.Authorization = `Bearer ${profile.apiKey}`;
-        const response = await fetcher(endpoint, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-          signal: request.signal,
-        });
-        return readAudioResponse(response, profile.name || 'OpenAI-compatible TTS', profile);
+        // 硬超时覆盖 fetch + body 读取全程（对齐豆包/Fish 的 120 秒），上游不响应时给出可读失败而不是永远转圈。
+        const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, 'OpenAI 兼容 合成超时（120 秒）');
+        try {
+          const response = await fetcher(endpoint, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: timeout.signal,
+          });
+          return await readAudioResponse(response, profile.name || 'OpenAI-compatible TTS', profile);
+        } finally {
+          timeout.dispose();
+        }
       },
     },
     edge: {
       async probe(profile, signal) {
         assertProfile(profile, 'edge');
-        const response = await fetcher('/api/plugins/edge-tts/probe', {
-          method: 'POST',
-          headers: getSillyTavernHeaders(),
-          signal,
-        });
-        if (!response.ok && response.status !== 204) throw new Error(`Edge TTS HTTP ${response.status}`);
-        return { ok: true, mode: 'plugin' };
+        // probe 也套 45 秒硬超时（对齐 probeBySynthesis），插件端点不响应时给出可读失败。
+        const timeout = withTimeout(signal, PROBE_TIMEOUT_MS, 'Edge TTS 探针超时（45 秒无响应）');
+        try {
+          const response = await fetcher('/api/plugins/edge-tts/probe', {
+            method: 'POST',
+            headers: getSillyTavernHeaders(),
+            signal: timeout.signal,
+          });
+          if (!response.ok && response.status !== 204) throw new Error(`Edge TTS HTTP ${response.status}`);
+          return { ok: true, mode: 'plugin' };
+        } finally {
+          timeout.dispose();
+        }
       },
       async listVoices(profile) {
         assertProfile(profile, 'edge');
@@ -490,13 +502,19 @@ export function createProviderRegistry({
         const voice = String(request?.voice?.voiceId || profile.defaultVoiceId || '').trim();
         if (!voice) throw new Error('Edge Profile 缺少 voice');
         const rate = Number.isFinite(Number(profile.edgeRate)) ? Number(profile.edgeRate) : 0;
-        const response = await fetcher('/api/plugins/edge-tts/generate', {
-          method: 'POST',
-          headers: getSillyTavernHeaders(),
-          body: JSON.stringify({ text, voice, rate }),
-          signal: request.signal,
-        });
-        return readAudioResponse(response, profile.name || 'Edge TTS', profile);
+        // 硬超时覆盖 fetch + body 读取全程（对齐豆包/Fish 的 120 秒）。
+        const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, 'Edge TTS 合成超时（120 秒）');
+        try {
+          const response = await fetcher('/api/plugins/edge-tts/generate', {
+            method: 'POST',
+            headers: getSillyTavernHeaders(),
+            body: JSON.stringify({ text, voice, rate }),
+            signal: timeout.signal,
+          });
+          return await readAudioResponse(response, profile.name || 'Edge TTS', profile);
+        } finally {
+          timeout.dispose();
+        }
       },
     },
     doubao: {
@@ -566,16 +584,23 @@ export function createProviderRegistry({
         const payload = buildMinimaxPayload(profile, request);
         try {
           const upstream = buildMinimaxRequest(payload);
-          const response = await fetcher(upstream.url, {
-            method: 'POST',
-            headers: upstream.headers,
-            body: JSON.stringify(upstream.payload),
-            signal: request.signal,
-          });
-          const responseBytes = await readStructuredResponse(response, profile.name || 'MiniMax TTS', profile);
-          const audioBytes = parseMinimaxResponse(responseBytes, MAX_TTS_RESPONSE_BYTES);
-          const mimeType = upstream.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-          return { blob: blobFromBytes(audioBytes, mimeType), mimeType };
+          // 硬超时覆盖 fetch + body 读取全程（对齐豆包/Fish 的 120 秒）。
+          const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, 'MiniMax 合成超时（120 秒）');
+          try {
+            const response = await fetcher(upstream.url, {
+              method: 'POST',
+              headers: upstream.headers,
+              body: JSON.stringify(upstream.payload),
+              signal: timeout.signal,
+            });
+            const responseBytes = await readStructuredResponse(response, profile.name || 'MiniMax TTS', profile);
+            const audioBytes = parseMinimaxResponse(responseBytes, MAX_TTS_RESPONSE_BYTES);
+            const mimeType = upstream.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+            return { blob: blobFromBytes(audioBytes, mimeType), mimeType };
+          } finally {
+            // 失败路径也要清掉定时器，否则它会一直吊着事件循环。
+            timeout.dispose();
+          }
         } catch (error) {
           return withRedactedError(error, profile);
         }
@@ -594,16 +619,23 @@ export function createProviderRegistry({
         const payload = buildMimoPayload(profile, request);
         try {
           const upstream = buildMimoRequest(payload);
-          const response = await fetcher(upstream.url, {
-            method: 'POST',
-            headers: upstream.headers,
-            body: JSON.stringify(upstream.payload),
-            signal: request.signal,
-          });
-          const responseBytes = await readStructuredResponse(response, profile.name || '小米 MiMo TTS', profile);
-          const audioBytes = parseMimoResponse(responseBytes, MAX_TTS_RESPONSE_BYTES);
-          const mimeType = upstream.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-          return { blob: blobFromBytes(audioBytes, mimeType), mimeType };
+          // 硬超时覆盖 fetch + body 读取全程（对齐豆包/Fish 的 120 秒）。
+          const timeout = withTimeout(request.signal, PROXY_SYNTHESIS_TIMEOUT_MS, '小米 MiMo 合成超时（120 秒）');
+          try {
+            const response = await fetcher(upstream.url, {
+              method: 'POST',
+              headers: upstream.headers,
+              body: JSON.stringify(upstream.payload),
+              signal: timeout.signal,
+            });
+            const responseBytes = await readStructuredResponse(response, profile.name || '小米 MiMo TTS', profile);
+            const audioBytes = parseMimoResponse(responseBytes, MAX_TTS_RESPONSE_BYTES);
+            const mimeType = upstream.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+            return { blob: blobFromBytes(audioBytes, mimeType), mimeType };
+          } finally {
+            // 失败路径也要清掉定时器，否则它会一直吊着事件循环。
+            timeout.dispose();
+          }
         } catch (error) {
           return withRedactedError(error, profile);
         }

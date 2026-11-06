@@ -24,6 +24,13 @@
               {{ tab.label }}
             </button>
           </nav>
+          <button
+            class="menu_button fa-solid fa-stop ganggang-voice-icon-action"
+            data-testid="ganggang-voice-stop"
+            type="button"
+            title="停止当前声音"
+            @click="runtime.stopAll"
+          ></button>
         </div>
 
         <div class="ganggang-voice-content">
@@ -224,6 +231,13 @@
                     :disabled="castingRoomBusy"
                     title="开始 AI 海选"
                     @click="startCastingRoom"
+                  ></button>
+                  <button
+                    class="menu_button fa-solid fa-stop ganggang-voice-icon-action"
+                    type="button"
+                    :disabled="!castingRoomBusy"
+                    title="停止海选"
+                    @click="runtime.stopCastingRoom"
                   ></button>
                 </div>
                 <textarea
@@ -874,9 +888,14 @@ function applyCastingRoomExampleLine(): void {
   runtime.setCastingRoomExampleLine(castingRoomExampleLine.value);
 }
 
+/** 海选相关调用的异常已在 runtime 内收敛 UI 状态（phase/审计/error）；这里只兜底防 unhandled rejection。 */
+function reportCastingRoomFailure(caught: unknown): void {
+  console.warn('<杠杠の配音室> AI 海选失败:', caught instanceof Error ? caught.message : caught);
+}
+
 function rerunCastingRoom(): void {
   applyCastingRoomExampleLine();
-  void runtime.rerunCastingRoomBatch();
+  runtime.rerunCastingRoomBatch().catch(reportCastingRoomFailure);
 }
 
 // 一键配音收尾会自动出候选：这时用户还停在「配音表」，把页面带到「精选」看结果。
@@ -893,7 +912,11 @@ const castingRoomPhaseText = computed(() => {
   if (room.phase === 'nominating') return 'AI 正在阅读人设与音色目录，提名候选并生成例句…';
   if (room.phase === 'synthesizing') return `批量出样中（${room.progress.done}/${room.progress.total}）…`;
   if (room.phase === 'failed') return '本轮海选没有可用样本，请查看错误提示后重试。';
-  if (room.phase === 'done') return `海选完成：${room.progress.total} 个候选已出样，试听后点「定角」。`;
+  if (room.phase === 'done') {
+    return room.cancelled
+      ? '海选已停止：已出样的候选仍可试听、定角。'
+      : `海选完成：${room.progress.total} 个候选已出样，试听后点「定角」。`;
+  }
   return '';
 });
 const castingRoomRoleOptions = computed(() => {
@@ -915,9 +938,11 @@ function startCastingRoom(): void {
   }
   castingRoomRoleName.value = roleName;
   runtime.settings.value.tasteProfile.styleNotes = castingRoomTasteNotes.value.trim();
-  void runtime.generateCastingCandidates(roleName, settings.value.castingRoomCandidateCount, {
-    exampleLine: castingRoomExampleDirty.value ? castingRoomExampleLine.value.trim() : '',
-  });
+  runtime
+    .generateCastingCandidates(roleName, settings.value.castingRoomCandidateCount, {
+      exampleLine: castingRoomExampleDirty.value ? castingRoomExampleLine.value.trim() : '',
+    })
+    .catch(reportCastingRoomFailure);
 }
 
 function playCastingRoomSample(candidate: { recentItemId?: string }): void {

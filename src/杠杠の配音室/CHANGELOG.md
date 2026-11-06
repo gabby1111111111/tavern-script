@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed - 2026-11-03
+
+- **恢复「停止」按钮**：v0.4.0「面板收紧」移除旧面板头部时，把唯一的 Stop 按钮一并删掉了（`stopAll`/`stopAllWithReason` 逻辑仍在，但面板上没有任何入口可点），用户失去全局停止手段。本次在标签栏右侧恢复头部 Stop 图标按钮（`data-testid="ganggang-voice-stop"`，走既有 `user-stop` 废止语义：废止代次 → abort Provider/AI → 停朗读与音效），并在精选页海选区补「停止海选」按钮（`stopCastingRoom`，批量出样期间可中断剩余候选）。
+
 ## [0.4.0] - 2026-10-18
 
 ### Added

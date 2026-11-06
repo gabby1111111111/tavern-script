@@ -95,7 +95,7 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 | 正文漏读/对白识别错 | `tts/text.ts` fixtures                                | `reading.ts` 模式过滤                                 |
 | 角色声音分错        | `runtime.routeSegments`                               | 配音表、角色 override、默认路由                       |
 | Provider 失败       | `tts/providers.ts` adapter                            | 豆包/Fish 都先查酒馆 `enableCorsProxy`（合成走 `/proxy`）；豆包再看 NDJSON 错误码与 Resource ID，Fish 再看 `model` 头 |
-| 一直 generating     | `prepareSegment` 与 AbortSignal                       | Provider、IndexedDB、代次是否过期                     |
+| 一直 generating     | `prepareSegment` 与 AbortSignal                       | Provider、代次是否过期                                |
 | Stop 后旧声音回来   | `playback.ts` pending-play race                       | `readingSequence/lifecycleEpoch`                      |
 | 两个声音重叠        | `playRoutedSegments`                                  | `playSoundEffect` 是否先废止旧朗读                    |
 | 音效位置错          | `sound-casting.ts` segment/occurrence                 | `reading-timeline.ts` 拆段                            |
@@ -114,7 +114,7 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 - `audio.play()` pending 时 Stop 也必须立即结算外层 Promise。
 - speech 和短 SFX 严格串行，`max_active` 必须为 1；SFX 失败跳过，TTS 失败终止。
 - Ambience 是独立试听/未来背景 lane，不能阻塞串行朗读。
-- 最近十条是页内历史；合成缓存是 `memory → IndexedDB`，Blob/base64 不写设置。
+- 最近十条是页内历史；语音缓存只在页面内存（刷新即失，不写 IndexedDB），Blob/base64 不写设置。
 - Object URL、listener、AbortController 必须在结束、失败、取消、替换和卸载路径清理。
 - 豆包与 Fish 的**合成**必须走酒馆 `/proxy`：豆包的 CORS 预检不放行新版 `X-Api-Key`，改回浏览器直连等于豆包在新版凭据下直接失败（这是外部硬约束，不是待优化项）。
 
@@ -122,8 +122,11 @@ Provider、TTS 缓存、最近语音、AI 配音表和音效计划是不同责�
 
 - 本地实时链是 `pnpm watch` → `dist/杠杠の配音室/index.js` → 带 CORS 的 `http://localhost:5501` 静态服务（对中文路径做
   `encodeURI` 的 302 时间戳跳转，绕过 loader 固定 `?v=` 造成的顽固缓存）→ 8000 角色脚本 loader；只开 watch 不会自动提供 5501。
-- 八组测试：`tests/ganggang-voice-{tts,playback,reading,casting,sound-casting,audit,runtime-lifecycle,editions}.test.ts`。
-  Node 24 下需带 `TS_NODE_COMPILER_OPTIONS='{"module":"commonjs"}'` 运行 `ts-node --files`。
+- 配音室专属测试：`tests/ganggang-voice-casting-room.test.ts` 与 `tests/ganggang-voice-casting-context.test.ts`
+  （后者覆盖配音室独有能力：上下文窗口语义、世界书全量上下文、手动编辑校验、TTS 预设持久化）。
+  `tests/ganggang-voice-{tts,playback,reading,casting,sound-casting,audit,runtime-lifecycle,editions}.test.ts`
+  八个文件自 2026-11-04 起指向 `src/杠杠の配音台`（同名分叉实现的配音台侧验收），不再是配音室的验收证据。
+  测试无框架，用 `pnpm dlx tsx tests/<文件>.test.ts` 逐文件运行（exit 0 即通过）。
 - Lint 限定本源码目录和配音室测试，不把其他脚本纳入本项目修复。
 - 每个版本在 `docs/releases/vX.Y.Z.md` 留发布记录（Step 级验收、运行时证据、已知边界与遗留）；发版时与 tag 同批提交。
 - 真实验收读取 `window.__ganggangVoiceAudit`，不回传正文、URL、Key、cookie 或完整设置。

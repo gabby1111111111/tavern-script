@@ -86,6 +86,8 @@ export type CastingRoomState = {
   /** AI 多给的候选：用于「换一个」「再换一批」，避免每次都重新问 AI。 */
   reserve: CastingRoomCandidateView[];
   progress: { done: number; total: number };
+  /** 本轮海选是否被用户停止：phase='done' 时用于区分「完成」与「已停止」文案。 */
+  cancelled: boolean;
 };
 
 type RecentRequest = {
@@ -155,6 +157,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     candidates: [],
     reserve: [],
     progress: { done: 0, total: 0 },
+    cancelled: false,
   });
   const castingBusy = ref(false);
   const soundCatalogBusy = ref(false);
@@ -270,7 +273,8 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     }
   }
 
-  function persistSettings(): void {    if (settingsTimer !== null) {
+  function persistSettings(): void {
+    if (settingsTimer !== null) {
       window.clearTimeout(settingsTimer);
       settingsTimer = null;
     }
@@ -570,6 +574,8 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     // 多要一倍：前 N 个展示，其余进备选池，供「换一个 / 再换一批」即时替换，不用反复问 AI。
     const requestCount = Math.min(CASTING_ROOM_MAX_CANDIDATES * 2, clampedLimit * 2);
     castingRoomBusy.value = true;
+    // 在 try 外声明：外层 finally 要拿它和 activeAuditionGenerationId 比对，try 块内的 const 对 finally 不可见。
+    let generationId: string | null = null;
     try {
       error.value = '';
       castingRoom.value = {
@@ -579,9 +585,10 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
         candidates: [],
         reserve: [],
         progress: { done: 0, total: 0 },
+        cancelled: false,
       };
       status.value = `AI 正在为「${roleName}」提名候选音色…`;
-      const generationId = `ganggang-audition-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      generationId = `ganggang-audition-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const auditRunId = beginAiAuditionAudit(generationId);
       activeAuditionGenerationId = generationId;
       const characterKeyAtStart = currentCharacterKey.value;
@@ -638,6 +645,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
           candidates: parsed.candidates.slice(0, clampedLimit).map(toView),
           reserve: parsed.candidates.slice(clampedLimit).map(toView),
           progress: { done: 0, total: 0 },
+          cancelled: false,
         };
         markAiAudition(auditRunId, 'success', parsed.candidates.length);
         status.value = `AI 提名了 ${parsed.candidates.length} 个候选（${clampedLimit} 个展示、${castingRoom.value.reserve.length} 个备选），开始批量出样…`;
@@ -657,8 +665,12 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       }
       await runCastingRoomBatch(auditRunId, characterKeyAtStart);
     } finally {
+      // 代次 id 只在仍是本任务时才清：stop 之后用户可能已开新一批海选，
+      // 旧任务残骸不得把新任务的代次清掉（busy 同理只由任务自身 finally 管理）。
+      if (generationId !== null && activeAuditionGenerationId === generationId) {
+        activeAuditionGenerationId = null;
+      }
       castingRoomBusy.value = false;
-      activeAuditionGenerationId = null;
     }
   }
 
@@ -718,25 +730,43 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     if (!room.candidates.length) return;
     room.phase = 'synthesizing';
     room.progress = { done: 0, total: room.candidates.length };
-    castingRoomAbortController = new AbortController();
+    // 批处理开头存局部 controller（与 replaceCastingRoomCandidate/refreshCastingRoomBatch 一致）：
+    // stopAllWithReason 会同步 abort 并把共享引用置 null，循环里若读共享变量，
+    // 被打断的批次恢复执行时会读到 null.signal 直接 TypeError，phase 永远卡在 synthesizing。
+    const controller = new AbortController();
+    castingRoomAbortController = controller;
     let readyCount = 0;
-    for (const candidate of room.candidates) {
-      if (castingRoomAbortController.signal.aborted || currentCharacterKey.value !== characterKeyAtStart) {
-        candidate.status = 'failed';
-        candidate.error = '已取消（角色卡切换或用户停止）';
+    try {
+      for (const candidate of room.candidates) {
+        if (controller.signal.aborted || currentCharacterKey.value !== characterKeyAtStart) {
+          candidate.status = 'failed';
+          candidate.error = '已取消（角色卡切换或用户停止）';
+          room.progress.done += 1;
+          continue;
+        }
+        const profile = settings.value.profiles.find(item => item.id === candidate.providerProfileId && item.enabled);
+        status.value = `正在合成候选（${room.progress.done + 1}/${room.candidates.length}）：${profile?.name ?? '未知来源'}…`;
+        if (await synthesizeCandidate(room, candidate, controller.signal)) readyCount += 1;
         room.progress.done += 1;
-        continue;
       }
-      const profile = settings.value.profiles.find(item => item.id === candidate.providerProfileId && item.enabled);
-      status.value = `正在合成候选（${room.progress.done + 1}/${room.candidates.length}）：${profile?.name ?? '未知来源'}…`;
-      if (await synthesizeCandidate(room, candidate, castingRoomAbortController.signal)) readyCount += 1;
-      room.progress.done += 1;
+    } catch (caught) {
+      // 兜底：异常也要收敛 phase 与审计收尾，不能把面板留在 synthesizing。
+      markAiAudition(auditRunId, 'fail');
+      error.value = errorMessage(caught);
+      status.value = 'AI 海选出样失败';
+      if (room.phase === 'synthesizing') room.phase = 'failed';
+      throw caught;
+    } finally {
+      // 只在仍是本批次时才清共享引用，避免覆盖 replace/refresh 新建的 controller。
+      if (castingRoomAbortController === controller) castingRoomAbortController = null;
     }
-    markAiAudition(auditRunId, readyCount > 0 ? 'success' : 'fail', readyCount);
+    const cancelled = controller.signal.aborted;
+    markAiAudition(auditRunId, cancelled ? 'cancelled' : readyCount > 0 ? 'success' : 'fail', readyCount);
+    room.cancelled = cancelled;
     room.phase = readyCount > 0 ? 'done' : 'failed';
-    castingRoomAbortController = null;
-    status.value =
-      readyCount > 0
+    status.value = cancelled
+      ? '海选已停止'
+      : readyCount > 0
         ? `AI 海选完成：${readyCount}/${room.candidates.length} 个候选出样成功，请试听并定角`
         : 'AI 海选出样全部失败，请查看各候选的失败原因';
   }
@@ -872,6 +902,8 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     const isNarrator = normalized === '旁白' || normalized === 'narrator';
     const table = settings.value.castingByCharacter[currentCharacterKey.value] ?? null;
     const entries = table ? [...table.entries] : [];
+    // 空表（新卡还没有配音表）时直接定角角色会触发「恰好一个旁白」校验，对新手是误导，给引导文案。
+    const isTableEmpty = !table || entries.length === 0;
     const existing = entries.find(entry =>
       isNarrator
         ? entry.role === 'narrator'
@@ -884,7 +916,7 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
       existing.reason = reason.slice(0, 500);
     } else {
       entries.push({
-        id: `ping-${Date.now()}`,
+        id: `pin-${Date.now()}`,
         role: isNarrator ? 'narrator' : 'character',
         displayName: roleName,
         aliases: [],
@@ -894,7 +926,10 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     }
     const problem = findCastingEntryError(entries);
     if (problem) {
-      error.value = problem;
+      error.value =
+        isTableEmpty && !isNarrator
+          ? '配音表还没有任何条目：请先添加一个旁白，或在「开始 AI 海选」后从候选中定角'
+          : problem;
       return false;
     }
     // P1-4：同步更新 settings ref（deep watch 350ms 落盘）——只调 saveCastingTable 会被后续深 watch 覆写丢失
@@ -1449,10 +1484,9 @@ export function createVoiceRuntime(edition: VoiceEdition = CUSTOM_ONLY_VOICE_EDI
     let requestCancelled = true;
     stopReadingSequence();
     providerController?.abort();
-    providerController = null;
-    providerBusy.value = false;
-    auditionBusy.value = false;
-    castingRoomBusy.value = false;
+    // busy 标志只由各任务自身 finally 管理（providerController 也不在这里置空：
+    // 旧 probe 的 finally 靠引用比对判断自己是否有权清理）；stop 只负责 abort 与中止审计。
+    // 在这里无条件强清 busy，会让还没结算的旧任务残骸覆盖新任务刚接手的 busy/代次。
     castingRoomAbortController?.abort(new Error(reason));
     castingRoomAbortController = null;
     soundCatalogController?.abort();

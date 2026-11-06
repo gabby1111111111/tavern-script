@@ -68,7 +68,7 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 - AI 音效计划只在明确点击后发送当前消息、可朗读片段以及音效 ID、名称、分类和说明；音频 URL 不发送给酒馆 AI。
 - API Key 不发送给酒馆 AI，也不得进入 Audit、缓存描述或日志。
 - Profile、凭据、配音表和自定义音效元数据保存在 Tavern Helper 脚本变量中。
-- 最近十条只在页面内存；合成缓存使用当前浏览器 origin 的内存与 IndexedDB。
+- 最近十条只在页面内存；语音缓存同样只在页面内存，刷新网页即清空（不写 IndexedDB 或本地文件）。
 - MiniMax 音色查询结果只保留在页面内存。
 
 ## 常见问题
@@ -87,9 +87,9 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 402 只在 Fish 上出现，表示请求走了付费模型，通常是漏了 `model` 请求头；本项目已固定免费档 `s2.1-pro-free`，
 若你手填过别的模型请改回（免费档不扣钱包，402 ≠ 免费档失效）。
 
-### 为什么最近十条刷新后没了，但第二次生成仍可能更快？
+### 为什么最近十条刷新后没了？
 
-最近十条是页内操作历史；合成缓存是独立 IndexedDB 层。
+最近十条与语音缓存都只在页面内存，刷新网页即清空。同一页面会话里重复的句子会直接复用刚生成过的语音（所以第二次试听/朗读显得更快），刷新后需要重新合成。
 
 ### 为什么 Ambience 不自动卡在台词中间？
 
@@ -99,7 +99,8 @@ import 'https://testingcf.jsdelivr.net/gh/gabby1111111111/tavern-script@杠杠�
 
 维护入口、事件路线和故障索引见 [AGENTS.md](./AGENTS.md)。用户可见变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
-开发态使用仓库现有 `pnpm watch`，并让带 CORS 的本地静态服务在 `http://localhost:5500`
-提供仓库目录；当前角色脚本 loader 从这里读取 `dist/杠杠の配音室/index.js`。只开 watch 不会自动提供 5500。
+开发态使用仓库现有 `pnpm watch`，并让带 CORS 的本地静态服务在 `http://localhost:5501`
+提供仓库目录；当前角色脚本 loader 从这里读取 `dist/杠杠の配音室/index.js`。只开 watch 不会自动提供 5501。
+（端口统一为 5501：与 `AGENTS.md` 的实时链描述及 v0.2.0 发布记录一致；本文件旧版的 5500 是笔误。）
 
 发布前必须使用生产构建或 CI bundle，并对最终制品重新完成 8000 实机验收。项目许可证以仓库最终确认的发布声明为准。
