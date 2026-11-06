@@ -173,32 +173,7 @@ export type { BgmPromptFloorDecision };
 // -----------------------------------------------------------------------------
 // Helpers that bridge cadence state → ledger decision without leaking state.
 // -----------------------------------------------------------------------------
+// 注：`asBgmFloorDecide` / `prepareBgmFloorDecision` 两个包装导出无任何调用方
+//（生产与测试均为零引用），2026-11-03 审查后移除；ledger 本体的
+// `prepare`/`commit`/`sync` 仍是唯一使用路径。
 
-export type BgmFloorDecideFn<T> = (nextFloorCount: number) => T;
-
-/** Wrap the cadence state reader as a `decide` callback for ledger.prepare. */
-export function asBgmFloorDecide<T>(
-  decide: (nextFloorCount: number) => T,
-): BgmFloorDecideFn<T> {
-  return decide;
-}
-
-/** Compose a ledger prepare call for BGM prompt floor eligibility. */
-export function prepareBgmFloorDecision<T>(
-  ledger: BgmFloorEligibilityLedger<T>,
-  input: {
-    type: BgmGenerationType;
-    chat: readonly object[];
-    targetMessageId?: number;
-    freshUserInput?: boolean;
-    decide: BgmFloorDecideFn<T>;
-  },
-): BgmFloorPlan<T> | null {
-  return ledger.prepare({
-    type: input.type,
-    chat: input.chat,
-    targetMessageId: input.targetMessageId,
-    freshUserInput: input.freshUserInput,
-    decide: input.decide,
-  });
-}

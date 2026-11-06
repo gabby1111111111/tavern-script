@@ -38,7 +38,15 @@ import {
 import { BgmFloorEligibilityLedger, type BgmFloorPlan } from './bgm-eligibility';
 
 const bgmPinia = createPinia();
-const bgmSettingsStore = useBgmSettingsStore(bgmPinia);
+let bgmSettingsStore!: ReturnType<typeof useBgmSettingsStore>;
+try {
+  // getScriptId/getVariables 在脚本求值早期并非必然可用，失败时必须留下可定位的证据，
+  // 而不是让整个模块静默求值失败（此时事件监听与审计对象都不存在）。
+  bgmSettingsStore = useBgmSettingsStore(bgmPinia);
+} catch (error) {
+  console.error('<杠杠-调音台> 设置存储初始化失败，脚本停用：', errorText(error));
+  throw error;
+}
 
 function debugInfo(...args: unknown[]) {
   if (bgmSettingsStore.settings.debug_mode) console.info(...args);
@@ -333,7 +341,7 @@ type RuntimeAudit = {
     source_mode: BgmSourceMode;
     playlist_id: string | null;
     candidate_count: number;
-    reason: 'generation_after_commands' | 'settings_changed' | null;
+    reason: 'generation_after_commands' | null;
     interval: number;
     bgm_prompt_included: boolean;
     skipped_count: number;
@@ -353,7 +361,7 @@ type RuntimeAudit = {
     status: 'pending' | 'success' | 'fail';
     id: string;
     scope: 'current_chat';
-    reason: 'script_loaded' | 'chat_changed' | 'settings_changed' | 'generation_after_commands' | null;
+    reason: 'generation_after_commands' | null;
     error: string | null;
   };
   last_error: string | null;
@@ -909,7 +917,7 @@ function startGeneration() {
     if (action.type === 'stop') {
       activeMusicGenerationId = 0;
       cancelBgmTransition();
-      pauseAudio('bgm');
+      pauseAudioSafely('bgm');
     }
   });
   debugInfo(`<杠杠-BGM> generation started #${currentGenerationId}`);
@@ -1227,6 +1235,30 @@ function commitNormalAssistantFloor(pending: PendingBgmPromptDecision, messageId
   });
 }
 
+/**
+ * 中止/复位时把本轮审计字段落为终态（2026-11-03 审查 P2-2/复审硬伤#3）。
+ * 只收 pending 字段，不覆盖上一轮已终态的记录；run_id 为 0 表示本轮从未
+ * startGeneration/startSkippedGeneration 过，不动审计。
+ */
+function finalizeAbortedGenerationAudit(reason: string, messageId: number | null = null) {
+  if (runtimeAudit.run_id === 0) return;
+  if (runtimeAudit.marker.status === 'pending') {
+    runtimeAudit.marker = { status: 'fail', matched: false, song: null, singer: null, error: reason };
+  }
+  if (runtimeAudit.stream_finished.status === 'pending') {
+    runtimeAudit.stream_finished = { status: 'fail', message_id: messageId, error: reason };
+  }
+  if (runtimeAudit.music_lookup.status === 'pending') {
+    runtimeAudit.music_lookup = { ...runtimeAudit.music_lookup, status: 'fail', error: reason };
+  }
+  if (runtimeAudit.playlist.status === 'pending') {
+    runtimeAudit.playlist = { ...runtimeAudit.playlist, status: 'fail', error: reason };
+  }
+  if (runtimeAudit.audio_played.status === 'pending') {
+    runtimeAudit.audio_played = { status: 'fail', error: reason };
+  }
+}
+
 function finishAudioGeneration(eventMessageId: number | null, receivedType?: string) {
   const pending = pendingBgmPromptDecision;
   if (pending && receivedType && pending.generationType !== receivedType) {
@@ -1288,9 +1320,15 @@ function finishAudioGeneration(eventMessageId: number | null, receivedType?: str
     activeScanner = null;
   }
 
-  runtimeAudit.stream_finished = { status: 'success', message_id: finalMessageId, error: null };
-  if (bgmAction?.type === 'none' && runtimeAudit.marker.status === 'pending') {
-    runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
+  // pending 缺失或已中止（如 GENERATION_STOPPED/MESSAGE_SWIPED 复位后仍收到收尾事件）时，
+  // 不得把本轮标成 success——验收方会据此误读；marker 也一并落为终态，避免悬挂 pending。
+  if (pending && !pending.aborted) {
+    runtimeAudit.stream_finished = { status: 'success', message_id: finalMessageId, error: null };
+    if (bgmAction?.type === 'none' && runtimeAudit.marker.status === 'pending') {
+      runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
+    }
+  } else {
+    finalizeAbortedGenerationAudit('generation aborted or reset before settle', finalMessageId);
   }
   debugInfo('<杠杠-调音台> stream finished', {
     generationId,
@@ -1302,7 +1340,10 @@ function finishAudioGeneration(eventMessageId: number | null, receivedType?: str
   activeGenerationSourceContext = null;
 }
 
-clearBgmPromptInjections();
+// 顶层清理上一轮残留注入：失败只记录，不阻断后续监听注册。
+errorCatched(clearBgmPromptInjections)();
+// 事件监听与 watch 的生命周期随 iframe 存活（Tavern Helper 热重载会重建 iframe），
+// pagehide 不逐个注销；若未来改为同窗口复用加载，需要补 disposer 收集。
 eventOn(tavern_events.CHAT_CHANGED, () => {
   resetBgmPromptCadence();
   resetAudioGenerationState();
@@ -1465,6 +1506,7 @@ eventOn(tavern_events.GENERATION_ENDED, (messageId: number) => {
 
 eventOn(tavern_events.GENERATION_STOPPED, () => {
   resetAudioGenerationState();
+  finalizeAbortedGenerationAudit('generation stopped before settle');
   debugInfo('<杠杠-调音台> scanner reset after generation stopped');
 });
 
@@ -1472,6 +1514,7 @@ eventOn(tavern_events.MESSAGE_SWIPED, (messageId: number) => {
   resetBgmGeneration(true);
   lastSettledBgmGeneration = null;
   clearSkippedSwipeLifecycle();
+  finalizeAbortedGenerationAudit('generation reset by swipe');
   const messageRef = rawMessageRef(messageId);
   pendingSwipeTarget =
     Number.isInteger(messageId) && messageRef
@@ -1505,4 +1548,6 @@ function mountBgmSettingsPanel() {
   $(window).off('pagehide.ganggangConsoleSettings').on('pagehide.ganggangConsoleSettings', cleanup);
 }
 
-$(mountBgmSettingsPanel);
+$(() => {
+  errorCatched(mountBgmSettingsPanel)();
+});

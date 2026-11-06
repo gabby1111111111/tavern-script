@@ -586,7 +586,12 @@ export const useBgmSettingsStore = defineStore('ganggang-console-settings', () =
   watch(
     settings,
     nextSettings => {
-      updateVariablesWith(variables => ({ ...variables, ...klona(nextSettings) }), scriptVariableOption);
+      try {
+        updateVariablesWith(variables => ({ ...variables, ...klona(nextSettings) }), scriptVariableOption);
+      } catch (error) {
+        // 单次写回失败不应让设置面板的后续交互继续抛未处理异常。
+        console.warn('<杠杠-调音台> 设置写回脚本变量失败', error instanceof Error ? error.message : String(error));
+      }
     },
     { deep: true, immediate: true },
   );
