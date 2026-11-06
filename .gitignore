@@ -1,4 +1,5 @@
 node_modules
+.codegraph/
 
 .DS_Store
 Thumbs.db
@@ -11,3 +12,16 @@ pnpm-debug.log*
 
 auto-imports.d.ts
 components.d.ts
+
+# 本机私有配置：内网地址/本地端口等不入库（AGENTS.md 提交规则）
+.mcp.json
+.vscode/launch.json
+
+# 本机 agent/工具工作目录（不入库）
+.codex/
+.codex-tmp/
+.workbuddy/
+.zcode/
+.zcodeignore
+running-luna/
+muse-to-zcode-ui-cand-harness.html
