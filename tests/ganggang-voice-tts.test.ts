@@ -1,29 +1,22 @@
-import { createPlaybackSessionManager } from '../src/杠杠の配音室/tts/playback-session';
-import { detectAudioType } from '../src/杠杠の配音室/tts/audio-signature';
 import {
-  buildDoubaoUpstreamRequest,
-  DOUBAO_TTS_ENDPOINT,
-  DOUBAO_TTS_PROXY_PATH,
-  parseDoubaoNdjson,
-} from '../src/杠杠の配音室/tts/doubao-request';
-import {
-  FISH_TTS_PROXY_PATH,
   MINIMAX_ENDPOINTS,
+  MINIMAX_VOICE_ENDPOINTS,
   XIAOMI_MIMO_ENDPOINT,
-} from '../src/杠杠の配音室/tts/cloud-request';
+  buildMinimaxRequest,
+  buildMinimaxVoiceListRequest,
+} from '../src/杠杠の配音台/tts/cloud-request';
+import { DEFAULT_DOUBAO_RESOURCE_ID } from '../src/杠杠の配音台/tts/doubao-request';
 import {
-  createProviderRegistry,
-  describeProxyFailure,
-  MAX_PROXY_AUDIO_BYTES,
+  DOUBAO_BRIDGE_CAPABILITIES_ENDPOINT,
+  DOUBAO_BRIDGE_REQUEST_CONTENT_TYPE,
+  DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT,
   MAX_TTS_RESPONSE_BYTES,
-  MAX_TTS_WIRE_BYTES,
+  createProviderRegistry,
   redactProviderSecrets,
-} from '../src/杠杠の配音室/tts/providers';
-import * as providersModule from '../src/杠杠の配音室/tts/providers';
-import { extractContentText, parseSpokenSegments } from '../src/杠杠の配音室/tts/text';
-import { FISH_WHITELIST } from '../src/杠杠の配音室/tts/fish-whitelist';
-import { DOUBAO_CONTEXT } from '../src/杠杠の配音室/tts/emotion';
-import type { SynthesisRequest, TtsProviderProfile } from '../src/杠杠の配音室/types';
+  withTimeout,
+} from '../src/杠杠の配音台/tts/providers';
+import { extractContentText, parseSpokenSegments } from '../src/杠杠の配音台/tts/text';
+import type { SynthesisRequest, TtsProviderProfile } from '../src/杠杠の配音台/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -103,79 +96,59 @@ void (async () => {
     segments.every(segment => segment.sourceMessageId === 8),
     '解析结果必须携带消息 ID',
   );
-  equal(
-    segments.map(segment => segment.emotion ?? null),
-    [null, 'gentle', null],
-    '对白行里的情绪标签必须归一化成标准情绪键（温柔 → gentle）',
-  );
   assert(new Set(segments.map(segment => segment.id)).size === segments.length, '解析结果 ID 必须唯一');
 
-  // 豆包经酒馆 /proxy：豆包 CORS 预检不放行新版 X-Api-Key（8000 实测），直连必被拦。
-  const doubao = buildDoubaoUpstreamRequest({ apiKey: 'new-api-secret', speaker: 'speaker', text: '你好' });
-  equal(DOUBAO_TTS_PROXY_PATH, '/proxy/' + DOUBAO_TTS_ENDPOINT, '豆包必须以相对路径 /proxy + 完整目标 URL');
-  equal(doubao.url, DOUBAO_TTS_PROXY_PATH, '豆包合成必须经酒馆同源 /proxy（不走供应商直连）');
-  const doubaoRequestHeaders = doubao.headers as Record<string, string>;
-  equal(doubaoRequestHeaders['X-Api-Key'], 'new-api-secret', '豆包凭据必须走新版 X-Api-Key 请求头');
-  equal(doubaoRequestHeaders['X-Api-App-Key'], undefined, '豆包旧版 APP ID 头已弃用');
-  equal(doubaoRequestHeaders['X-Api-Access-Key'], undefined, '豆包旧版 Access Key 头已弃用');
-  equal(doubaoRequestHeaders['X-Api-Resource-Id'], 'seed-tts-2.0', '豆包请求必须带 Resource ID');
-  assert(Boolean(doubao.headers['X-Api-Request-Id']), '豆包请求必须带独立 Request ID');
-  assert(!JSON.stringify(doubao.payload).includes('new-api-secret'), '豆包凭据不得进入请求体');
+  // F1 回归闸门：MiniMax 合成与音色列表都必须带 GroupId 查询参数。
   await expectError(
     async () => {
-      buildDoubaoUpstreamRequest({ apiKey: '', speaker: 'speaker', text: '你好' });
+      buildMinimaxRequest({ apiKey: 'minimax-secret', text: '你好', voiceId: 'female-shaonv' });
     },
-    /豆包 TTS 缺少 API Key/,
-    '豆包旧版凭据已弃用：没有 API Key 必须直接报缺凭据，而不是回落到旧版头',
+    /缺少 MiniMax Group ID/,
+    'MiniMax 合成请求缺 GroupId 必须直接报缺，而不是发出必然失败的请求',
   );
+  await expectError(
+    async () => {
+      buildMinimaxVoiceListRequest({ apiKey: 'minimax-secret' });
+    },
+    /缺少 MiniMax Group ID/,
+    'MiniMax 音色列表请求同样必须有 GroupId 校验',
+  );
+  const minimaxUpstream = buildMinimaxRequest({
+    apiKey: 'minimax-secret',
+    groupId: 'group 123/ab',
+    text: '你好',
+    voiceId: 'female-shaonv',
+  });
   equal(
-    parseDoubaoNdjson(JSON.stringify({ code: 0, data: btoa('mp3') }), 1024).length,
-    3,
-    '豆包 NDJSON 应拼出音频字节',
+    minimaxUpstream.url,
+    `${MINIMAX_ENDPOINTS.cn}?GroupId=${encodeURIComponent('group 123/ab')}`,
+    'GroupId 必须作为 URL 查询参数并做 encodeURIComponent',
   );
-  await expectError(
-    async () => {
-      parseDoubaoNdjson(JSON.stringify({ code: 45000000, message: 'resource mismatch' }), 1024);
-    },
-    /45000000：音色与资源 ID 不配套/,
-    '豆包 45000000 必须给出"音色与资源 ID 不配套"的可读原因',
+  const voiceListUpstream = buildMinimaxVoiceListRequest({ apiKey: 'k', groupId: 'group-123' });
+  equal(
+    voiceListUpstream.url,
+    `${MINIMAX_VOICE_ENDPOINTS.cn}?GroupId=group-123`,
+    '音色列表端点也必须拼 GroupId 查询参数',
   );
-  await expectError(
-    async () => {
-      parseDoubaoNdjson(
-        JSON.stringify({ code: 55000000, message: 'resource ID is mismatched with speaker related resource' }),
-        1024,
-      );
-    },
-    /55000000：音色与资源 ID 不配套/,
-    '豆包 55000000（实测拿 Edge 音色配 seed-tts-2.0 触发）也必须给出同一族可读原因',
-  );
+  equal(DEFAULT_DOUBAO_RESOURCE_ID, 'seed-tts-2.0', '豆包默认 Resource ID 必须稳定');
+  assert(MAX_TTS_RESPONSE_BYTES > 0, 'provider 响应大小限制必须存在');
 
-  // /proxy 会丢上游 Content-Type（2026-10-08 在 8000 实测 content-type 为 null），魔数兜底是硬需求。
-  equal(
-    detectAudioType(new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])),
-    'audio/mpeg',
-    'ID3 头必须识别为 MP3',
-  );
-  equal(detectAudioType(new Uint8Array([0xff, 0xfb, 0x90, 0xc4])), 'audio/mpeg', 'MP3 帧同步必须识别为 MP3');
-  equal(detectAudioType(new TextEncoder().encode('RIFFxxxxWAVE')), 'audio/wav', 'RIFF/WAVE 必须识别为 WAV');
-  const oggHead = new Uint8Array(27);
-  oggHead.set([0x4f, 0x67, 0x67, 0x53, 0x00]);
-  equal(detectAudioType(oggHead), 'audio/ogg', 'OggS 必须识别为 OGG');
-  equal(detectAudioType(new TextEncoder().encode('fLaCxxxx')), 'audio/flac', 'fLaC 必须识别为 FLAC');
-  equal(detectAudioType(new TextEncoder().encode('<html>请登录</html>')), null, '文本响应不得被识别为音频');
-  equal(detectAudioType(new Uint8Array(0)), null, '空响应不得被识别为音频');
-
-  equal(
-    describeProxyFailure('Fish', 404, ''),
-    'Fish 酒馆 /proxy 不可用：请在 config.yaml 打开 enableCorsProxy 并重启酒馆',
-    '404 必须直接给出 enableCorsProxy 修法',
-  );
-  equal(
-    describeProxyFailure('Fish', 402, ''),
-    'Fish 额度不足：请确认请求头 model 是免费档（默认 s2.1-pro-free）',
-    '402 必须指向 model 请求头，而不是笼统报网络错误',
-  );
+  // 超时保护（F2）：withTimeout 必须在超时后用可读 Error 中止，并转发调用方取消。
+  const timeoutHandle = withTimeout(undefined, 20, '合成超时测试（120 秒）');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert(timeoutHandle.signal.aborted, '超时后 signal 必须中止');
+  const timeoutReason = (timeoutHandle.signal as AbortSignal & { reason?: unknown }).reason;
+  assert(timeoutReason instanceof Error && /超时/.test(timeoutReason.message), '超时原因必须是可读的 Error');
+  timeoutHandle.dispose();
+  const callerController = new AbortController();
+  const callerHandle = withTimeout(callerController.signal, 10_000, '不该触发');
+  callerController.abort();
+  assert(callerHandle.signal.aborted, '调用方取消必须立即转发到合并 signal');
+  callerHandle.dispose();
+  const disposedHandle = withTimeout(undefined, 20, '不该触发');
+  disposedHandle.dispose();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert(!disposedHandle.signal.aborted, 'dispose 之后定时器不得再中止 signal');
 
   const openAiProfile = baseProfile();
   let capturedOpenAi: { url: RequestInfo | URL; init?: RequestInit } | null = null;
@@ -191,27 +164,37 @@ void (async () => {
   assert(openAiAudio.blob.size > 0, 'OpenAI 兼容 provider 应返回 Blob');
   assert(!String(openAiCall.init?.body).includes(openAiProfile.apiKey), 'OpenAI 请求体不得带 API Key');
 
+  // 豆包：合成走 SillyTavern 同源桥接（server-plugins/ganggang-tts-bridge），凭据只发给同源桥接。
   const doubaoProfile = baseProfile({
     id: 'doubao',
     name: '豆包',
     type: 'doubao',
     apiKey: 'new-api-secret',
     defaultVoiceId: 'speaker',
-    // 旧版字段留着但已弃用：用来证明它们既不进请求头也不进请求体。
-    appId: 'stale-app-id',
-    accessKey: 'stale-access-secret',
     resourceId: 'seed-tts-2.0',
   });
   const csrfHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf-test-token' };
-  const ndjsonBody = (...events: Array<Record<string, unknown>>) => events.map(event => JSON.stringify(event)).join('\n');
   let capturedDoubao: { url: RequestInfo | URL; init?: RequestInit } | null = null;
   const doubaoRegistry = createProviderRegistry({
     fetchImpl: async (url, init) => {
       capturedDoubao = { url, init };
-      // 豆包响应是连续的 JSON 对象流：base64 分片 + 结尾 usage 对象
-      return new Response(ndjsonBody({ code: 0, data: btoa('mp3audio') }, { code: 20000000 }), {
+      if (String(url) === DOUBAO_BRIDGE_CAPABILITIES_ENDPOINT) {
+        return new Response(
+          JSON.stringify({
+            pluginId: 'ganggang-tts-bridge',
+            doubao: {
+              available: true,
+              synthesizePath: DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT,
+              requestContentType: DOUBAO_BRIDGE_REQUEST_CONTENT_TYPE,
+              responseContentType: 'audio/mpeg',
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response('bridge-mp3-audio', {
         status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
+        headers: { 'Content-Type': 'audio/mpeg' },
       });
     },
     getSillyTavernHeaders: () => csrfHeaders,
@@ -220,94 +203,87 @@ void (async () => {
   const doubaoCall = capturedDoubao as unknown as { url: RequestInfo | URL; init?: RequestInit };
   const doubaoHeaders = doubaoCall.init?.headers as Record<string, string>;
   const doubaoBody = JSON.parse(String(doubaoCall.init?.body)) as {
-    req_params?: { text?: string; speaker?: string; audio_params?: { format?: string }; additions?: string };
+    apiKey?: string;
+    appId?: string;
+    accessKey?: string;
+    resourceId?: string;
+    speaker?: string;
+    text?: string;
+    contextText?: string;
   };
-  equal(doubaoCall.url, DOUBAO_TTS_PROXY_PATH, '豆包合成必须经酒馆同源 /proxy');
-  equal(doubaoHeaders['X-Api-Key'], 'new-api-secret', '豆包凭据必须走新版 X-Api-Key');
-  equal(doubaoHeaders['X-Api-App-Key'], undefined, '豆包旧版 APP ID 头已弃用，不得再发送');
-  equal(doubaoHeaders['X-Api-Access-Key'], undefined, '豆包旧版 Access Key 头已弃用，不得再发送');
-  equal(doubaoHeaders['X-Api-Resource-Id'], 'seed-tts-2.0', '豆包请求必须带 Resource ID');
-  assert(Boolean(doubaoHeaders['X-Api-Request-Id']), '豆包请求必须带独立 Request ID');
-  equal(doubaoHeaders['X-CSRF-Token'], undefined, '豆包上游请求不得夹带酒馆会话头（/proxy 自行处理）');
-  equal(doubaoBody.req_params?.text, '你好', '豆包台词必须放在 req_params.text');
-  equal(doubaoBody.req_params?.speaker, 'speaker', '豆包音色必须放在 req_params.speaker');
-  equal(doubaoBody.req_params?.audio_params?.format, 'mp3', '豆包必须请求 mp3');
-  assert(!String(doubaoCall.init?.body).includes('new-api-secret'), '豆包凭据不得进入请求体');
-  assert(!String(doubaoCall.init?.body).includes('stale-access-secret'), '已弃用的旧版凭据不得混入请求体');
-  equal(doubaoAudio.mimeType, 'audio/mpeg', '豆包 NDJSON 合成结果必须是 audio/mpeg');
+  equal(doubaoCall.url, DOUBAO_BRIDGE_SYNTHESIS_ENDPOINT, '豆包合成必须发给同源桥接端点');
+  equal(doubaoHeaders['Content-Type'], DOUBAO_BRIDGE_REQUEST_CONTENT_TYPE, '豆包桥接请求必须使用专用 Content-Type');
+  equal(doubaoHeaders['X-CSRF-Token'], 'csrf-test-token', '桥接请求必须携带酒馆会话头');
+  equal(doubaoBody.apiKey, 'new-api-secret', '豆包新版凭据必须交给同源桥接（由服务端转发上游）');
+  equal(doubaoBody.appId, '', '使用新版 API Key 时旧版 APP ID 必须为空');
+  equal(doubaoBody.accessKey, '', '使用新版 API Key 时旧版 Access Key 必须为空');
+  equal(doubaoBody.resourceId, 'seed-tts-2.0', '豆包请求必须带 Resource ID');
+  equal(doubaoBody.speaker, 'speaker', '豆包音色必须放在 speaker 字段');
+  equal(doubaoBody.text, '你好', '豆包台词必须放在 text 字段');
+  equal(doubaoAudio.mimeType, 'audio/mpeg', '豆包桥接合成结果必须是 audio/mpeg');
   equal(doubaoAudio.blob.type, 'audio/mpeg', '豆包 Blob 必须是 audio/mpeg');
+  assert(doubaoAudio.blob.size > 0, '豆包应返回音频');
+  assert(!JSON.stringify(doubaoAudio).includes('new-api-secret'), '合成结果与缓存描述不得包含凭据');
 
   await doubaoRegistry.synthesize(doubaoProfile, { ...requestFor(doubaoProfile), contextText: '（低声）' });
   const doubaoContextBody = JSON.parse(
     String((capturedDoubao as unknown as { init?: RequestInit }).init?.body),
-  ) as { req_params?: { additions?: string } };
-  equal(
-    JSON.parse(String(doubaoContextBody.req_params?.additions)).context_texts,
-    ['（低声）'],
-    '豆包 contextText 必须作为 context_texts additions 发送',
-  );
+  ) as { contextText?: string };
+  equal(doubaoContextBody.contextText, '（低声）', '豆包 contextText 必须原样交给桥接');
 
-  const probe = await doubaoRegistry.probe(doubaoProfile);
+  // probe：只检查同源桥接能力，不联网验证凭据。
+  const doubaoProbe = await doubaoRegistry.probe(doubaoProfile);
   const doubaoProbeCall = capturedDoubao as unknown as { url: RequestInfo | URL; init?: RequestInit };
-  equal(doubaoProbeCall.url, DOUBAO_TTS_PROXY_PATH, '豆包 probe 必须以经 /proxy 的真实合成收尾');
-  const doubaoProbeBody = JSON.parse(String(doubaoProbeCall.init?.body)) as {
-    req_params?: { text?: string; speaker?: string };
-  };
-  equal(doubaoProbeBody.req_params?.text, '你好', '豆包 probe 必须合成"你好"而不是配置占位文本');
-  equal(
-    doubaoProbeBody.req_params?.speaker,
-    'zh_male_kailangdidi_uranus_bigtts',
-    '豆包 probe 必须使用内置豆包音色，避免默认音色串引擎污染结论',
-  );
-  equal(probe.mode, 'proxy', '豆包 probe 必须报告 /proxy 传输模式');
-  equal(probe.checked, 'synthesis', '豆包 probe 必须声明完成真实合成验证');
+  equal(doubaoProbeCall.url, DOUBAO_BRIDGE_CAPABILITIES_ENDPOINT, '豆包 probe 必须请求桥接能力端点');
+  equal((doubaoProbeCall.init as { method?: string }).method, 'GET', '豆包 probe 必须用 GET 拉能力');
+  equal(doubaoProbe.mode, 'plugin', '豆包 probe 必须报告 plugin 传输模式');
+  equal(doubaoProbe.configured, true, '豆包 probe 必须声明桥接已配置');
+  equal(doubaoProbe.unverified, true, '豆包 probe 必须声明未联网验证凭据');
 
-  const doubaoAbortController = new AbortController();
-  let doubaoRequestAborted: boolean | null = null;
-  const doubaoAbortRegistry = createProviderRegistry({
-    fetchImpl: async (_url, init) => {
-      // 让出一轮微/宏任务，模拟真实网络往返期间调用方取消
-      await new Promise(resolve => setTimeout(resolve, 0));
-      doubaoRequestAborted = Boolean(init?.signal?.aborted);
-      if (doubaoRequestAborted) throw new DOMException('Aborted', 'AbortError');
-      return new Response(ndjsonBody({ code: 0, data: btoa('mp3') }), { status: 200 });
-    },
-  });
-  const doubaoAbortProbe = doubaoAbortRegistry.probe(doubaoProfile, doubaoAbortController.signal);
-  doubaoAbortController.abort();
-  await expectError(() => doubaoAbortProbe, /Abort|取消/, '豆包 probe 必须尊重调用方的取消信号');
-  equal(doubaoRequestAborted, true, '豆包 probe 必须把调用方取消透传给上游请求');
-
-  // 回归闸门：豆包只允许打 /proxy（前缀固定），任何供应商直连或桥接请求都是回归。
-  const doubaoUpstreamOnlyRegistry = createProviderRegistry({
-    fetchImpl: async url => {
-      assert(url === DOUBAO_TTS_PROXY_PATH, `豆包不得再请求任何非 /proxy 端点: ${String(url)}`);
-      return new Response(ndjsonBody({ code: 0, data: btoa('mp3') }), { status: 200 });
-    },
-  });
-  const doubaoUpstreamOnlyProbe = await doubaoUpstreamOnlyRegistry.probe(doubaoProfile);
-  equal(doubaoUpstreamOnlyProbe.mode, 'proxy', '豆包 probe 必须完全脱离直连与同源桥接');
-
-  // 旧版凭据已弃用：profile 里只留 appId/accessKey 时不能静默回落到旧版头，必须直接报缺 API Key。
-  const doubaoLegacyOnlyProfile = baseProfile({
-    id: 'doubao-legacy',
-    name: '豆包旧版',
+  // Resource ID 缺省时回落到内置默认值。
+  const doubaoDefaultProfile = baseProfile({
+    id: 'doubao',
+    name: '豆包',
     type: 'doubao',
-    apiKey: '',
-    appId: 'stale-app-id',
-    accessKey: 'stale-access-secret',
-    resourceId: 'seed-tts-2.0',
+    apiKey: 'k2',
     defaultVoiceId: 'speaker',
+    resourceId: '',
   });
-  const doubaoLegacyOnlyRegistry = createProviderRegistry({
+  await doubaoRegistry.synthesize(doubaoDefaultProfile, requestFor(doubaoDefaultProfile));
+  const doubaoDefaultBody = JSON.parse(
+    String((capturedDoubao as unknown as { init?: RequestInit }).init?.body),
+  ) as { resourceId?: string };
+  equal(doubaoDefaultBody.resourceId, DEFAULT_DOUBAO_RESOURCE_ID, '未填 Resource ID 必须回落到内置默认值');
+
+  const doubaoBridgeDownRegistry = createProviderRegistry({
+    fetchImpl: async () => new Response('not found', { status: 404 }),
+  });
+  await expectError(
+    () => doubaoBridgeDownRegistry.probe(doubaoProfile),
+    /豆包桥接不可用（未安装或版本过旧）/,
+    '桥接 404 必须给出可读的安装提示',
+  );
+  const doubaoAuthRegistry = createProviderRegistry({
+    fetchImpl: async () =>
+      new Response(JSON.stringify({ error: { code: 'UPSTREAM_AUTH' } }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+  });
+  await expectError(
+    () => doubaoAuthRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
+    /^豆包鉴权失败$/,
+    '桥接 UPSTREAM_AUTH 必须分类为鉴权失败，且不回显上游原文或凭据',
+  );
+  const doubaoNetworkRegistry = createProviderRegistry({
     fetchImpl: async () => {
-      throw new Error('旧版凭据不得发起任何请求');
+      throw new TypeError('Failed to fetch');
     },
   });
   await expectError(
-    () => doubaoLegacyOnlyRegistry.probe(doubaoLegacyOnlyProfile),
-    /豆包 TTS 缺少 API Key/,
-    '只有旧版凭据的 profile 必须直接报缺 API Key',
+    () => doubaoNetworkRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
+    /Failed to fetch/,
+    '网络层失败必须给出可观察原因',
   );
 
   const doubaoAbort = new AbortController();
@@ -328,75 +304,41 @@ void (async () => {
     assert(error instanceof DOMException && error.name === 'AbortError', '豆包取消必须保留 AbortError');
   }
 
-  const doubaoAuthRegistry = createProviderRegistry({
-    fetchImpl: async () =>
-      new Response(JSON.stringify({ code: 40100000, message: `denied ${doubaoProfile.accessKey}` }), { status: 401 }),
-  });
-  await expectError(
-    () => doubaoAuthRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
-    /^豆包 鉴权失败：凭据无效或未授权$/,
-    '豆包 401 必须分类为凭据错误，且不回显上游原文或凭据',
-  );
-
-  const doubaoResourceMismatchRegistry = createProviderRegistry({
-    fetchImpl: async () =>
-      new Response(JSON.stringify({ code: 45000000, message: `denied ${doubaoProfile.accessKey}` }), { status: 403 }),
-  });
-  await expectError(
-    () => doubaoResourceMismatchRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
-    /^豆包 音色与资源 ID 不配套：2\.0 音色必须配 X-Api-Resource-Id: seed-tts-2\.0$/,
-    '豆包 403/45000000 必须点明音色与资源 ID 不配套，与跨域误诊切割',
-  );
-
-  const doubaoStreamErrorRegistry = createProviderRegistry({
-    fetchImpl: async () => new Response(ndjsonBody({ code: 45000000, message: 'resource mismatch' }), { status: 200 }),
-  });
-  await expectError(
-    () => doubaoStreamErrorRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
-    /豆包 TTS 错误 45000000：音色与资源 ID 不配套/,
-    '豆包流内错误码必须给出可读原因',
-  );
-
-  const doubaoNetworkRegistry = createProviderRegistry({
-    fetchImpl: async () => {
-      throw new TypeError('Failed to fetch');
-    },
-  });
-  await expectError(
-    () => doubaoNetworkRegistry.probe(doubaoProfile),
-    /豆包 网络错误：无法连接酒馆 \/proxy/,
-    '豆包网络故障必须给出 /proxy 相关的可读原因',
-  );
-
-  const oversizedDoubaoRegistry = createProviderRegistry({
-    fetchImpl: async () =>
-      new Response('too-large', {
-        headers: { 'Content-Type': 'text/event-stream', 'Content-Length': String(MAX_TTS_WIRE_BYTES + 1) },
-      }),
-  });
-  await expectError(
-    () => oversizedDoubaoRegistry.synthesize(doubaoProfile, requestFor(doubaoProfile)),
-    /^豆包数据超过大小限制$/,
-    '豆包声明超限的响应必须在浏览器读取前拒绝',
-  );
-
   const minimaxProfile = baseProfile({
     id: 'minimax',
     name: 'MiniMax',
     type: 'minimax',
     apiKey: 'minimax-secret',
     groupId: 'group-123',
-    defaultVoiceId: 'male-qn-qingse',
+    defaultVoiceId: 'female-shaonv',
     model: 'speech-2.8-hd',
     responseFormat: 'mp3',
   });
   let capturedMinimax: { url: RequestInfo | URL; init?: RequestInit } | null = null;
+  let minimaxCallCount = 0;
   const minimaxRegistry = createProviderRegistry({
     fetchImpl: async (url, init) => {
+      minimaxCallCount += 1;
       capturedMinimax = { url, init };
+      if (String(url).startsWith(MINIMAX_VOICE_ENDPOINTS.cn)) {
+        assert(
+          String(url).includes('GroupId=group-123'),
+          'MiniMax 音色列表请求必须携带 GroupId 查询参数',
+        );
+        return new Response(
+          JSON.stringify({
+            base_resp: { status_code: 0 },
+            system_voice: [
+              { voice_id: 'male-qn-qingse', voice_name: '青涩青年', description: ['少年感男声'] },
+              { voice_id: 'female-shaonv', voice_name: '少女', description: '少女音' },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
       assert(
         String(url).startsWith(MINIMAX_ENDPOINTS.cn) && String(url).includes('GroupId=group-123'),
-        'MiniMax 请求必须携带平台端点与 GroupId 查询参数',
+        'MiniMax 合成请求必须携带平台端点与 GroupId 查询参数',
       );
       return new Response(JSON.stringify({ base_resp: { status_code: 0 }, data: { audio: '6d7033' } }), {
         status: 200,
@@ -404,28 +346,52 @@ void (async () => {
     },
   });
   const minimaxVoices = await minimaxRegistry.listVoices(minimaxProfile);
-  const minimaxIds = minimaxVoices.map(voice => voice.voiceId);
-  ['male-qn-qingse', 'male-qn-jingying', 'male-qn-badao', 'male-qn-daxuesheng', 'female-shaonv', 'female-yujie'].forEach(
-    id => assert(minimaxIds.includes(id), `MiniMax 内置清单必须包含 ${id}`),
+  equal(
+    minimaxVoices.map(voice => voice.voiceId),
+    ['male-qn-qingse', 'female-shaonv'],
+    'MiniMax listVoices 必须解析上游目录接口返回的音色',
   );
-  assert(minimaxIds.length >= 20, 'MiniMax 内置清单应有足够的男女声候选，而不是只有 4 个男声');
+  equal(capturedMinimax && String((capturedMinimax as unknown as { url: RequestInfo | URL }).url).startsWith(MINIMAX_VOICE_ENDPOINTS.cn), true, 'MiniMax listVoices 必须请求音色目录端点');
   assert(
     minimaxVoices.every(voice => (voice.description ?? '').length > 0),
-    'MiniMax 每个音色都要带音色说明，AI 才能按音色选人',
+    '上游返回的音色说明必须保留，AI 才能按音色选人',
   );
-  equal(capturedMinimax, null, 'MiniMax 内置清单不得请求供应商目录接口');
   const minimaxProbe = await minimaxRegistry.probe(minimaxProfile);
-  const minimaxProbeCall = capturedMinimax as unknown as { url: RequestInfo | URL; init?: RequestInit };
-  assert(
-    String(minimaxProbeCall.url).startsWith(MINIMAX_ENDPOINTS.cn),
-    'MiniMax probe 必须以真实合成验证凭据',
+  equal(minimaxCallCount, 2, 'probe 内部已拉取音色目录时不得对上游发第二次相同请求');
+  equal(minimaxProbe.mode, 'direct', 'MiniMax probe 必须报告 direct 传输模式');
+  equal(minimaxProbe.configured, true, 'MiniMax probe 必须声明已配置');
+  equal(minimaxProbe.voiceCount, 2, 'MiniMax probe 必须报告音色数量');
+  equal(
+    (minimaxProbe.voices ?? []).map(voice => voice.voiceId),
+    ['male-qn-qingse', 'female-shaonv'],
+    'probe 必须带回已拉取的音色目录，供 runtime 复用',
   );
-  const minimaxProbeBody = JSON.parse(String(minimaxProbeCall.init?.body)) as { text?: string };
-  equal(minimaxProbeBody.text, '你好', 'MiniMax probe 必须合成"你好"');
-  equal(minimaxProbe.checked, 'synthesis', 'MiniMax probe 必须声明完成真实合成验证');
   assert(
     (await minimaxRegistry.synthesize(minimaxProfile, requestFor(minimaxProfile))).blob.size > 0,
     'MiniMax 应返回音频',
+  );
+  const minimaxSynthBody = JSON.parse(
+    String((capturedMinimax as unknown as { init?: RequestInit }).init?.body),
+  ) as { voice_setting?: { voice_id?: string } };
+  equal(minimaxSynthBody.voice_setting?.voice_id, 'female-shaonv', 'MiniMax 音色必须放在 voice_setting.voice_id');
+  const minimaxAuthHeaders = ((capturedMinimax as unknown as { init?: RequestInit }).init?.headers ??
+    {}) as Record<string, string>;
+  equal(minimaxAuthHeaders.Authorization, 'Bearer minimax-secret', 'MiniMax 凭据必须放在 Authorization 头');
+  assert(
+    !String((capturedMinimax as unknown as { init?: RequestInit }).init?.body).includes('minimax-secret'),
+    'MiniMax 凭据不得进入请求体',
+  );
+
+  const minimaxServiceErrorRegistry = createProviderRegistry({
+    fetchImpl: async () =>
+      new Response(JSON.stringify({ base_resp: { status_code: 1004, status_msg: 'invalid api key minimax-secret' } }), {
+        status: 200,
+      }),
+  });
+  await expectError(
+    () => minimaxServiceErrorRegistry.synthesize(minimaxProfile, requestFor(minimaxProfile)),
+    /MiniMax 服务错误 1004(?!.*minimax-secret)/,
+    'MiniMax 业务错误必须给出错误码，且错误正文必须脱敏凭据',
   );
 
   const mimoProfile = baseProfile({
@@ -438,8 +404,10 @@ void (async () => {
     responseFormat: 'wav',
   });
   let capturedMimo: { url: RequestInfo | URL; init?: RequestInit; body?: string } | null = null;
+  let mimoCallCount = 0;
   const mimoRegistry = createProviderRegistry({
     fetchImpl: async (url, init) => {
+      mimoCallCount += 1;
       capturedMimo = { url, init, body: String(init?.body) };
       return new Response(JSON.stringify({ choices: [{ message: { audio: { data: btoa('wav') } } }] }), {
         status: 200,
@@ -447,208 +415,45 @@ void (async () => {
     },
   });
   const mimoProbe = await mimoRegistry.probe(mimoProfile);
+  equal(mimoCallCount, 0, 'MiMo probe 是纯配置检查，不得发起任何网络请求');
+  equal(mimoProbe.mode, 'direct', 'MiMo probe 必须报告 direct 模式');
+  equal(mimoProbe.configured, true, 'MiMo probe 必须声明已配置');
+  equal(mimoProbe.unverified, true, 'MiMo probe 必须声明未联网验证');
+  const mimoAudio = await mimoRegistry.synthesize(mimoProfile, requestFor(mimoProfile));
   equal(
     (capturedMimo as unknown as { url: RequestInfo | URL }).url,
     XIAOMI_MIMO_ENDPOINT,
-    'MiMo probe 必须真实合成验证凭据',
+    'MiMo 合成必须请求小米 MiMo 端点',
   );
-  equal(mimoProbe.checked, 'synthesis', 'MiMo probe 必须声明完成真实合成验证');
-  const mimoProbeBody = JSON.parse(String((capturedMimo as unknown as { body?: string }).body)) as {
+  assert(mimoAudio.blob.size > 0, 'MiMo 应返回音频');
+  const mimoBody = JSON.parse(String((capturedMimo as unknown as { body?: string }).body)) as {
+    messages?: Array<{ role: string; content: string }>;
+    audio?: { voice?: string };
+  };
+  equal(mimoBody.messages?.[0]?.content, '你好', 'MiMo 台词必须放在 assistant 消息');
+  equal(mimoBody.audio?.voice, 'mimo_default', 'MiMo 音色必须放在 audio.voice');
+  const mimoStyleProfile = baseProfile({
+    id: 'mimo-style',
+    name: 'MiMo',
+    type: 'xiaomi-mimo',
+    apiKey: 'mimo-secret',
+    defaultVoiceId: 'mimo_default',
+    style: '低声细语',
+  });
+  await mimoRegistry.synthesize(mimoStyleProfile, requestFor(mimoStyleProfile));
+  const mimoStyleBody = JSON.parse(String((capturedMimo as unknown as { body?: string }).body)) as {
     messages?: Array<{ role: string; content: string }>;
   };
-  equal(mimoProbeBody.messages?.[0]?.content, '你好', 'MiMo probe 台词必须放在 assistant 消息');
-  assert((await mimoRegistry.synthesize(mimoProfile, requestFor(mimoProfile))).blob.size > 0, 'MiMo 应返回音频');
-  await mimoRegistry.synthesize(mimoProfile, {
-    ...requestFor(mimoProfile, '（撒娇）你还在生气吗……'),
-    instruction: '角色：程妄。指导：明亮干净的年轻男声，尾音上扬。',
-  });
-  const mimoInstructionBody = JSON.parse(
-    String((capturedMimo as unknown as { body?: string }).body),
-  ) as { messages?: Array<{ role: string; content: string }> };
-  equal(
-    mimoInstructionBody.messages?.[0],
-    { role: 'user', content: '角色：程妄。指导：明亮干净的年轻男声，尾音上扬。' },
-    'MiMo 请求级导演指令必须作为 user 消息优先于 Profile style',
-  );
-  equal(
-    mimoInstructionBody.messages?.[1]?.content,
-    '（撒娇）你还在生气吗……',
-    'MiMo 台词本体必须放在 assistant 消息',
-  );
+  equal(mimoStyleBody.messages?.[0], { role: 'user', content: '低声细语' }, 'MiMo Profile style 必须作为 user 消息');
+  equal(mimoStyleBody.messages?.[1]?.content, '你好', 'MiMo 台词本体必须放在 assistant 消息');
 
-  const fishProfile = baseProfile({
-    id: 'fish',
-    name: 'Fish',
-    type: 'fish',
-    apiKey: 'fish-secret',
-    model: 's2.1-pro-free',
-    defaultVoiceId: 'fish-ref-1',
-    responseFormat: 'mp3',
-  });
-  const mp3Frame = new Uint8Array([0xff, 0xfb, 0x90, 0xc4, 0x00, 0x00, 0x00, 0x00]);
-  let capturedFish: { url: RequestInfo | URL; init?: RequestInit } | null = null;
-  const fishRegistry = createProviderRegistry({
-    fetchImpl: async (url, init) => {
-      capturedFish = { url, init };
-      // /proxy 实测会丢上游 Content-Type（content-type 为 null），这里刻意不给响应头以逼出魔数兜底。
-      return new Response(mp3Frame, { status: 200 });
-    },
-    getSillyTavernHeaders: () => ({ 'X-CSRF-Token': 'csrf-fish' }),
-  });
-  const fishVoices = await fishRegistry.listVoices(fishProfile);
-  equal(FISH_WHITELIST.length, 40, 'Fish 白名单必须固定 40 条');
-  equal(
-    new Set(FISH_WHITELIST.map(voice => voice.voiceId)).size,
-    FISH_WHITELIST.length,
-    'Fish 白名单不允许重复 voiceId',
-  );
-  assert(
-    FISH_WHITELIST.every(voice => voice.name.trim() && (voice.description || '').trim()),
-    'Fish 白名单每条都要有名称与描述（AI 靠这两项选音色）',
-  );
-  equal(fishVoices.length, 41, '白名单 40 条 + Profile 默认音色（不在名单内时补一条）');
-  equal(fishVoices[0].voiceId, 'fish-ref-1', 'Profile 默认音色应排在最前，便于手填音色');
-  assert(capturedFish === null, 'Fish 目录不得再联网拉取市场（白名单是内置常量）');
-  const fishAudio = await fishRegistry.synthesize(fishProfile, requestFor(fishProfile, '[happy] 你好吗'));
-  const fishCall = capturedFish as unknown as { url: RequestInfo | URL; init?: RequestInit };
-  equal(FISH_TTS_PROXY_PATH, '/proxy/https://api.fish.audio/v1/tts', '/proxy 后必须跟完整目标 URL 且不做 encode');
-  equal(fishCall.url, FISH_TTS_PROXY_PATH, 'Fish 合成必须经酒馆同源 /proxy 转发');
-  const fishHeaders = fishCall.init?.headers as Record<string, string>;
-  equal(fishHeaders.Authorization, 'Bearer fish-secret', 'Fish 凭据必须放在 Authorization 头（/proxy 会透传）');
-  equal(fishHeaders.model, 's2.1-pro-free', 'Fish 模型必须在请求头 model（漏了会走付费模型报 402）');
-  equal(fishHeaders['Content-Type'], 'application/json', 'Fish 请求必须是 JSON');
-  equal(fishHeaders['X-CSRF-Token'], undefined, 'Fish 上游请求不得夹带酒馆会话头');
-  const fishBody = JSON.parse(String(fishCall.init?.body)) as Record<string, unknown>;
-  equal(fishBody.reference_id, 'fish-ref-1', 'Fish 音色必须以 reference_id 发送');
-  equal(fishBody.text, '[happy] 你好吗', 'Fish FAS2 标签必须随台词透传');
-  equal(fishBody.format, 'mp3', 'Fish 必须请求 mp3');
-  equal(fishBody.latency, 'normal', 'Fish 必须使用 normal 延迟档');
-  assert(!String(fishCall.init?.body).includes('fish-secret'), 'Fish 凭据不得进入请求体');
-  equal(fishAudio.mimeType, 'audio/mpeg', '/proxy 丢失 Content-Type 时必须靠魔数识别为 audio/mpeg');
-  equal(fishAudio.blob.type, 'audio/mpeg', 'Fish Blob 必须是 audio/mpeg');
-  assert(fishAudio.blob.size > 0, 'Fish 应返回音频');
-
-  const fishDefaultModelProfile = baseProfile({
-    id: 'fish-default-model',
-    name: 'Fish 未填模型',
-    type: 'fish',
-    apiKey: 'fish-secret',
-    model: '',
-    defaultVoiceId: 'fish-ref-1',
-  });
-  await fishRegistry.synthesize(fishDefaultModelProfile, requestFor(fishDefaultModelProfile));
-  const fishDefaultHeaders = (capturedFish as unknown as { init?: RequestInit }).init?.headers as Record<string, string>;
-  equal(fishDefaultHeaders.model, 's2.1-pro-free', 'Fish 未填模型时必须回落到免费档，避免误走付费模型 402');
-
-  const fishProbe = await fishRegistry.probe(fishProfile);
-  const fishProbeCall = capturedFish as unknown as { url: RequestInfo | URL };
-  equal(fishProbeCall.url, FISH_TTS_PROXY_PATH, 'Fish probe 必须以 /proxy 真实合成收尾');
-  equal(fishProbe.mode, 'proxy', 'Fish probe 必须报告 /proxy 传输模式');
-  equal(fishProbe.checked, 'synthesis', 'Fish probe 必须声明完成真实合成验证');
-  const fishNoVoiceProfile = baseProfile({
-    id: 'fish-empty',
-    name: 'Fish 无默认音色',
-    type: 'fish',
-    apiKey: 'fish-secret',
-    defaultVoiceId: '',
-  });
-  await fishRegistry.probe(fishNoVoiceProfile);
-  const fishProbeBody = JSON.parse(String((capturedFish as unknown as { init?: RequestInit }).init?.body)) as {
-    reference_id?: string;
-  };
-  equal(fishProbeBody.reference_id, FISH_WHITELIST[0].voiceId, 'Fish probe 未填音色时应回落到白名单第一条');
-
-  const fishProxyDisabledRegistry = createProviderRegistry({
-    fetchImpl: async () =>
-      new Response('CORS proxy is disabled. Enable it in config.yaml or use the --corsProxy flag.', {
-        status: 404,
-        headers: { 'Content-Type': 'text/plain' },
-      }),
-  });
-  await expectError(
-    () => fishProxyDisabledRegistry.synthesize(fishProfile, requestFor(fishProfile)),
-    /enableCorsProxy/,
-    '404 必须提示打开 enableCorsProxy 并重启酒馆',
-  );
-  await expectError(
-    () => fishProxyDisabledRegistry.probe(fishProfile),
-    /^Fish 酒馆 \/proxy 不可用/,
-    'Fish probe 遇到 404 必须给出同一套可读原因',
-  );
-
-  const fishQuotaRegistry = createProviderRegistry({
-    fetchImpl: async () =>
-      new Response(JSON.stringify({ status: 402, message: 'Insufficient API credit' }), { status: 402 }),
-  });
-  await expectError(
-    () => fishQuotaRegistry.synthesize(fishProfile, requestFor(fishProfile)),
-    /model 是免费档/,
-    '402 必须指向 model 请求头与免费档（402 ≠ 免费档失效）',
-  );
-
-  const fishUnrecognizableRegistry = createProviderRegistry({
-    fetchImpl: async () =>
-      new Response('<html><body>请登录酒馆</body></html>', {
-        status: 200,
-        headers: { 'Content-Type': 'text/html' },
-      }),
-  });
-  await expectError(
-    () => fishUnrecognizableRegistry.synthesize(fishProfile, requestFor(fishProfile)),
-    /未返回音频/,
-    '返回登录页/HTML 必须分类为未返回音频，绝不能当音频播出去',
-  );
-
-  const fishOversizedRegistry = createProviderRegistry({
-    fetchImpl: async () => new Response(mp3Frame, { headers: { 'Content-Length': String(MAX_PROXY_AUDIO_BYTES + 1) } }),
-  });
-  await expectError(
-    () => fishOversizedRegistry.synthesize(fishProfile, requestFor(fishProfile)),
-    /^Fish 音频超过大小限制$/,
-    '超过 25MB 上限的 /proxy 音频必须拒绝',
-  );
-
-  const fishNetworkRegistry = createProviderRegistry({
-    fetchImpl: async () => {
-      throw new TypeError('Failed to fetch');
-    },
-  });
-  await expectError(
-    () => fishNetworkRegistry.synthesize(fishProfile, requestFor(fishProfile)),
-    /Fish 网络错误：无法连接酒馆 \/proxy/,
-    '网络层失败必须提示检查酒馆 /proxy 与登录状态',
-  );
-
-  const fishAbort = new AbortController();
-  fishAbort.abort();
-  const fishAbortRegistry = createProviderRegistry({
-    fetchImpl: async (_url, init) => {
-      assert(init?.signal?.aborted === true, 'Fish 合成必须把调用方取消传进 fetch');
-      throw new DOMException('Aborted', 'AbortError');
-    },
-  });
-  try {
-    await fishAbortRegistry.synthesize(fishProfile, { ...requestFor(fishProfile), signal: fishAbort.signal });
-    throw new Error('已取消的 Fish 请求不应成功');
-  } catch (error) {
-    assert(error instanceof DOMException && error.name === 'AbortError', 'Fish 取消必须保留 AbortError');
-  }
-
-  const mimoUnauthorizedRegistry = createProviderRegistry({
-    fetchImpl: async () => new Response(JSON.stringify({ error: { message: '内容包含敏感信息' } }), { status: 400 }),
-  });
-  await expectError(
-    () => mimoUnauthorizedRegistry.probe(mimoProfile),
-    /MiMo 内容被审核拒绝/,
-    '审核拒绝必须给出可读原因',
-  );
   const mimoQuotaRegistry = createProviderRegistry({
     fetchImpl: async () => new Response('quota', { status: 429 }),
   });
   await expectError(
-    () => mimoQuotaRegistry.probe(mimoProfile),
-    /MiMo 额度不足或请求过于频繁/,
-    '429 必须分类为额度/限流',
+    () => mimoQuotaRegistry.synthesize(mimoProfile, requestFor(mimoProfile)),
+    /HTTP 429/,
+    '合成失败必须给出 HTTP 状态原因',
   );
   const mimoNetworkRegistry = createProviderRegistry({
     fetchImpl: async () => {
@@ -656,14 +461,9 @@ void (async () => {
     },
   });
   await expectError(
-    () => mimoNetworkRegistry.probe(mimoProfile),
-    /MiMo 网络错误：无法连接服务/,
-    '网络故障必须分类为网络错误',
-  );
-  await expectError(
-    () => mimoQuotaRegistry.synthesize(mimoProfile, requestFor(mimoProfile)),
-    /MiMo 额度不足或请求过于频繁/,
-    '合成失败同样必须给出可读原因',
+    () => mimoNetworkRegistry.synthesize(mimoProfile, requestFor(mimoProfile)),
+    /Failed to fetch/,
+    '网络故障必须可观察且不泄露凭据',
   );
 
   const edgeProfile = baseProfile({
@@ -683,10 +483,27 @@ void (async () => {
   });
   await edgeRegistry.synthesize(edgeProfile, requestFor(edgeProfile, '旁白'));
   equal(capturedEdge, '/api/plugins/edge-tts/generate', 'Edge provider 应使用 Tavern Edge 插件端点');
+  const edgeVoices = await edgeRegistry.listVoices(edgeProfile);
   assert(
-    (await edgeRegistry.listVoices(edgeProfile)).some(voice => voice.voiceId === edgeProfile.defaultVoiceId),
+    edgeVoices.some(voice => voice.voiceId === edgeProfile.defaultVoiceId),
     'Edge 应提供静态音色目录',
   );
+  assert(
+    edgeVoices.every(voice => (voice.description ?? '').length > 0),
+    'Edge 内置目录每个音色都要带说明（AI 配音导演靠它选人）',
+  );
+  const doubaoVoices = await doubaoRegistry.listVoices(doubaoProfile);
+  assert(doubaoVoices.length >= 20, '豆包内置目录应有足够候选');
+  assert(
+    doubaoVoices.every(voice => (voice.description ?? '').length > 0),
+    '豆包内置目录每个音色都要带说明（AI 配音导演靠它选人）',
+  );
+  const mimoVoices = await mimoRegistry.listVoices(mimoProfile);
+  assert(
+    mimoVoices.every(voice => (voice.description ?? '').length > 0),
+    'MiMo 内置目录每个音色都要带说明（音色名是代号，AI 无法从名字判断）',
+  );
+  equal(mimoCallCount, 2, 'MiMo 只有两次合成请求；静态目录不得发起网络请求');
 
   const aborted = new AbortController();
   aborted.abort();
@@ -703,91 +520,7 @@ void (async () => {
     assert(error instanceof DOMException && error.name === 'AbortError', '取消请求必须保留 AbortError');
   }
 
-  const revoked: string[] = [];
-  const manager = createPlaybackSessionManager({ revokeObjectUrl: url => revoked.push(url) });
-  const first = manager.start({ segments: [{ text: 'one' }] });
-  const controller = manager.createController(first, 'one');
-  manager.registerObjectUrl(first, 'blob:first');
-  const second = manager.start({ segments: [{ text: 'two' }] });
-  assert(controller.signal.aborted, '新播放会话必须取消旧 synthesis controller');
-  assert(manager.isActive(second), '新播放会话必须成为 active session');
-  equal(revoked, ['blob:first'], '替换会话必须释放旧 object URL');
-  assert(MAX_TTS_RESPONSE_BYTES > 0, 'provider 响应大小限制必须存在');
-  assert(MAX_TTS_WIRE_BYTES > MAX_TTS_RESPONSE_BYTES, '豆包线上闸门必须大于解码后的音频上限');
-  assert(MAX_PROXY_AUDIO_BYTES === 25 * 1024 * 1024, '/proxy 音频上限必须固定为 25MB');
-
-  // 对外一套情绪词，对内翻译成各家机制。
-  const doubaoEmotionProfile = baseProfile({
-    id: 'db-e',
-    name: '豆包',
-    type: 'doubao',
-    resourceId: 'seed-tts-2.0',
-    defaultVoiceId: 'zh_male_x',
-  });
-  const minimaxEmotionProfile = baseProfile({
-    id: 'mm-e',
-    name: 'MiniMax',
-    type: 'minimax',
-    groupId: 'group',
-    defaultVoiceId: 'female-shaonv',
-  });
-  const mimoEmotionProfile = baseProfile({
-    id: 'mi-e',
-    name: 'MiMo',
-    type: 'xiaomi-mimo',
-    defaultVoiceId: '白桦',
-  });
-  const fishEmotionProfile = baseProfile({ id: 'fs-e', name: 'Fish', type: 'fish', defaultVoiceId: 'ref-1' });
-
-  equal(
-    providersModule.buildMinimaxPayload(minimaxEmotionProfile, {
-      ...requestFor(minimaxEmotionProfile),
-      emotion: 'coquettish',
-    }).emotion,
-    'happy',
-    '撒娇必须落到 MiniMax 的 happy 档',
-  );
-  assert(
-    providersModule
-      .buildMimoPayload(mimoEmotionProfile, { ...requestFor(mimoEmotionProfile), emotion: 'gentle' })
-      .style.includes('温柔'),
-    'MiMo 必须把情绪写进导演台本',
-  );
-
-  const emotionCalls: Array<{ url: string; body: Record<string, any> }> = [];
-  const emotionRegistry = createProviderRegistry({
-    fetchImpl: async (url, init) => {
-      emotionCalls.push({
-        url: String(url),
-        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, any>) : {},
-      });
-      return new Response('not-audio', { status: 200 });
-    },
-    getSillyTavernHeaders: () => ({ 'X-CSRF-Token': 'csrf' }),
-  });
-  await emotionRegistry
-    .synthesize(doubaoEmotionProfile, { ...requestFor(doubaoEmotionProfile), emotion: 'sad' })
-    .catch(() => undefined);
-  equal(
-    JSON.parse(String(emotionCalls.at(-1)?.body.req_params.additions)).context_texts,
-    [DOUBAO_CONTEXT.sad],
-    '豆包情绪必须翻译成画面级 context_texts（短词对它无效）',
-  );
-  await emotionRegistry
-    .synthesize(fishEmotionProfile, { ...requestFor(fishEmotionProfile), emotion: 'angry' })
-    .catch(() => undefined);
-  assert(
-    String(emotionCalls.at(-1)?.body.text).startsWith('[angry]'),
-    'Fish 情绪必须写成句首内联标签',
-  );
-
-  // 传输层迁移的全局负向断言：浏览器侧已不再导出任何桥接端点/常量。
-  assert(
-    !Object.keys(providersModule).some(key => /BRIDGE/.test(key)),
-    'v0.2.0 起浏览器侧不得再导出 ganggang-tts-bridge 相关常量',
-  );
-
-  console.info('<杠杠の配音室/TTS> offline tests passed');
+  console.info('<杠杠の配音台> offline TTS tests passed');
 })().catch(error => {
   console.error(error);
   throw error;

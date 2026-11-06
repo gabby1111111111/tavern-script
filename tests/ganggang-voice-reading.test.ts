@@ -3,9 +3,9 @@ import {
   mapSelectionToSegments,
   routeSpokenSegments,
   voiceRouteKey,
-} from '../src/杠杠の配音室/reading';
-import { buildReadingTimeline } from '../src/杠杠の配音室/reading-timeline';
-import type { CastingTable, SoundCue, SpokenSegment } from '../src/杠杠の配音室/types';
+} from '../src/杠杠の配音台/reading';
+import { buildReadingTimeline } from '../src/杠杠の配音台/reading-timeline';
+import type { CastingTable, SoundCue, SpokenSegment } from '../src/杠杠の配音台/types';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -76,12 +76,15 @@ equal(
 );
 assert(voiceRouteKey(routed[1]).includes('happy'), '合成相关情绪应进入路由键');
 
-const emotional = routeSpokenSegments(
-  [{ ...segments[1], emotion: 'sad' }],
-  { mode: 'dialogue-only', casting, singleVoice: null, fallbackVoice: null },
-);
-equal(emotional[0].voice.emotion, 'sad', '逐句情绪必须覆盖配音表里的静态情绪');
-assert(voiceRouteKey(emotional[0]).includes('sad'), '逐句情绪变化必须改变路由键（影响缓存复用）');
+// 配音台不解析逐句情绪标记：对白情绪完全来自配音表条目，不会在路由时被句子覆盖。
+const emotional = routeSpokenSegments([{ ...segments[1] }], {
+  mode: 'dialogue-only',
+  casting,
+  singleVoice: null,
+  fallbackVoice: null,
+});
+equal(emotional[0].voice.emotion, 'happy', '配音台对白情绪来自配音表条目（无逐句情绪覆盖）');
+assert(voiceRouteKey(emotional[0]).includes('happy'), '情绪变化仍必须反映在路由键中（影响缓存复用）');
 
 const oneVoice = routeSpokenSegments(segments, {
   mode: 'single-voice',

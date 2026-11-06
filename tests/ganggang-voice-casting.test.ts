@@ -1,27 +1,23 @@
 import {
-  createManualCastEntry,
-  findCastingEntryError,
   generateCastingTable,
   isStaleCastingInputError,
-  parseAliasInput,
   parseCastingResult,
   stopCasting,
-} from '../src/杠杠の配音室/casting';
+} from '../src/杠杠の配音台/casting';
 import {
   buildCastingRequestPayload,
   createCastingInputSignature,
   deriveCharacterKey,
   readCurrentCastingContext,
-  readFullCastingContext,
   sanitizeVoiceOptions,
-} from '../src/杠杠の配音室/context';
+} from '../src/杠杠の配音台/context';
 import {
   loadVoiceSettings,
   normalizeVoiceSettings,
   saveCastingTable,
   SCRIPT_VARIABLE_OPTION,
   updateVoiceSettings,
-} from '../src/杠杠の配音室/settings';
+} from '../src/杠杠の配音台/settings';
 import {
   beginAiCastingAudit,
   beginVoiceAudit,
@@ -34,9 +30,9 @@ import {
   markProviderReady,
   markVoiceAuditError,
   voiceAudit,
-} from '../src/杠杠の配音室/audit';
-import type { CastEntry, VoiceOption } from '../src/杠杠の配音室/types';
-import type { ScriptVariables } from '../src/杠杠の配音室/settings';
+} from '../src/杠杠の配音台/audit';
+import type { VoiceOption } from '../src/杠杠の配音台/types';
+import type { ScriptVariables } from '../src/杠杠の配音台/settings';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -137,24 +133,10 @@ const runCastingTests = async (): Promise<void> => {
   equal(changed.readingDefaults.recentMessageCount, 6, '集中 updater 应能保存朗读默认值');
   assert(!('chatSnapshot' in variables), '集中 updater 必须清理不在持久化契约中的字段');
   assert(!('recentAudio' in variables), '集中 updater 不能写入最近音频');
-
-  equal(normalized.ttsPresetEnabled, false, 'TTS 预设默认关闭');
-  equal(normalized.ttsPresets.length, 1, '缺省应自带一个 TTS 预设');
-  equal(normalized.ttsPresets[0].id, 'default-tts-preset', '默认预设 id 必须稳定');
-  equal(normalized.currentTtsPresetId, 'default-tts-preset', '当前预设 id 必须落在预设列表里');
-
-  const presetSaved = updateVoiceSettings(
-    current => ({
-      ...current,
-      ttsPresetEnabled: true,
-      ttsPresets: [...current.ttsPresets, { id: 'p-2', name: '带语速', instructionText: 'x' }],
-      currentTtsPresetId: 'p-2',
-    }),
-    variableApi,
+  assert(
+    !('ttsPresets' in normalized) && !('tasteProfile' in normalized),
+    '配音台设置不包含选角间/预设字段（那是配音室的能力）',
   );
-  equal(presetSaved.ttsPresetEnabled, true, 'TTS 预设开关必须持久化');
-  equal(presetSaved.ttsPresets.length, 2, 'TTS 预设列表必须持久化');
-  equal(presetSaved.currentTtsPresetId, 'p-2', '当前 TTS 预设必须持久化');
 
   const context = readCurrentCastingContext(3, {
     getCharData: () => ({
@@ -169,15 +151,9 @@ const runCastingTests = async (): Promise<void> => {
     getCurrentCharacterId: () => 'aoi-avatar.png',
     getLastMessageId: () => 11,
     getChatMessages: (range: string | number, options?: { hide_state?: string }) => {
-      equal(range, '4-11', '应为隐藏/跳过的楼层留出余量，而不是只取恰好 N 条');
-      equal(
-        options?.hide_state,
-        'all',
-        '隐藏过滤必须在代码里做：酒馆的 unhidden 会把 is_hidden 未定义（而非 false）的 AI 楼层一并丢掉',
-      );
+      equal(range, '9-11', '应按最近 N 条取楼层窗口');
+      equal(options?.hide_state, 'unhidden', '配音台通过 unhidden 请求未隐藏楼层（代码侧还会再按 is_hidden 过滤）');
       return [
-        { message_id: 7, role: 'user', name: '用户', message: '隐藏的前情', is_hidden: true },
-        { message_id: 8, role: 'assistant', name: '小葵', message: '被筛掉的隐藏回复', is_hidden: true },
         { message_id: 9, role: 'user', name: '用户', message: '你还好吗？', is_hidden: false },
         { message_id: 10, role: 'assistant', name: '小葵', message: '我没事。', is_hidden: false },
         { message_id: 11, role: 'assistant', name: '小葵', message: '车站的灯亮了。', is_hidden: false },
@@ -194,80 +170,9 @@ const runCastingTests = async (): Promise<void> => {
   equal(
     context.recentMessages.map(message => message.messageId).join(','),
     '9,10,11',
-    '隐藏楼层被剔除后仍要补足最近 N 条，而不是让窗口整体前移丢对话',
+    '隐藏楼层被剔除后上下文只保留可见的最近消息',
   );
   assert(!JSON.stringify(context).includes('should-not-be-copied'), '上下文不能复制整张角色卡原始 JSON');
-
-  const longWorldbookContent = '长'.repeat(25_000);
-  const fullContext = await readFullCastingContext(3, {
-    getCharData: () => ({ name: '小葵', avatar: 'aoi-avatar.png' }),
-    getCurrentCharacterName: () => '小葵',
-    getCurrentCharacterId: () => 'aoi-avatar.png',
-    getLastMessageId: () => 11,
-    getChatMessages: () => [],
-    getCurrentPersonaName: () => '阿月',
-    getPersona: () => ({ name: '阿月', description: '旅行中的旁听者', lorebook: 'user-book' }),
-    getCharWorldbookNames: () => ({ primary: 'char-book', additional: ['extra-book', ''] }),
-    getWorldbook: async (name: string) => {
-      if (name === 'char-book') {
-        return [
-          { uid: 0, name: '设定A', enabled: true, content: longWorldbookContent },
-          { uid: 1, name: '停用条目', enabled: false, content: '停用内容不应出现' },
-          { uid: 2, name: '空条目', enabled: true, content: '   ' },
-        ];
-      }
-      if (name === 'extra-book') return [{ uid: 5, name: '设定B', enabled: true, content: '附加内容' }];
-      if (name === 'user-book') return [{ uid: 9, name: '用户设定', enabled: true, content: '用户背景' }];
-      return [];
-    },
-  });
-  equal(fullContext.userName, '阿月', '完整上下文应包含用户 persona 名称');
-  equal(fullContext.userDescription, '旅行中的旁听者', '完整上下文应包含用户设定描述');
-  equal(
-    fullContext.worldbookEntries.map(entry => [entry.worldbook, entry.uid]),
-    [
-      ['char-book', 0],
-      ['extra-book', 5],
-      ['user-book', 9],
-    ],
-    '世界书条目顺序应为 char primary → char additional → persona，且只保留启用条目',
-  );
-  equal(
-    fullContext.worldbookEntries[0].content.length,
-    25_000,
-    '世界书条目内容不设上限、不得截断',
-  );
-  assert(
-    !JSON.stringify(fullContext.worldbookEntries).includes('停用内容不应出现'),
-    '未启用条目不能进入配音上下文',
-  );
-
-  const personaFallbackContext = await readFullCastingContext(1, {
-    getCharData: () => null,
-    getCurrentCharacterName: () => '角色',
-    getCurrentCharacterId: () => '',
-    getLastMessageId: () => 0,
-    getChatMessages: () => [],
-    getCurrentPersonaName: () => null,
-  });
-  equal(personaFallbackContext.userName, '', '没有 persona 时用户名应为空字符串');
-  equal(personaFallbackContext.worldbookEntries, [], '没有 persona 与角色世界书时条目应为空');
-
-  const tolerantContext = await readFullCastingContext(1, {
-    getCharData: () => null,
-    getCurrentCharacterName: () => '角色',
-    getCurrentCharacterId: () => '',
-    getLastMessageId: () => 0,
-    getChatMessages: () => [],
-    getCurrentPersonaName: () => '阿月',
-    getPersona: () => ({ name: '阿月', description: '', lorebook: 'broken-book' }),
-    getCharWorldbookNames: () => ({ primary: 'broken-book', additional: [] }),
-    getWorldbook: async () => {
-      throw new Error('世界书读取失败');
-    },
-  });
-  equal(tolerantContext.userName, '阿月', '世界书读取失败不应影响 persona 资料进入上下文');
-  equal(tolerantContext.worldbookEntries, [], 'getWorldbook 抛错时对应世界书应被跳过而不中断');
 
   const voiceOptions: VoiceOption[] = [
     { providerProfileId: 'doubao-1', voiceId: 'speaker-a', name: '清亮女声', locale: 'zh-CN', tags: ['bright'] },
@@ -318,15 +223,6 @@ const runCastingTests = async (): Promise<void> => {
   assert(
     createCastingInputSignature(context, voiceOptions.slice(0, 1), 3, signatureProfiles) !== baseSignature,
     '可用音色目录变化必须使配音表输入过期',
-  );
-  assert(
-    createCastingInputSignature(
-      { ...fullContext, worldbookEntries: fullContext.worldbookEntries.slice(1) },
-      voiceOptions,
-      3,
-      signatureProfiles,
-    ) !== createCastingInputSignature(fullContext, voiceOptions, 3, signatureProfiles),
-    '世界书条目变化必须使配音表输入过期',
   );
 
   const validModelResult = JSON.stringify({
@@ -493,25 +389,6 @@ const runCastingTests = async (): Promise<void> => {
   }
   assert(staleRejected, '生成返回时输入已变化必须丢弃旧配音表');
   inputCurrent = true;
-  let asyncStaleRejected = false;
-  try {
-    await generateCastingTable({
-      context,
-      voices: voiceOptions,
-      generationId: 'casting-stale-async',
-      isInputCurrent: async () => inputCurrent,
-      runtime: {
-        generateRaw: async () => {
-          inputCurrent = false;
-          return validModelResult;
-        },
-        stopGenerationById: () => true,
-      },
-    });
-  } catch (caught) {
-    asyncStaleRejected = isStaleCastingInputError(caught);
-  }
-  assert(asyncStaleRejected, 'isInputCurrent 返回 Promise 时同样必须丢弃过期配音表');
   const compactGenerated = await generateCastingTable({
     context,
     voices: voiceOptions,
@@ -546,24 +423,6 @@ const runCastingTests = async (): Promise<void> => {
     assert(capturedPromptText.includes(field), `prompt 必须明确要求 ${field}`);
   });
   assert(!capturedPromptText.includes('secret-key'), 'prompt 不能包含 TTS API key');
-  let fullCapturedConfig: unknown;
-  await generateCastingTable({
-    context: fullContext,
-    voices: voiceOptions,
-    generationId: 'casting-full-1',
-    runtime: {
-      generateRaw: async config => {
-        fullCapturedConfig = config;
-        return validModelResult;
-      },
-      stopGenerationById: () => true,
-    },
-  });
-  const fullPromptText = JSON.stringify((fullCapturedConfig as { ordered_prompts?: unknown[] }).ordered_prompts ?? []);
-  assert(fullPromptText.includes('阿月'), 'prompt 应包含用户 persona 名称');
-  assert(fullPromptText.includes('旅行中的旁听者'), 'prompt 应包含用户设定描述');
-  assert(fullPromptText.includes('用户背景'), 'prompt 应包含启用的世界书条目内容');
-  assert(!fullPromptText.includes('停用内容不应出现'), 'prompt 不得包含未启用的世界书条目');
   assert(
     stopCasting('casting-test-1', { stopGenerationById: id => (stoppedId = id) === id, generateRaw: async () => '' }),
     '应能停止指定配音表生成',
@@ -684,41 +543,6 @@ const runCastingTests = async (): Promise<void> => {
     'Gemini narrator 选择请求外 pair 时必须拒绝',
   );
 
-  equal(parseAliasInput(' 小甲 、小乙，小丙 , 小甲 '), ['小甲', '小乙', '小丙'], '别名输入应切分、trim 并去重');
-  equal(parseAliasInput('  '), [], '纯空白别名输入应得到空数组');
-  const manualA = createManualCastEntry('character', { providerProfileId: 'doubao-1', voiceId: 'speaker-a' }, 1);
-  const manualB = createManualCastEntry('fallback', { providerProfileId: 'edge-1', voiceId: 'en-US-AriaNeural' }, 2);
-  assert(manualA.id !== manualB.id, '手动条目 id 必须唯一');
-  equal(manualA.displayName, '角色2', '手动条目应带占位名称');
-  equal(manualA.voice, { providerProfileId: 'doubao-1', voiceId: 'speaker-a' }, '手动条目应保留给定音色');
-  const entryFixture = (role: 'narrator' | 'character' | 'fallback', displayName: string, aliases: string[] = []): CastEntry => ({
-    id: `fixture-${role}-${displayName}`,
-    role,
-    displayName,
-    aliases,
-    voice: { providerProfileId: 'doubao-1', voiceId: 'speaker-a' },
-  });
-  equal(
-    findCastingEntryError([entryFixture('narrator', '旁白'), entryFixture('character', '角色甲')]),
-    null,
-    '合法的手动编辑应通过校验',
-  );
-  assert(findCastingEntryError([]) !== null, '空配音表必须报错');
-  assert(findCastingEntryError([entryFixture('character', '角色甲')]) !== null, '缺少旁白必须报错');
-  assert(
-    findCastingEntryError([
-      entryFixture('narrator', '旁白'),
-      entryFixture('character', '角色甲'),
-      entryFixture('fallback', '角色甲'),
-    ]) !== null,
-    '手动编辑造成重名时必须报错',
-  );
-  assert(findCastingEntryError([entryFixture('narrator', '  ')]) !== null, '名称为空白时必须报错');
-  assert(
-    findCastingEntryError([entryFixture('narrator', '旁白'), entryFixture('character', '角色甲', ['旁白'])]) !== null,
-    '别名与其他角色名称冲突时必须报错',
-  );
-
   saveCastingTable(table, variableApi);
   const stored = normalizeVoiceSettings(variables);
   assert(stored.castingByCharacter[context.characterKey] !== undefined, '验证后的配音表应能按角色卡 key 持久化');
@@ -820,7 +644,7 @@ const runCastingTests = async (): Promise<void> => {
   });
   equal(voiceAudit.last_error, 'operation-failed', 'Audit 错误必须使用固定码，不能回显上游异常正文');
 
-  console.info('<杠杠の配音室> casting tests passed');
+  console.info('<杠杠の配音台> casting tests passed');
 };
 
 runCastingTests().then(undefined, error => {
