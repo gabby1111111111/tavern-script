@@ -25,3 +25,9 @@ components.d.ts
 .zcodeignore
 running-luna/
 muse-to-zcode-ui-cand-harness.html
+
+# 示例构建产物（历史上不入库）
+dist/前端界面示例/
+dist/流式楼层界面示例/
+dist/脚本示例/
+dist/角色卡示例/
