@@ -124,5 +124,5 @@ export function sampleNeteaseTracks(tracks: NeteasePlaylistTrack[], count = 5) {
 
 export function createNeteaseCandidatePrompt(tracks: NeteasePlaylistTrack[], playlistId: string) {
   const candidates = tracks.map(track => `- ${track.name}-${track.artist.join('、')}`).join('\n');
-  return `【指定网易云歌单候选（本轮必选列表）】本轮只能从网易云歌单 ${playlistId} 的以下随机候选中选一首符合当前场景的歌曲，不得选择候选列表之外的歌曲：\n${candidates}\n选择后最终只输出唯一标记：<杠杠-BGM=歌曲名-歌手>。歌曲名和歌手必须使用候选列表中的原文，不要输出额外字段、分析过程或选曲理由。`;
+  return `【指定网易云歌单候选（本轮必选列表）】本轮只能从网易云歌单 ${playlistId} 的以下随机候选中选一首符合当前场景的歌曲，不得选择候选列表之外的歌曲：\n${candidates}\n选择后最终只输出唯一标记：<st测试/BGM=歌曲名-歌手>。歌曲名和歌手必须使用候选列表中的原文，不要输出额外字段、分析过程或选曲理由。`;
 }

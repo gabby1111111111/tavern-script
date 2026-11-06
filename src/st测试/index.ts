@@ -9,7 +9,7 @@
  * ============================================================
  *
  * 目标:AI 回复的文字"一边往外蹦",我们就要"一边"从里面找出一个
- * 约定好的标记(比如 <杠杠-BGM=Sparks-Coldplay>),找到了就立刻触发放歌,
+ * 约定好的标记(比如 <st测试/BGM=Sparks-Coldplay>),找到了就立刻触发放歌,
  * 不用等 AI 把这一整条回复说完。
  *
  * 分三个阶段,对应三种事件:
@@ -23,8 +23,8 @@
  *    每次都会把"目前为止 AI 已经说的全部文字"给你(不是新增的那一小段,
  *    是从头到目前为止的完整文字)。
  *    我们让 scanner 每次都检查一下完整快照中是不是已经出现了
- *    完整的 <杠杠-BGM=歌曲-歌手> 标记?
- *      - 还没出现 / 还没写完(比如只写了 "<杠杠-BGM=Sparks-") → 先不管,继续等
+ *    完整的 <st测试/BGM=歌曲-歌手> 标记?
+ *      - 还没出现 / 还没写完(比如只写了 "<st测试/BGM=Sparks-") → 先不管,继续等
  *      - 出现了完整的标记 → 立刻触发一次"播放"回调,并且记一个"已完成"
  *        的标志,防止后面文字继续蹦出来的时候,同一个标记被重复触发。
  *
@@ -65,7 +65,14 @@ import { type BgmSourceMode, useBgmSettingsStore } from './bgm-settings';
 export {};
 
 const bgmPinia = createPinia();
-const bgmSettingsStore = useBgmSettingsStore(bgmPinia);
+let bgmSettingsStore!: ReturnType<typeof useBgmSettingsStore>;
+try {
+  // getScriptId/getVariables 在脚本求值早期并非必然可用，失败必须留证据而不是静默求值失败。
+  bgmSettingsStore = useBgmSettingsStore(bgmPinia);
+} catch (error) {
+  console.error('<st测试/BGM> 设置存储初始化失败，脚本停用：', errorText(error));
+  throw error;
+}
 
 type BgmAction = { type: 'play' | 'stop' | 'none'; song?: string; singer?: string };
 type MarkerScanner = {
@@ -75,7 +82,7 @@ type MarkerScanner = {
 };
 
 // 两种 BGM 来源都使用同一个标记；歌曲名允许包含连字符，最后一个连字符作为歌手分隔符。
-const markerPattern = /<杠杠-BGM=([^<>\r\n]+)>/i;
+const markerPattern = /<st测试\/BGM=([^<>\r\n]+)>/i;
 
 function parseBgmMarkerBody(body: string): BgmAction | null {
   const content = body.trim();
@@ -112,7 +119,7 @@ function createMarkerScanner(generationId: number, onAction: (action: BgmAction)
       const prefix = latestText.slice(0, 96);
       // 开头看着像新格式标记但还没等到 ">" 出现 —— 说明标记还没写完,先耐心等,
       // 不要在这里就误判成"没有标记"
-      if (/^\s*<杠杠-BGM=/i.test(prefix) && !prefix.includes('>')) return null;
+      if (/^\s*<st测试\/BGM=/i.test(prefix) && !prefix.includes('>')) return null;
 
       const match = latestText.match(markerPattern);
       // 流式阶段可能先收到正文/推理片段，不能因此提前锁定 none；
@@ -200,9 +207,9 @@ function runUnitTests() {
   test('完整文本快照跨 chunk 后只触发一次', () => {
     const actions: BgmAction[] = [];
     const scanner = createMarkerScanner(1, action => actions.push(action));
-    scanner.pushSnapshot('<杠杠-BGM=夜行-');
-    scanner.pushSnapshot('<杠杠-BGM=夜行-椎名林檎>\n正文');
-    scanner.pushSnapshot('<杠杠-BGM=夜行-椎名林檎>\n正文更多');
+    scanner.pushSnapshot('<st测试/BGM=夜行-');
+    scanner.pushSnapshot('<st测试/BGM=夜行-椎名林檎>\n正文');
+    scanner.pushSnapshot('<st测试/BGM=夜行-椎名林檎>\n正文更多');
     equal(actions, [{ type: 'play', song: '夜行', singer: '椎名林檎' }], 'actions');
   });
 
@@ -210,15 +217,15 @@ function runUnitTests() {
     const actions: BgmAction[] = [];
     const none = createMarkerScanner(2, action => actions.push(action));
     const stop = createMarkerScanner(3, action => actions.push(action));
-    equal(none.pushSnapshot('<杠杠-BGM=none-x>'), { type: 'none' }, 'none');
-    equal(stop.pushSnapshot('<杠杠-BGM=stop-x>'), { type: 'stop' }, 'stop');
+    equal(none.pushSnapshot('<st测试/BGM=none-x>'), { type: 'none' }, 'none');
+    equal(stop.pushSnapshot('<st测试/BGM=stop-x>'), { type: 'stop' }, 'stop');
     equal(actions, [{ type: 'stop' }], 'actions');
   });
 
   test('正文中出现的标记也会触发', () => {
     const actions: BgmAction[] = [];
     const scanner = createMarkerScanner(4, action => actions.push(action));
-    scanner.pushSnapshot('正文先到达\n<杠杠-BGM=late-singer>');
+    scanner.pushSnapshot('正文先到达\n<st测试/BGM=late-singer>');
     equal(actions, [{ type: 'play', song: 'late', singer: 'singer' }], 'actions');
     equal(scanner.getState().action, { type: 'play', song: 'late', singer: 'singer' }, 'final action');
   });
@@ -226,14 +233,14 @@ function runUnitTests() {
   test('歌曲名包含连字符时，最后一个连字符分隔歌手', () => {
     const actions: BgmAction[] = [];
     const scanner = createMarkerScanner(5, action => actions.push(action));
-    scanner.pushSnapshot('<杠杠-BGM=Spider-Man-Into the Spider-Verse-Blackway>');
+    scanner.pushSnapshot('<st测试/BGM=Spider-Man-Into the Spider-Verse-Blackway>');
     equal(actions, [{ type: 'play', song: 'Spider-Man-Into the Spider-Verse', singer: 'Blackway' }], 'actions');
   });
 
   test('模式2标记与完全随机模式使用相同的歌名-歌手格式', () => {
     const actions: BgmAction[] = [];
     const scanner = createMarkerScanner(9, action => actions.push(action));
-    scanner.pushSnapshot('<杠杠-BGM=Spider-Man-Blackway>');
+    scanner.pushSnapshot('<st测试/BGM=Spider-Man-Blackway>');
     equal(actions, [{ type: 'play', song: 'Spider-Man', singer: 'Blackway' }], 'mode2 marker');
   });
 
@@ -241,9 +248,9 @@ function runUnitTests() {
     const actions: BgmAction[] = [];
     const first = createMarkerScanner(6, action => actions.push(action));
     const second = createMarkerScanner(7, action => actions.push(action));
-    first.pushSnapshot('<杠杠-BGM=雨-rain>');
-    first.pushSnapshot('<杠杠-BGM=雨-rain>');
-    second.pushSnapshot('<杠杠-BGM=雨-rain>');
+    first.pushSnapshot('<st测试/BGM=雨-rain>');
+    first.pushSnapshot('<st测试/BGM=雨-rain>');
+    second.pushSnapshot('<st测试/BGM=雨-rain>');
     equal(
       actions,
       [
@@ -258,7 +265,7 @@ function runUnitTests() {
   test('未闭合标记在流结束时不播放', () => {
     const actions: BgmAction[] = [];
     const scanner = createMarkerScanner(8, action => actions.push(action));
-    scanner.pushSnapshot('<杠杠-BGM=未完成-');
+    scanner.pushSnapshot('<st测试/BGM=未完成-');
     equal(scanner.finish(), { type: 'none' }, 'finish action');
     equal(actions, [], 'actions');
   });
@@ -307,14 +314,14 @@ function runUnitTests() {
     assert(prompt.includes('Savage'), 'prompt should include song name');
     assert(prompt.includes('aespa'), 'prompt should include singer');
     assert(!prompt.includes('lyric_id'), 'prompt should not include lyric id');
-    assert(prompt.includes('<杠杠-BGM=歌曲名-歌手>'), 'prompt should require two-part marker');
+    assert(prompt.includes('<st测试/BGM=歌曲名-歌手>'), 'prompt should require two-part marker');
   });
 
   const passed = results.filter(result => result.passed).length;
   const report = { passed, failed: results.length - passed, total: results.length, results };
   (globalThis as typeof globalThis & { __stBgmStreamTests?: unknown }).__stBgmStreamTests = report;
-  console.info('<杠杠-BGM> unit tests', report);
-  if (report.failed > 0) console.error('<杠杠-BGM> failures', report.results);
+  console.info('<st测试/BGM> unit tests', report);
+  if (report.failed > 0) console.error('<st测试/BGM> failures', report.results);
   return report;
 }
 
@@ -328,11 +335,12 @@ const bgmPlaylistPromptId = 'st-bgm-playlist-dynamic';
 const legacyTestButtonNames = new Set([
   '<st测试/BGM>注入 BGM 标记测试指示',
   '<st测试/BGM>测试 JOOX 搜歌播放',
+  // 历史版本曾用 <杠杠-BGM> 前缀，旧安装的按钮名必须保留在这里才能被清理。
   '<杠杠-BGM>注入 BGM 标记测试指示',
   '<杠杠-BGM>测试 JOOX 搜歌播放',
 ]);
 const bgmPromptContent =
-  '你正在正常生成角色回复正文。除非用户明确要求不要配 BGM，否则每次正常回复必须按当前正文氛围追加一条歌曲 BGM。保持正常的角色回复和剧情正文，不要输出候选列表、分析过程或选曲理由。【选曲流程（仅在内部完成）】1. 分析当前场景的情绪基调、人物心理状态、剧情节奏，重点看情绪、氛围和节奏的契合度，而不是只看歌词字面意思。2. 在心中列出 3-5 首不同歌手或乐队的候选曲目。3. 排除本次对话历史中已经在 BGM 标记出现过的歌曲，不能重复同一首。4. 优先选择该歌手的非代表作、专辑曲目、B 面曲或冷门单曲，不要每次都选最热门歌曲。5. 剧情出现明显转折时必须重新选曲。【硬性规则】更像电视剧、电影或 Galgame 的 BGM 选曲逻辑；可以使用中文、日文、韩文、英文歌曲，但不能使用纯音乐或器乐曲；歌名与歌手必须真实准确，不可编造。【标记输出】需要 BGM 时，必须在 <content> 标签内部、正文第一段的结尾另起一行。完全随机模式输出 <杠杠-BGM=歌曲名-歌手>；指定网易云歌单模式必须从本轮候选中选择并输出同样的 <杠杠-BGM=歌曲名-歌手> 标记。不要把标记拖到整条回复的最后；标记后可以继续正常正文。';
+  '你正在正常生成角色回复正文。除非用户明确要求不要配 BGM，否则每次正常回复必须按当前正文氛围追加一条歌曲 BGM。保持正常的角色回复和剧情正文，不要输出候选列表、分析过程或选曲理由。【选曲流程（仅在内部完成）】1. 分析当前场景的情绪基调、人物心理状态、剧情节奏，重点看情绪、氛围和节奏的契合度，而不是只看歌词字面意思。2. 在心中列出 3-5 首不同歌手或乐队的候选曲目。3. 排除本次对话历史中已经在 BGM 标记出现过的歌曲，不能重复同一首。4. 优先选择该歌手的非代表作、专辑曲目、B 面曲或冷门单曲，不要每次都选最热门歌曲。5. 剧情出现明显转折时必须重新选曲。【硬性规则】更像电视剧、电影或 Galgame 的 BGM 选曲逻辑；可以使用中文、日文、韩文、英文歌曲，但不能使用纯音乐或器乐曲；歌名与歌手必须真实准确，不可编造。【标记输出】需要 BGM 时，必须在 <content> 标签内部、正文第一段的结尾另起一行。完全随机模式输出 <st测试/BGM=歌曲名-歌手>；指定网易云歌单模式必须从本轮候选中选择并输出同样的 <st测试/BGM=歌曲名-歌手> 标记。不要把标记拖到整条回复的最后；标记后可以继续正常正文。';
 
 function getCurrentBgmTitles() {
   return getAudioList('bgm')
@@ -346,7 +354,7 @@ function createCurrentBgmPlaylistPrompt(titles: string[]) {
 }
 
 function createRandomBgmSourcePrompt() {
-  return '【完全随机 BGM 来源】本轮不限制网易云歌单，请按场景选择真实歌曲。需要 BGM 时输出唯一标记：<杠杠-BGM=歌曲名-歌手>。';
+  return '【完全随机 BGM 来源】本轮不限制网易云歌单，请按场景选择真实歌曲。需要 BGM 时输出唯一标记：<st测试/BGM=歌曲名-歌手>。';
 }
 
 function createUnavailableNeteasePlaylistPrompt(playlistId: string | null) {
@@ -479,7 +487,7 @@ function installPersistentBgmPrompt(reason: 'script_loaded' | 'chat_changed' | '
         reason,
         error: null,
       };
-      console.info('<杠杠-BGM> BGM 模块未启用，不注入提示词', { reason, id: bgmPromptId });
+      console.info('<st测试/BGM> BGM 模块未启用，不注入提示词', { reason, id: bgmPromptId });
       return;
     }
     bgmPromptRuntime.uninject = injectPrompts([
@@ -499,7 +507,7 @@ function installPersistentBgmPrompt(reason: 'script_loaded' | 'chat_changed' | '
       reason,
       error: null,
     };
-    console.info('<杠杠-BGM> 常驻 BGM 指示已注册', { reason, id: bgmPromptId });
+    console.info('<st测试/BGM> 常驻 BGM 指示已注册', { reason, id: bgmPromptId });
   } catch (error) {
     const message = errorText(error);
     runtimeAudit.prompt_injection = {
@@ -510,7 +518,7 @@ function installPersistentBgmPrompt(reason: 'script_loaded' | 'chat_changed' | '
       error: message,
     };
     runtimeAudit.last_error = message;
-    console.warn('<杠杠-BGM> 常驻 BGM 指示注册失败', { reason, message });
+    console.warn('<st测试/BGM> 常驻 BGM 指示注册失败', { reason, message });
   }
 }
 
@@ -593,12 +601,12 @@ function installCurrentBgmPlaylistPrompt() {
     };
     if (sourceError) {
       runtimeAudit.last_error = sourceError;
-      console.warn('<杠杠-BGM> 指定网易云歌单不可用，本轮不会回退到完全随机', {
+      console.warn('<st测试/BGM> 指定网易云歌单不可用，本轮不会回退到完全随机', {
         playlistId: sourceContext.playlistId,
         sourceError,
       });
     } else {
-      console.info('<杠杠-BGM> 已注入当前歌单排重和 BGM 来源提示', {
+      console.info('<st测试/BGM> 已注入当前歌单排重和 BGM 来源提示', {
         count: titles.length,
         titles,
         sourceMode: sourceContext.mode,
@@ -620,7 +628,7 @@ function installCurrentBgmPlaylistPrompt() {
       error: message,
     };
     runtimeAudit.last_error = message;
-    console.warn('<杠杠-BGM> 当前歌单排重提示注入失败', { message });
+    console.warn('<st测试/BGM> 当前歌单排重提示注入失败', { message });
   }
 }
 
@@ -638,7 +646,7 @@ function removeLegacyTestControls() {
     const message = errorText(error);
     runtimeAudit.legacy_test_controls = { status: 'fail', removed_count: 0, error: message };
     runtimeAudit.last_error = message;
-    console.warn('<杠杠-BGM> 清理旧测试按钮失败', { message });
+    console.warn('<st测试/BGM> 清理旧测试按钮失败', { message });
   }
 }
 
@@ -663,7 +671,7 @@ function cancelBgmTransition() {
   try {
     setAudioSettings('bgm', { volume: targetVolume });
   } catch (error) {
-    console.warn('<杠杠-BGM> 恢复 BGM 音量失败', { message: errorText(error) });
+    console.warn('<st测试/BGM> 恢复 BGM 音量失败', { message: errorText(error) });
   }
 }
 
@@ -774,7 +782,7 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     runtimeAudit.playlist = { status: 'success', ...playlistState, error: null };
     runtimeAudit.music_lookup = { status: 'success', source: musicSource, query, track_id: trackId, error: null };
     runtimeAudit.audio_played = { status: 'success', error: null };
-    console.info('<杠杠-BGM> 匹配 JOOX 音源并开始播放', {
+    console.info('<st测试/BGM> 匹配 JOOX 音源并开始播放', {
       generationId: runId,
       source: musicSource,
       playlistId: sourceContext.playlistId,
@@ -792,7 +800,7 @@ async function searchAndPlayBgm(runId: number, song: string, singer: string, sou
     runtimeAudit.playlist = { status: 'fail', ...playlistState, error: message };
     runtimeAudit.audio_played = { status: 'fail', error: message };
     runtimeAudit.last_error = message;
-    console.warn('<杠杠-BGM> 搜歌或播放失败，跳过本轮 BGM', { generationId: runId, message });
+    console.warn('<st测试/BGM> 搜歌或播放失败，跳过本轮 BGM', { generationId: runId, message });
   }
 }
 
@@ -840,7 +848,7 @@ function startGeneration() {
   runtimeAudit.audio_played = { status: 'pending', error: null };
   runtimeAudit.last_error = null;
   activeScanner = createMarkerScanner(currentGenerationId, action => {
-    console.info('<杠杠-BGM> marker resolved', { generationId: currentGenerationId, action });
+    console.info('<st测试/BGM> marker resolved', { generationId: currentGenerationId, action });
     runtimeAudit.marker = {
       status: 'success',
       matched: action.type !== 'none',
@@ -858,11 +866,13 @@ function startGeneration() {
       pauseAudio('bgm');
     }
   });
-  console.info(`<杠杠-BGM> generation started #${currentGenerationId}`);
+  console.info(`<st测试/BGM> generation started #${currentGenerationId}`);
 }
 
 removeLegacyTestControls();
-installPersistentBgmPrompt('script_loaded');
+// 事件监听与 watch 的生命周期随 iframe 存活（Tavern Helper 热重载会重建 iframe），
+// pagehide 不逐个注销；若未来改为同窗口复用加载，需要补 disposer 收集。
+errorCatched(installPersistentBgmPrompt)('script_loaded');
 eventOn(tavern_events.CHAT_CHANGED, () => installPersistentBgmPrompt('chat_changed'));
 watch(
   () => bgmSettingsStore.settings.module_enabled.bgm,
@@ -878,7 +888,7 @@ watch(
 eventOn(tavern_events.GENERATION_AFTER_COMMANDS, (type: string, _option: unknown, dry_run: boolean) => {
   if (!isBgmEnabled()) return;
   if (!shouldTrack(type, dry_run)) {
-    console.info('<杠杠-BGM> 跳过非真实生成的歌单排重提示', { type, dry_run });
+    console.info('<st测试/BGM> 跳过非真实生成的歌单排重提示', { type, dry_run });
     return;
   }
   installCurrentBgmPlaylistPrompt();
@@ -889,7 +899,7 @@ eventOn(tavern_events.GENERATION_AFTER_COMMANDS, (type: string, _option: unknown
 eventOn(tavern_events.GENERATION_STARTED, (type: string, _option: unknown, dry_run: boolean) => {
   if (!isBgmEnabled()) return;
   if (!shouldTrack(type, dry_run)) {
-    console.info('<杠杠-BGM> 跳过非真实对话的生成', { type, dry_run });
+    console.info('<st测试/BGM> 跳过非真实对话的生成', { type, dry_run });
     return;
   }
   startGeneration();
@@ -905,7 +915,7 @@ eventOn(tavern_events.STREAM_TOKEN_RECEIVED, (fullText: string) => {
 eventOn(tavern_events.MESSAGE_RECEIVED, (messageId: number, type: string) => {
   if (!isBgmEnabled()) return;
   if (type === 'quiet') {
-    console.info('<杠杠-BGM> 跳过 quiet 消息,不结束 scanner', { messageId });
+    console.info('<st测试/BGM> 跳过 quiet 消息,不结束 scanner', { messageId });
     return;
   }
   let action = activeScanner?.getState().action ?? null;
@@ -916,21 +926,48 @@ eventOn(tavern_events.MESSAGE_RECEIVED, (messageId: number, type: string) => {
   } else if (activeScanner) {
     action = activeScanner.finish();
   }
-  runtimeAudit.stream_finished = { status: 'success', message_id: messageId, error: null };
-  if (action?.type === 'none' && runtimeAudit.marker.status === 'pending') {
-    runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
+  // 只有仍处于 pending 的本轮（正常轮或 skipped 轮）才写 success：
+  // 中止轮已由 finalizeAbortedGenerationAudit 落为 fail，迟到的收尾事件不得覆盖（复审硬伤#2）。
+  if (runtimeAudit.run_id !== 0 && runtimeAudit.stream_finished.status === 'pending') {
+    runtimeAudit.stream_finished = { status: 'success', message_id: messageId, error: null };
+    if (action?.type === 'none' && runtimeAudit.marker.status === 'pending') {
+      runtimeAudit.marker = { status: 'success', matched: false, song: null, singer: null, error: null };
+    }
   }
-  console.info('<杠杠-BGM> stream finished', { generationId, messageId, type, action });
+  console.info('<st测试/BGM> stream finished', { generationId, messageId, type, action });
   activeScanner = null;
   activeGenerationSourceContext = null;
 });
+
+// 中止/滑动复位时把本轮审计字段落为终态（复审硬伤#3：补齐 startGeneration 置 pending 的
+// music_lookup/playlist/audio_played），避免验收读到上一轮悬挂的 pending。
+// 只收 pending 字段，不覆盖上一轮已终态的记录；run_id 为 0 表示从未 startGeneration 过，不动审计。
+function finalizeAbortedGenerationAudit(reason: string) {
+  if (runtimeAudit.run_id === 0) return;
+  if (runtimeAudit.marker.status === 'pending') {
+    runtimeAudit.marker = { status: 'fail', matched: false, song: null, singer: null, error: reason };
+  }
+  if (runtimeAudit.stream_finished.status === 'pending') {
+    runtimeAudit.stream_finished = { status: 'fail', message_id: null, error: reason };
+  }
+  if (runtimeAudit.music_lookup.status === 'pending') {
+    runtimeAudit.music_lookup = { ...runtimeAudit.music_lookup, status: 'fail', error: reason };
+  }
+  if (runtimeAudit.playlist.status === 'pending') {
+    runtimeAudit.playlist = { ...runtimeAudit.playlist, status: 'fail', error: reason };
+  }
+  if (runtimeAudit.audio_played.status === 'pending') {
+    runtimeAudit.audio_played = { status: 'fail', error: reason };
+  }
+}
 
 eventOn(tavern_events.GENERATION_STOPPED, () => {
   activeMusicGenerationId = 0;
   cancelBgmTransition();
   activeScanner = null;
   activeGenerationSourceContext = null;
-  console.info('<杠杠-BGM> scanner reset after generation stopped');
+  finalizeAbortedGenerationAudit('generation stopped before settle');
+  console.info('<st测试/BGM> scanner reset after generation stopped');
 });
 
 eventOn(tavern_events.MESSAGE_SWIPED, (messageId: number) => {
@@ -938,13 +975,14 @@ eventOn(tavern_events.MESSAGE_SWIPED, (messageId: number) => {
   cancelBgmTransition();
   activeScanner = null;
   activeGenerationSourceContext = null;
-  console.info('<杠杠-BGM> scanner reset after swipe', { messageId });
+  finalizeAbortedGenerationAudit('generation reset by swipe');
+  console.info('<st测试/BGM> scanner reset after swipe', { messageId });
 });
 
 function mountBgmSettingsPanel() {
   const $mountPoint = $('#extensions_settings2').first();
   if (!$mountPoint.length) {
-    console.warn('<杠杠-BGM> 未找到 #extensions_settings2，跳过设置面板挂载');
+    console.warn('<st测试/BGM> 未找到 #extensions_settings2，跳过设置面板挂载');
     return;
   }
 
@@ -962,6 +1000,8 @@ function mountBgmSettingsPanel() {
   $(window).off('pagehide.stBgmSettings').on('pagehide.stBgmSettings', cleanup);
 }
 
-$(mountBgmSettingsPanel);
+$(() => {
+  errorCatched(mountBgmSettingsPanel)();
+});
 
-runUnitTests();
+errorCatched(runUnitTests)();

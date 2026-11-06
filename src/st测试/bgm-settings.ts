@@ -19,7 +19,9 @@ const ModuleEnabled = z.object({
 
 const BgmSettings = z
   .object({
-    module_enabled: ModuleEnabled.default({}),
+    // zod 4 的 .default({}) 直接采用字面空对象（内层字段默认不填充）→ module_enabled.bgm 为
+    // undefined，isBgmEnabled() 恒 false。prefault 才会先走 ModuleEnabled 的字段默认（对齐调音台）。
+    module_enabled: ModuleEnabled.prefault({}),
     source_mode: z.enum(['random', 'netease_playlist']).default('random'),
     playlist_id: z.string().default(''),
     playlist_name_overrides: z.record(z.string(), z.string()).default({}),
@@ -41,7 +43,11 @@ export const useBgmSettingsStore = defineStore('st-bgm-settings', () => {
   watch(
     settings,
     nextSettings => {
-      updateVariablesWith(variables => ({ ...variables, ...klona(nextSettings) }), scriptVariableOption);
+      try {
+        updateVariablesWith(variables => ({ ...variables, ...klona(nextSettings) }), scriptVariableOption);
+      } catch (error) {
+        console.warn('<st测试/BGM> 设置写回脚本变量失败', error instanceof Error ? error.message : String(error));
+      }
     },
     { deep: true },
   );
