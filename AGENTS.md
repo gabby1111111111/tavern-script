@@ -12,23 +12,53 @@
 ## Build, Test, and Development Commands
 
 - `pnpm build`：生产构建。
-- `pnpm watch`：开发构建并启用本仓库的实时监听链路；编辑 `E:\tavern-script\tavern-script\src\\<脚本>`
+- `pnpm watch`：开发构建并启用本仓库的实时监听链路；编辑 `E:\tavern-script\tavern-script\src\<脚本>`
   后确认目标 SillyTavern 实例收到更新。
 - `pnpm lint`：运行 ESLint。
+- `pnpm exec eslint "src/<脚本文件夹>"`：只检查本次涉及的脚本；优先用于多脚本仓库中的局部验收。
 - `pnpm format`：格式化 `src/` 下源码。
+
+## Coding Style & Naming Conventions
+
+- 浏览器侧代码使用 TypeScript；界面优先使用 Vue，并沿用仓库现有的 Pinia、Zod 和 Tavern Helper 类型声明。
+- 新增运行时审计对象时使用稳定、脚本专属的 `window.__<name>Audit` 名称；console 前缀必须能定位到具体脚本或模块。
+- 不在浏览器脚本中使用 Node.js 文件系统 API，也不直接写本地文件。
+
+## Testing Guidelines
+
+- 静态验收至少覆盖目标脚本的 ESLint、相关测试和必要的生产构建；只运行了局部命令时应明确范围。
+- Tavern Helper 事件时序、流式输出、远程 API、音频播放和 iframe 显示必须在真实 SillyTavern 中验证；静态构建成功不能替代运行时证据。
+- 人工验收只保留给视觉观感、交互舒适度、内容判断、音频/动画质量和实际工作流体验。
 
 ## Acceptance Rules
 
-非平凡改动使用 `Step N`
-计划；每步分别记录 Codex 命令验收、运行时审计验收和仅保留给人的视觉/交互/音频体验验收。酒馆助手脚本优先使用 `@types`
-声明的 API，并在真实 SillyTavern 中验证事件时序；不得把静态构建结果当作运行时证据。浏览器脚本不得使用 `require('fs')`
-或直接写本地文件。
+非平凡改动使用 `Step N` 计划；每一步都要分别定义并记录：
+
+- Codex 验收：静态检查、测试、构建以及精确到文件或命令的结果。
+- 运行时审计验收：真实 SillyTavern 中的审计对象、console 和 Tavern Helper 事件证据。
+- 人工验收：仅限视觉、交互、内容、音频/动画质量和工作流是否合适。
+
+酒馆助手脚本优先使用 `@types` 声明的 API。无法取得真实运行时证据时，要明确留下验收缺口，不得用静态结果代替。
+
+## Commit & Pull Request Guidelines
+
+- 提交前按 `src/<脚本文件夹>` 限定 diff 和验证范围；不得顺带提交其他脚本、`.mcp.json`、`.vscode/launch.json`、示例构建产物或本地实验备份。
+- 自动 bundle 提交、release tag 与功能提交分开核对。工作区有脏改动时，拉取、rebase 或合并前先检查远端改动是否与本地文件重叠。
+- 提交说明描述用户可感知的功能或修复；发布范围、tag 和实际验证结论必须一致。
 
 ## Agent-Specific Instructions
 
-- 先按 `src/<脚本文件夹>` 和当前 release tag 读取相关证据，不把其他脚本作者的规则合并进来。
-- 需要注入提示词、监听流式事件或播放音频时，使用 Tavern Helper 的 `injectPrompts`、`eventOn`、`tavern_events` 和
-  `playAudio`/`pauseAudio` 等已声明接口；不要凭记忆调用私有 SillyTavern API。
+- 开工前先按目标 `src/<脚本文件夹>`、当前 release tag 和对应日报读取证据；不要把其他脚本作者或其他目录的规则合并进来。
+- 当用户明确授权使用 `luna_worker` 时，主 Sol Agent 负责与用户确认方案、展示委派范围、协调共享文件并最终审核；Luna Worker 负责在已确认的 `src/<脚本文件夹>` 和测试范围内执行。双方共享工作区，但同一文件同一时刻只能有一个写入者。
+- Luna Worker 应在开始、主要修改完成和验证完成时向主 Agent 简短汇报；需要修改 `AGENTS.md`、`package.json`、锁文件、`util/`、`@types/`、构建配置或其他脚本目录时，先暂停并由主 Agent 与用户决定。未经明确授权不得 commit、pull、merge、rebase、push、tag 或发布。
+- `src/杠杠の调音台` 是独立 Tavern Helper 脚本；正式逻辑只从该目录判断，不从 `src/st测试` 自动迁移实验协议。
+- 调音台使用 `injectPrompts`、`eventOn`、`tavern_events` 和 `playAudio`/`pauseAudio` 处理提示注入、流式标记与播放。`STREAM_TOKEN_RECEIVED` 按完整累计快照处理，并保持每次真实生成只解析/执行一次的门控。
+- 调音台的运行时审计对象为 `window.__ganggangConsoleAudit`，console 前缀按模块使用 `<杠杠-调音台>` 和 `<杠杠-BGM>`（环境音模块已随 v0.4.0 整体移除，`<杠杠-环境音>` 前缀与审计 `ambient` 字段不再存在，出现即视为残留）；验收至少核对 `run_id`、`generation`、`prompt_injection`、`playlist_prompt`、`marker`、`stream_finished`、`music_lookup`、`playlist`、`audio_played` 和 `last_error`。
+- `src/杠杠の生图机` 是独立 Tavern Helper 脚本；不得把其他 `src` 脚本或旧 JSON 整体迁入。
+- `src/杠杠の生图机` 的生成图片默认只保存在当前页面 JavaScript 内存中，使用 `chatId + messageId + swipeId + imageIndex` 隔离；用户点击确认镜头时，该底图自动上传至服务器图库专用文件夹 `杠杠の生图机`（SillyTavern `/api/images/*`），索引（相对路径与确认状态，不含图片数据）存于脚本变量用于刷新后恢复。图片与 Base64 仍不得写入正文、IndexedDB、聊天/消息变量、`localStorage` 或 `image2store://`；候选、重绘中间版与未确认底图仍只在页面内存。删除楼层或已确认插图时同步删除服务器文件，失败仅警告。
+- 生图机的运行时审计对象为 `window.__storyImageAudit`，日志前缀为 `<杠杠の生图机>`；验收至少核对 `run_id`、`lifecycle`、`injection`、`generation`、`markers`、`tasks`、`gift`、`cache` 和 `last_error`。
+- 生图机的审计、正文和日志不得包含 API Key、Base64、图片地址、完整响应、完整聊天记录或大段提示词；图生图、参考图上传和不同 API 模式必须使用真实 API 单独验收。
+- 需要调用 Tavern Helper 能力时优先使用 `@types` 中已声明的高层接口；不要凭记忆调用私有 SillyTavern API 或用 STScript 绕开现有类型接口。
 - `src/st测试` 的脚本保持可逆、低副作用，不默认写聊天变量、MVU 状态或远程资源。
 - `src/st测试` 的运行时审计对象为 `window.__stBgmStreamAudit`；验收至少读取 `run_id`、
   `marker.status`、`marker.matched`、`marker.song`、`marker.singer`、`stream_finished.status` 和
