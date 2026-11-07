@@ -1,5 +1,8 @@
 node_modules
+<<<<<<< HEAD
 .codegraph/
+=======
+>>>>>>> f1453c36c93c0f091171be522b45a09fe280a2bc
 
 .DS_Store
 Thumbs.db
@@ -12,6 +15,7 @@ pnpm-debug.log*
 
 auto-imports.d.ts
 components.d.ts
+<<<<<<< HEAD
 
 # 本机私有配置：内网地址/本地端口等不入库（AGENTS.md 提交规则）
 .mcp.json
@@ -31,3 +35,5 @@ dist/前端界面示例/
 dist/流式楼层界面示例/
 dist/脚本示例/
 dist/角色卡示例/
+=======
+>>>>>>> f1453c36c93c0f091171be522b45a09fe280a2bc
