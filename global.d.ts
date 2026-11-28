@@ -10,10 +10,13 @@ declare module '*.css' {
   const content: unknown;
   export default content;
 }
+<<<<<<< HEAD
 declare module '*.scss' {
   const content: unknown;
   export default content;
 }
+=======
+>>>>>>> cf09cb02c590de46d565966e950150bafcf24c54
 declare module '*.html' {
   const content: string;
   export default content;
